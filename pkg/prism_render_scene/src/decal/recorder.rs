@@ -1,10 +1,9 @@
 //! SceneFabric Decal producer/recorder.
 
-use bevy_app::SubApp;
 use bevy_ecs::{prelude::*, schedule::IntoScheduleConfigs};
 use bevy_render::{
-    render_resource::{BindGroup, ComputePipeline, PipelineCache},
-    renderer::{RenderContext, RenderDevice},
+    render_resource::{BindGroup, ComputePipeline},
+    renderer::RenderDevice,
 };
 use bytemuck::bytes_of;
 use prism_render_architecture::render_fabric::{
@@ -14,13 +13,11 @@ use prism_render_architecture::render_fabric::{
 use prism_render_driver::{
     BufferDescriptor, BufferState, BufferUsages, Extent3d, RenderQueue as _,
 };
-use prism_render_graph::RecordedGraph;
 use prism_render_shading::gi::decal::DecalProjector;
 use std::sync::Arc;
 use thiserror::Error;
 
 use crate::{
-    completion::GpuCompletionTracker,
     fabric_domains::{
         build_decal_domain_items,
         consumers::prepare_decal_visibility,
@@ -184,8 +181,13 @@ impl<'pipeline> DecalResolveBatchAdapter<'pipeline> {
     pub(crate) fn append_to<'a, 'lease>(
         &'a self,
         batch: &mut SceneFabricCoordinatorInput<'a, 'lease>,
-        object_resources: &mut Vec<SceneFabricObjectResource<'a, 'a>>,
-    ) -> Result<(), DecalResolveBatchError> {
+        object_resources: &mut Vec<SceneFabricObjectResource<'a, 'lease>>,
+    ) -> Result<(), DecalResolveBatchError>
+    where
+        'pipeline: 'a,
+        'pipeline: 'lease,
+        'a: 'lease,
+    {
         let mut object_bindings =
             Vec::with_capacity(self.publications.len() * DECAL_ABI_BUFFER_COUNT);
         for publication in &self.publications {
@@ -297,19 +299,13 @@ pub(crate) struct DecalResolveBatchSubmission<'pipeline> {
 /// resource without manufacturing a `'static` adapter reference.
 pub(crate) struct DecalResolveBatchLease {
     _publications: Vec<DecalResolvePublication>,
-    _bind_groups: Vec<BindGroup>,
 }
 
 impl DecalResolveBatchLease {
     pub(crate) fn from_adapter<'pipeline>(adapter: DecalResolveBatchAdapter<'pipeline>) -> Self {
-        let DecalResolveBatchAdapter {
-            publications,
-            bind_groups,
-            ..
-        } = adapter;
+        let DecalResolveBatchAdapter { publications, .. } = adapter;
         Self {
             _publications: publications,
-            _bind_groups: bind_groups,
         }
     }
 }
@@ -681,19 +677,7 @@ impl DecalPreparedResources {
 #[derive(Resource, Default)]
 pub(crate) struct DecalResolveHost {
     pending: Vec<DecalResolvePublication>,
-    in_flight: Vec<DecalInFlightPublication>,
     last_error: Option<String>,
-    last_recorded_frame: Option<u64>,
-}
-
-/// Keeps both graph allocations and producer-owned domain leases alive until
-/// the actual Bevy host submission containing the Decal commands completes.
-struct DecalInFlightPublication {
-    completion: prism_render_architecture::gpu_scene::GpuCompletionValue,
-    // The leading underscores are intentional: these fields are the lifetime
-    // anchors for graph allocations and producer-owned buffer leases.
-    _recorded: Option<RecordedGraph>,
-    _publications: Vec<DecalResolvePublication>,
 }
 
 impl DecalResolveHost {
@@ -738,66 +722,13 @@ impl DecalResolveHost {
         Ok(core::mem::take(&mut self.pending))
     }
 
-    fn record_success(&mut self, frame: u64) {
-        self.last_error = None;
-        self.last_recorded_frame = Some(frame);
-    }
-
     fn record_error(&mut self, error: impl Into<String>) {
         self.last_error = Some(error.into());
-        self.last_recorded_frame = None;
     }
 
     fn clear_without_work(&mut self) {
         self.pending.clear();
         self.last_error = None;
-    }
-
-    fn retain_in_flight(
-        &mut self,
-        completion: prism_render_architecture::gpu_scene::GpuCompletionValue,
-        recorded: RecordedGraph,
-        publications: Vec<DecalResolvePublication>,
-    ) {
-        self.in_flight.push(DecalInFlightPublication {
-            completion,
-            _recorded: Some(recorded),
-            _publications: publications,
-        });
-    }
-
-    fn retire_completed(
-        &mut self,
-        completed: prism_render_architecture::gpu_scene::GpuCompletionValue,
-    ) {
-        self.in_flight.retain(|entry| entry.completion > completed);
-    }
-
-    #[cfg(test)]
-    fn last_error(&self) -> Option<&str> {
-        self.last_error.as_deref()
-    }
-
-    #[cfg(test)]
-    fn last_recorded_frame(&self) -> Option<u64> {
-        self.last_recorded_frame
-    }
-
-    #[cfg(test)]
-    fn arm_test_completion(
-        &mut self,
-        completion: prism_render_architecture::gpu_scene::GpuCompletionValue,
-    ) {
-        self.in_flight.push(DecalInFlightPublication {
-            completion,
-            _recorded: None,
-            _publications: Vec::new(),
-        });
-    }
-
-    #[cfg(test)]
-    fn in_flight_len(&self) -> usize {
-        self.in_flight.len()
     }
 }
 
@@ -859,6 +790,7 @@ pub(crate) fn publish_decal_resolve_from_owner(
         host.clear_without_work();
         return;
     }
+    let mut publications = Vec::with_capacity(owner.len());
     for entry in owner.iter() {
         let identity = entry.identity();
         if !frame.items().iter().any(|item| {
@@ -866,8 +798,11 @@ pub(crate) fn publish_decal_resolve_from_owner(
                 && item.domain == RenderDomain::Decal
                 && item.history_key == identity.history_key
         }) {
-            host.record_error("Decal owner has no matching shared-frame semantic items");
-            continue;
+            let error = "Decal owner has no matching shared-frame semantic items";
+            prepared.clear();
+            host.pending.clear();
+            host.record_error(error);
+            return;
         }
         let projector = entry.projector();
         let material = entry.material();
@@ -879,20 +814,27 @@ pub(crate) fn publish_decal_resolve_from_owner(
             receiver: &receiver,
         }];
         let Ok(items) = build_decal_domain_items(&semantic_input) else {
-            host.record_error("Decal owner failed semantic item construction");
-            continue;
+            let error = "Decal owner failed semantic item construction";
+            prepared.clear();
+            host.pending.clear();
+            host.record_error(error);
+            return;
         };
         let Some(prepared_publication) = (match prepared.take_for(frame.frame(), identity) {
             Ok(publication) => publication,
             Err(error) => {
+                prepared.clear();
+                host.pending.clear();
                 host.record_error(error);
-                continue;
+                return;
             }
         }) else {
-            host.record_error(
-                "Decal six-resource PrepareResources publication is unavailable; resolve skipped",
-            );
-            continue;
+            let error =
+                "Decal six-resource PrepareResources publication is unavailable; resolve skipped";
+            prepared.clear();
+            host.pending.clear();
+            host.record_error(error);
+            return;
         };
         let admitted_items: Vec<_> = prepared_publication
             .domain_view
@@ -911,21 +853,28 @@ pub(crate) fn publish_decal_resolve_from_owner(
             })
             .collect();
         if admitted_items != expected_resources {
-            host.record_error(
-                "Decal prepared resources do not exactly cover the owner's semantic resource set",
-            );
-            continue;
+            let error =
+                "Decal prepared resources do not exactly cover the owner's semantic resource set";
+            prepared.clear();
+            host.pending.clear();
+            host.record_error(error);
+            return;
         }
-        let publication = DecalResolvePublication::new(
+        publications.push(DecalResolvePublication::new(
             prepared_publication.frame,
             prepared_publication.extent,
             prepared_publication.identity,
             items,
             prepared_publication.domain_view,
             prepared_publication.workgroups,
-        );
+        ));
+    }
+    for publication in publications {
         if let Err(error) = host.publish(publication) {
+            prepared.clear();
+            host.pending.clear();
             host.record_error(error);
+            return;
         }
     }
 }
@@ -1067,119 +1016,9 @@ pub(crate) fn prepare_decal_resolves<'a>(
     Ok(runtime)
 }
 
-/// Records all object-scoped Decal publications into one SceneFabric graph.
-///
-/// One host command buffer owns the whole fan-out. The returned publication
-/// vector is retained as one completion-gated unit so removal or resize of a
-/// later frame cannot recycle any object buffer still referenced by this
-/// submission.
-pub(crate) fn record_decal_resolves(
-    scene: &SceneFabric,
-    rhi: &SceneRhi,
-    device: &RenderDevice,
-    cache: &PipelineCache,
-    pipeline: &DecalResolvePipeline,
-    publications: Vec<DecalResolvePublication>,
-    context: &mut RenderContext,
-) -> Result<(RecordedGraph, Vec<DecalResolvePublication>), DecalResolveError> {
-    let native_pipeline = cache
-        .get_compute_pipeline(pipeline.resolve())
-        .ok_or(DecalResolveError::PipelineNotReady)?;
-    let bind_groups = publications
-        .iter()
-        .map(|publication| {
-            create_decal_bind_group(rhi, device, pipeline, &publication.domain_view)
-                .map_err(DecalResolveError::BindGroup)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let runtime = prepare_decal_resolves(scene, rhi, native_pipeline, &publications, &bind_groups)?;
-    Ok((runtime.record_into(rhi, context), publications))
-}
-
-/// Real RenderApp/Core3d consumer for the Decal mailbox.
-///
-/// The function is intentionally exposed as an installer instead of being
-/// silently registered from a pipeline-init system. That keeps schedule
-/// ownership explicit and lets the top-level plugin install it at the same
-/// point as the other Fabric domains.
-pub(crate) fn install_decal_resolve(render_app: &mut SubApp) {
-    render_app.init_resource::<DecalResolveHost>();
-    render_app.init_resource::<DecalPreparedResources>();
-    render_app.add_systems(
-        bevy_core_pipeline::Core3d,
-        record_decal_resolve_system.before(bevy_core_pipeline::Core3dSystems::MainPass),
-    );
-}
-
-fn record_decal_resolve_system(
-    mut host: ResMut<DecalResolveHost>,
-    completion: Res<GpuCompletionTracker>,
-    frame: Res<crate::fabric_frame::RenderFabricFrame>,
-    scene: Res<SceneFabric>,
-    rhi: Res<SceneRhi>,
-    device: Res<RenderDevice>,
-    cache: Res<PipelineCache>,
-    pipeline: Res<DecalResolvePipeline>,
-    mut context: RenderContext,
-) {
-    let publications = match host.take_for_frame(frame.frame()) {
-        Ok(publication) => publication,
-        Err(error) => {
-            host.record_error(error);
-            return;
-        }
-    };
-    if publications.is_empty() {
-        return;
-    }
-    let frame_number = publications[0].frame;
-    match record_decal_resolves(
-        scene.as_ref(),
-        rhi.as_ref(),
-        device.as_ref(),
-        cache.as_ref(),
-        pipeline.as_ref(),
-        publications,
-        &mut context,
-    ) {
-        Ok((recorded, publications)) => {
-            host.record_success(frame_number);
-            host.retain_in_flight(completion.next_submission_value(), recorded, publications);
-        }
-        Err(error) => host.record_error(error.to_string()),
-    }
-}
-
-/// Releases Decal graph allocations and producer-owned resource leases only
-/// after the host queue confirms completion of the submission containing them.
-pub(crate) fn retire_decal_resolve_resources(
-    mut host: ResMut<DecalResolveHost>,
-    completion: Res<GpuCompletionTracker>,
-) {
-    host.retire_completed(completion.completed_value());
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use prism_render_architecture::gpu_scene::GpuCompletionValue;
-
-    #[test]
-    fn completion_gated_retirement_keeps_decal_leases_until_and_only_until_completion() {
-        let mut host = DecalResolveHost::default();
-        host.arm_test_completion(GpuCompletionValue(7));
-        assert_eq!(host.in_flight_len(), 1);
-
-        host.retire_completed(GpuCompletionValue(6));
-        assert_eq!(host.in_flight_len(), 1);
-
-        host.retire_completed(GpuCompletionValue(7));
-        assert_eq!(host.in_flight_len(), 0);
-
-        // Retirement is idempotent; a later poll cannot retire the same batch twice.
-        host.retire_completed(GpuCompletionValue(8));
-        assert_eq!(host.in_flight_len(), 0);
-    }
 
     #[test]
     fn decal_batch_contract_keeps_each_abi_slot_object_scoped() {

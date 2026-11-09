@@ -166,6 +166,8 @@ impl Plugin for PrismGpuScenePlugin {
             .init_resource::<SceneFabricCoordinatorParticleCompletions>()
             .init_resource::<SceneFabricCoordinatorWaterPacket>()
             .init_resource::<crate::particle::ParticleSceneFabricHost>()
+            .init_resource::<crate::decal::DecalResolveHost>()
+            .init_resource::<crate::decal::DecalPreparedResources>()
             .init_resource::<crate::fabric_domains::owners::HairRenderWorldOwner>()
             .init_resource::<crate::fabric_domains::owners::VolumeRenderWorldOwner>()
             .init_resource::<crate::fabric_domains::owners::DecalRenderWorldOwner>()
@@ -244,6 +246,12 @@ impl Plugin for PrismGpuScenePlugin {
                         .in_set(crate::fabric_frame::RenderFabricSystems::BuildFrame),
                     begin_scene_fabric_coordinator_frame
                         .after(crate::fabric_frame::build_render_fabric_frame_system)
+                        .in_set(RenderSystems::PrepareResources),
+                    crate::decal::prepare_decal_resources_from_owner
+                        .after(crate::fabric_frame::build_render_fabric_frame_system)
+                        .in_set(RenderSystems::PrepareResources),
+                    crate::decal::publish_decal_resolve_from_owner
+                        .after(crate::decal::prepare_decal_resources_from_owner)
                         .in_set(RenderSystems::PrepareResources),
                     prepare_scene_fabric_hair
                         .after(begin_scene_fabric_coordinator_frame)
@@ -648,6 +656,8 @@ fn record_scene_fabric_coordinator(params: SceneFabricCoordinatorParams) {
         }
     }
 
+    let mut water_appended = false;
+    let mut water_history_reset = false;
     if let (Some(bodies), Some(pipelines), Some(spray_pipelines)) = (
         water_packet.0.as_ref(),
         water_pipelines.as_deref(),
@@ -665,13 +675,8 @@ fn record_scene_fabric_coordinator(params: SceneFabricCoordinatorParams) {
             );
             match result {
                 Ok(result) => {
-                    if result.requires_history_reset {
-                        if let Some(body) = bodies.bodies.first() {
-                            if let Some(spray) = body.spray.as_ref() {
-                                spray_history.reset_missing(context.command_encoder(), spray);
-                            }
-                        }
-                    }
+                    water_appended = true;
+                    water_history_reset = result.requires_history_reset;
                 }
                 Err(error) => {
                     status.last_error = Some(format!("Water coordinator batch rejected: {error}"));
@@ -682,31 +687,29 @@ fn record_scene_fabric_coordinator(params: SceneFabricCoordinatorParams) {
         }
     }
 
-    let composition_appended = if let (Some(responses), Some(target)) =
-        (responses.as_deref_mut(), response_target)
-    {
-        match crate::shading::composition::append_composition_fabric_parts(
-            responses,
-            composition_pipelines.as_ref(),
-            target,
-            frame.as_ref(),
-            &mut batch,
-            &mut producer_templates,
-            shading_settings.frame_index,
-        ) {
-            Ok(true) => true,
-            Ok(false) => false,
-            Err(error) => {
-                status.last_error = Some(format!(
-                    "Composition coordinator batch rejected: {error}"
-                ));
-                bevy_log::error!("Composition coordinator batch rejected: {error}");
-                return;
+    let composition_appended =
+        if let (Some(responses), Some(target)) = (responses.as_deref_mut(), response_target) {
+            match crate::shading::composition::append_composition_fabric_parts(
+                responses,
+                composition_pipelines.as_ref(),
+                target,
+                frame.as_ref(),
+                &mut batch,
+                &mut producer_templates,
+                shading_settings.frame_index,
+            ) {
+                Ok(true) => true,
+                Ok(false) => false,
+                Err(error) => {
+                    status.last_error =
+                        Some(format!("Composition coordinator batch rejected: {error}"));
+                    bevy_log::error!("Composition coordinator batch rejected: {error}");
+                    return;
+                }
             }
-        }
-    } else {
-        false
-    };
+        } else {
+            false
+        };
 
     let taa_producer = if shading_settings.enable_taa {
         let Some(resolve) = cache.get_compute_pipeline(taa_pipeline.resolve()) else {
@@ -743,6 +746,65 @@ fn record_scene_fabric_coordinator(params: SceneFabricCoordinatorParams) {
     } else {
         None
     };
+
+    if water_appended {
+        let Some(bodies) = water_packet.0.as_ref() else {
+            status.last_error =
+                Some("Water history was requested without a resident packet".into());
+            bevy_log::error!("Water history was requested without a resident packet");
+            return;
+        };
+
+        // Stage exact lag-1 publication only after every producer has
+        // validated. A rejected earlier batch must not leave pending history
+        // that can poison the next frame.
+        let mut spray_bindings = Vec::with_capacity(bodies.bodies.len());
+        for body in &bodies.bodies {
+            let spray = body
+                .spray
+                .as_ref()
+                .expect("water coordinator requires a prepared spray producer");
+            let first_live_frame = spray.producer_binding.binding.frame.saturating_sub(1);
+            scene_history
+                .lifecycle
+                .enqueue_retirement(
+                    spray.owner,
+                    prism_render_architecture::render_fabric::PARTICLE_SPRAY_RESOURCE,
+                    first_live_frame,
+                )
+                .expect("water spray history retirement must be staged");
+            spray_bindings.push(spray.producer_binding);
+        }
+        scene_history
+            .lifecycle
+            .enqueue(spray_bindings)
+            .expect("water spray history publication must be staged");
+
+        let encoder = context.command_encoder();
+        for body in &bodies.bodies {
+            let spray = body
+                .spray
+                .as_ref()
+                .expect("water coordinator requires a prepared spray producer");
+            if water_history_reset {
+                spray_history.reset_missing(encoder, spray);
+            }
+        }
+
+        // Preserve the previous displacement before the water SurfaceMesh
+        // dispatch overwrites the current buffer. This copy is part of the
+        // same coordinator submission and cannot retire early.
+        for body in &bodies.bodies {
+            let size = body.buffers.surface_mesh_displacement.size();
+            encoder.copy_buffer_to_buffer(
+                &body.buffers.surface_mesh_displacement,
+                0,
+                &body.buffers.surface_mesh_displacement_prev,
+                0,
+                size,
+            );
+        }
+    }
 
     if batch.pass_count() == 0 {
         if let Some(input) = particle_input {

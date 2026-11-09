@@ -552,36 +552,36 @@ impl ShadingExecutionPlan {
     }
 }
 
-pub(crate) fn run_shading_pre_resolve_driver(world: &mut World) {
+pub(crate) fn run_scene_fabric_pre_resolve(world: &mut World) {
     ShadingExecutionPlan::with_resource(world, |world, mut plan| {
         // Reset even when this frame has no surviving pre-resolve passes.
         plan.begin_frame();
         if let Err(error) = plan.run_driver_phase(world, ShadingExecutionPhase::PreResolve) {
-            panic!("shading pre-resolve execution failed: {error}");
+            panic!("SceneFabric pre-resolve execution failed: {error}");
         }
     });
 }
 
-pub(crate) fn run_shading_resolve_driver(world: &mut World) {
+pub(crate) fn run_scene_fabric_resolve(world: &mut World) {
     ShadingExecutionPlan::with_resource(world, |world, mut plan| {
         if let Err(error) = plan.run_driver_phase(world, ShadingExecutionPhase::Resolve) {
-            panic!("shading resolve execution failed: {error}");
+            panic!("SceneFabric resolve execution failed: {error}");
         }
     });
 }
 
-pub(crate) fn run_shading_response_driver(world: &mut World) {
+pub(crate) fn run_scene_fabric_response(world: &mut World) {
     ShadingExecutionPlan::with_resource(world, |world, mut plan| {
         if let Err(error) = plan.run_driver_phase(world, ShadingExecutionPhase::Response) {
-            panic!("shading response execution failed: {error}");
+            panic!("SceneFabric response execution failed: {error}");
         }
     });
 }
 
-pub(crate) fn run_shading_post_driver(world: &mut World) {
+pub(crate) fn run_scene_fabric_post(world: &mut World) {
     ShadingExecutionPlan::with_resource(world, |world, mut plan| {
         if let Err(error) = plan.run_driver_phase(world, ShadingExecutionPhase::Post) {
-            panic!("shading post execution failed: {error}");
+            panic!("SceneFabric post execution failed: {error}");
         }
     });
 }
@@ -602,7 +602,8 @@ mod tests {
         },
     };
     use prism_render_graph::frame_graph::{
-        PassDescriptor, QueueClass, ResourceDescriptor, ResourceLifetime,
+        PassDescriptor, PassId, QueueClass, ResourceAccess, ResourceDescriptor, ResourceId,
+        ResourceLifetime,
     };
 
     fn test_graph() -> GpuFrameGraphBuilder {
@@ -629,11 +630,11 @@ mod tests {
             name: "first".into(),
             queue: QueueClass::Compute,
             accesses: vec![
-                prism_render_graph::frame_graph::ResourceAccess {
+                ResourceAccess {
                     resource: input,
                     kind: AccessKind::SampledRead,
                 },
-                prism_render_graph::frame_graph::ResourceAccess {
+                ResourceAccess {
                     resource: intermediate,
                     kind: AccessKind::StorageWrite,
                 },
@@ -650,16 +651,16 @@ mod tests {
             name: "last".into(),
             queue: QueueClass::Compute,
             accesses: vec![
-                prism_render_graph::frame_graph::ResourceAccess {
+                ResourceAccess {
                     resource: intermediate,
                     kind: AccessKind::StorageRead,
                 },
-                prism_render_graph::frame_graph::ResourceAccess {
+                ResourceAccess {
                     resource: output,
                     kind: AccessKind::StorageWrite,
                 },
             ],
-            depends_on: vec![prism_render_graph::frame_graph::PassId(0)],
+            depends_on: vec![PassId(0)],
         });
         graph
     }
@@ -874,19 +875,19 @@ mod tests {
     fn driver_schedule() -> Schedule {
         let mut schedule = Schedule::default();
         schedule.add_systems((
-            run_shading_pre_resolve_driver.before(TestCore3dSystems::MainPass),
-            run_shading_resolve_driver
-                .after(run_shading_pre_resolve_driver)
+            run_scene_fabric_pre_resolve.before(TestCore3dSystems::MainPass),
+            run_scene_fabric_resolve
+                .after(run_scene_fabric_pre_resolve)
                 .before(TestCore3dSystems::MainPass),
             trace_water_boundary
                 .in_set(TestCore3dSystems::WaterDraw)
                 .after(TestCore3dSystems::MainPass),
-            run_shading_response_driver
-                .after(run_shading_resolve_driver)
+            run_scene_fabric_response
+                .after(run_scene_fabric_resolve)
                 .after(TestCore3dSystems::MainPass)
                 .after(TestCore3dSystems::WaterDraw)
-                .before(run_shading_post_driver),
-            run_shading_post_driver.after(run_shading_response_driver),
+                .before(run_scene_fabric_post),
+            run_scene_fabric_post.after(run_scene_fabric_response),
         ));
         schedule
     }
@@ -978,10 +979,10 @@ mod tests {
         let mut world = World::new();
         world.init_resource::<ExecutionTrace>();
         world.insert_resource(plan);
-        run_shading_pre_resolve_driver(&mut world);
-        run_shading_resolve_driver(&mut world);
-        run_shading_response_driver(&mut world);
-        run_shading_post_driver(&mut world);
+        run_scene_fabric_pre_resolve(&mut world);
+        run_scene_fabric_resolve(&mut world);
+        run_scene_fabric_response(&mut world);
+        run_scene_fabric_post(&mut world);
         assert_eq!(world.resource::<ExecutionTrace>().0, expected);
     }
 
@@ -1017,10 +1018,10 @@ mod tests {
             world.init_resource::<ExecutionTrace>();
             world.insert_resource(driver_fixture(&order));
             for _ in 0..2 {
-                run_shading_pre_resolve_driver(&mut world);
-                run_shading_resolve_driver(&mut world);
-                run_shading_response_driver(&mut world);
-                run_shading_post_driver(&mut world);
+                run_scene_fabric_pre_resolve(&mut world);
+                run_scene_fabric_resolve(&mut world);
+                run_scene_fabric_response(&mut world);
+                run_scene_fabric_post(&mut world);
             }
             assert_eq!(world.resource::<ExecutionTrace>().0, expected.repeat(2));
         }
@@ -1540,8 +1541,8 @@ mod tests {
         graph.add_pass(PassDescriptor {
             name: "first".into(),
             queue: QueueClass::Compute,
-            accesses: vec![prism_render_graph::frame_graph::ResourceAccess {
-                resource: prism_render_graph::frame_graph::ResourceId(0),
+            accesses: vec![ResourceAccess {
+                resource: ResourceId(0),
                 kind: AccessKind::StorageRead,
             }],
             depends_on: vec![],

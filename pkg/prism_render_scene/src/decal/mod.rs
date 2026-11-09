@@ -22,8 +22,7 @@ pub(crate) use pipeline::init_decal_resolve_pipeline;
 pub(crate) use pipeline::DecalResolvePipeline;
 #[allow(unused_imports)]
 pub(crate) use recorder::{
-    install_decal_resolve, prepare_decal_resources_from_owner, publish_decal_resolve_from_owner,
-    retire_decal_resolve_resources, DecalPreparedResources, DecalResolveBatchAdapter,
-    DecalResolveBatchError, DecalResolveBatchLease, DecalResolveBatchSubmission, DecalResolveHost,
-    DecalResolvePublication,
+    prepare_decal_resources_from_owner, publish_decal_resolve_from_owner, DecalPreparedResources,
+    DecalResolveBatchAdapter, DecalResolveBatchError, DecalResolveBatchLease,
+    DecalResolveBatchSubmission, DecalResolveHost, DecalResolvePublication,
 };

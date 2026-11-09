@@ -20,11 +20,12 @@ use prism_render_architecture::render_fabric::{
 };
 
 use crate::gpu::fabric::SceneFabric;
-
-#[path = "fabric_runtime.rs"]
-mod fabric_runtime;
-
-use self::fabric_runtime::{init_fabric_composition_runtime, observe_fabric_composition_resources};
+use crate::scene_lighting::{
+    extract_cluster_view, prepare_cluster_bind_group, prepare_light_bind_group,
+    rebuild_cluster_buffers, rebuild_light_buffers, write_cluster_buffers, write_light_buffers,
+    ClusterBindGroup, ClusterConfig, ClusterGpuBuffers, ExtractedClusterView, LightBindGroup,
+    LightGpuBuffers, SceneLightInputs,
+};
 
 use super::{
     ao::{
@@ -79,8 +80,8 @@ use super::{
         PrismDofSettings,
     },
     execution::{
-        run_shading_post_driver, run_shading_pre_resolve_driver, run_shading_resolve_driver,
-        run_shading_response_driver, ExternalExecutionSite, SelectedVariantRequirement,
+        run_scene_fabric_post, run_scene_fabric_pre_resolve, run_scene_fabric_resolve,
+        run_scene_fabric_response, ExternalExecutionSite, SelectedVariantRequirement,
         ShadingExecutionPlan, ShadingExecutorBinding, ShadingExternalExecutors, ShadingPassBinding,
     },
     exposure::{
@@ -106,10 +107,10 @@ use super::{
         prepare_hatching_textures, PrismHatchingSettings,
     },
     ibl::{
-        dfg_lut_precompute_pass, env_prefilter_precompute_pass, extract_ibl_source,
-        init_brdf_lut_pipeline, init_dfg_lut_texture, init_env_prefilter_pipeline,
-        init_prefiltered_env_map, prepare_dfg_lut_bind_group, prepare_env_prefilter_bind_groups,
-        EnvPrefilterBindGroups, ExtractedIblSource,
+        dfg_lut_precompute_pass, env_prefilter_precompute_pass, init_brdf_lut_pipeline,
+        init_dfg_lut_texture, init_env_prefilter_pipeline, init_prefiltered_env_map,
+        prepare_dfg_lut_bind_group, prepare_env_prefilter_bind_groups, EnvPrefilterBindGroups,
+        IblSceneInput,
     },
     kuwahara::{
         init_kuwahara_pipeline, kuwahara_pass, prepare_kuwahara_bind_groups,
@@ -123,6 +124,7 @@ use super::{
         init_light_routing_pipeline, light_routing_cull_pass, prepare_light_routing_bind_groups,
         prepare_light_routing_buffers, PrismLightRoutingSettings,
     },
+    lobe_budget::{prepare_lobe_sample_budget, LobeSampleBudgetGpu},
     motion_blur::{
         init_motion_blur_pipeline, motion_blur_pass, prepare_motion_blur_bind_groups,
         prepare_motion_blur_textures, PrismMotionBlurSettings,
@@ -155,12 +157,11 @@ use super::{
         PrismShadingSettings, ShadingFrameGraph,
     },
     shadow::{
-        ensure_shadow_atlas, extract_shadows, init_shadow_depth_pipeline,
-        prepare_shadow_bind_group, prepare_shadow_depth_uniform, queue_shadow_depth,
-        rebuild_shadow_buffers, register_shadow_depth_shader, shadow_depth_pass,
-        write_shadow_buffers, ExtractedShadows, PrismShadowSettings, ShadowAtlas,
-        ShadowAtlasConfig, ShadowBindGroup, ShadowDepthDrawList, ShadowDepthPipeline,
-        ShadowDepthViewOffsets, ShadowDepthViewUniform, ShadowGpuBuffers,
+        ensure_shadow_atlas, init_shadow_depth_pipeline, prepare_shadow_bind_group,
+        prepare_shadow_depth_uniform, queue_shadow_depth, rebuild_shadow_buffers,
+        register_shadow_depth_shader, shadow_depth_pass, write_shadow_buffers, ExtractedShadows,
+        PrismShadowSettings, ShadowAtlas, ShadowAtlasConfig, ShadowBindGroup, ShadowDepthDrawList,
+        ShadowDepthPipeline, ShadowDepthViewOffsets, ShadowDepthViewUniform, ShadowGpuBuffers,
         DEFAULT_SHADOW_ATLAS_LAYERS, DEFAULT_SHADOW_ATLAS_RESOLUTION,
     },
     sky::multiscatter::{
@@ -213,7 +214,7 @@ use super::{
     },
     taa::{
         init_taa_resolve_pipeline, prepare_taa_bind_groups, prepare_taa_jitter,
-        prepare_taa_textures, taa_resolve_pass,
+        prepare_taa_textures, taa_resolve_pass, TaaHistoryCache,
     },
     tonemap::{
         init_tonemap_pipeline, prepare_tonemap_bind_groups, prepare_tonemap_textures, tonemap_pass,
@@ -233,11 +234,11 @@ use super::{
         vignette_pass, PrismVignetteSettings,
     },
     virtual_shadow::{
-        bridge_vsm_view_resources, collect_vsm_page_readback, extract_vsm_primary_light,
-        init_vsm_caster_depth_pipeline, init_vsm_page_mark_pipeline,
-        init_vsm_receiver_gen_pipeline, map_submitted_vsm_page_readback,
-        prepare_vsm_caster_depth_targets, prepare_vsm_caster_depth_views,
-        prepare_vsm_page_mark_bind_groups, prepare_vsm_page_requests, prepare_vsm_physical_atlas,
+        bridge_vsm_view_resources, collect_vsm_page_readback, init_vsm_caster_depth_pipeline,
+        init_vsm_page_mark_pipeline, init_vsm_receiver_gen_pipeline,
+        map_submitted_vsm_page_readback, prepare_vsm_caster_depth_targets,
+        prepare_vsm_caster_depth_views, prepare_vsm_page_mark_bind_groups,
+        prepare_vsm_page_requests, prepare_vsm_physical_atlas,
         prepare_vsm_receiver_gen_bind_groups, prepare_vsm_receiver_resources,
         queue_vsm_caster_depth, register_vsm_caster_depth_shader, request_vsm_page_readback,
         vsm_caster_depth_pass, vsm_mark_pages_pass, vsm_receiver_gen_pass,
@@ -247,10 +248,11 @@ use super::{
         VsmPhysicalAtlasCache, VsmPrimaryLight, VsmReceiverBufferCache,
     },
     volumetric_clouds::{
-        dispatch_volumetric_clouds, init_volumetric_cloud_pipelines,
-        prepare_volumetric_cloud_domain, prepare_volumetric_cloud_domain_bind_groups,
-        prepare_volumetric_cloud_view_bind_groups, prepare_volumetric_cloud_views,
-        PrismVolumetricCloudsSettings, VolumetricCloudViewCache,
+        composite_volumetric_clouds, dispatch_volumetric_clouds, init_cloud_composite_pipeline,
+        init_volumetric_cloud_pipelines, prepare_volumetric_cloud_domain,
+        prepare_volumetric_cloud_domain_bind_groups, prepare_volumetric_cloud_view_bind_groups,
+        prepare_volumetric_cloud_views, register_volumetric_cloud_extraction,
+        VolumetricCloudViewCache,
     },
     volumetrics::{
         init_volumetrics_pipeline, prepare_volumetrics_bind_groups, prepare_volumetrics_resources,
@@ -547,8 +549,8 @@ impl Plugin for PrismShadingPlugin {
         // Main-world page producers fill this explicit input seam. The render
         // world receives only a cloned frame snapshot during extraction.
         app.init_resource::<super::texel_cache::ShadeDispatchInputs>();
+        register_volumetric_cloud_extraction(app);
         embedded_asset!(app, "../shaders/visibility_raster.wesl");
-        embedded_asset!(app, "../shaders/material_classification.wesl");
         embedded_asset!(app, "../shaders/brdf.wesl");
         embedded_asset!(app, "../shaders/cloth.wesl");
         embedded_asset!(app, "../shaders/subsurface.wesl");
@@ -559,8 +561,6 @@ impl Plugin for PrismShadingPlugin {
         // module path. Register the imported module in the production asset
         // graph as well as in off-GPU parity tests, otherwise runtime shader
         // resolution depends on a test-only registration.
-        embedded_asset!(app, "../shaders/material_virtual_texture.wesl");
-        embedded_asset!(app, "../shaders/material_sample.wesl");
         embedded_asset!(app, "../shaders/tangent.wesl");
         embedded_asset!(app, "../shaders/surface.wesl");
         embedded_asset!(app, "../shaders/scene_transform.wesl");
@@ -610,6 +610,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/motion_blur.wesl");
         embedded_asset!(app, "../shaders/volumetrics.wesl");
         embedded_asset!(app, "../shaders/volumetric_clouds.wesl");
+        embedded_asset!(app, "volumetric_clouds/composite.wgsl");
         embedded_asset!(app, "../shaders/dof.wesl");
         embedded_asset!(app, "../shaders/chromatic_aberration.wesl");
         embedded_asset!(app, "../shaders/vignette.wesl");
@@ -648,15 +649,47 @@ impl Plugin for PrismShadingPlugin {
         // of the tuple grouping used by the older stages below.
         render_app
             .init_resource::<ShadingExternalExecutors>()
+            .init_resource::<SceneLightInputs>()
+            .init_resource::<ExtractedClusterView>()
+            .init_resource::<ClusterConfig>()
             .add_systems(
                 RenderStartup,
                 init_shading_execution.after(crate::gpu::fabric::init_scene_fabric),
             )
             .add_systems(
                 RenderStartup,
-                init_fabric_composition_runtime.after(crate::gpu::fabric::init_scene_fabric),
+                (
+                    init_gpu_resource::<LightGpuBuffers>,
+                    init_gpu_resource::<LightBindGroup>,
+                    init_gpu_resource::<ClusterGpuBuffers>,
+                    init_gpu_resource::<ClusterBindGroup>,
+                )
+                    .chain(),
+            )
+            .add_systems(ExtractSchedule, extract_cluster_view)
+            .add_systems(
+                Render,
+                (
+                    rebuild_light_buffers.in_set(RenderSystems::PrepareResources),
+                    rebuild_cluster_buffers
+                        .after(rebuild_light_buffers)
+                        .in_set(RenderSystems::PrepareResources),
+                    write_light_buffers
+                        .after(rebuild_light_buffers)
+                        .in_set(RenderSystems::PrepareResourcesFlush),
+                    write_cluster_buffers
+                        .after(rebuild_cluster_buffers)
+                        .in_set(RenderSystems::PrepareResourcesFlush),
+                    prepare_light_bind_group
+                        .after(write_light_buffers)
+                        .in_set(RenderSystems::PrepareBindGroups),
+                    prepare_cluster_bind_group
+                        .after(write_cluster_buffers)
+                        .in_set(RenderSystems::PrepareBindGroups),
+                ),
             )
             .add_systems(RenderStartup, init_response_composition)
+            .add_systems(RenderStartup, init_gpu_resource::<LobeSampleBudgetGpu>)
             .add_systems(
                 Render,
                 (
@@ -666,36 +699,33 @@ impl Plugin for PrismShadingPlugin {
                     prepare_response_composition_targets
                         .after(prepare_response_composition_resources)
                         .in_set(RenderSystems::PrepareBindGroups),
-                    observe_fabric_composition_resources
-                        .after(prepare_response_composition_targets)
-                        .in_set(RenderSystems::PrepareBindGroups),
                 ),
             )
             .add_systems(
                 bevy_core_pipeline::Core3d,
-                run_shading_pre_resolve_driver.before(bevy_core_pipeline::Core3dSystems::MainPass),
+                run_scene_fabric_pre_resolve.before(bevy_core_pipeline::Core3dSystems::MainPass),
             )
             .add_systems(
                 bevy_core_pipeline::Core3d,
-                run_shading_resolve_driver
-                    .after(run_shading_pre_resolve_driver)
+                run_scene_fabric_resolve
+                    .after(run_scene_fabric_pre_resolve)
                     .before(bevy_core_pipeline::Core3dSystems::MainPass),
             )
             .add_systems(
                 bevy_core_pipeline::Core3d,
-                run_shading_response_driver
+                run_scene_fabric_response
                     .in_set(ResponseCompositionSystems::Compose)
-                    .after(run_shading_resolve_driver)
+                    .after(run_scene_fabric_resolve)
                     .after(bevy_core_pipeline::Core3dSystems::MainPass)
                     .after(crate::water::WaterSurfaceSystems::Draw)
-                    .before(run_shading_post_driver)
+                    .before(run_scene_fabric_post)
                     .before(composite_shading)
                     .before(bevy_core_pipeline::Core3dSystems::PostProcess),
             )
             .add_systems(
                 bevy_core_pipeline::Core3d,
-                run_shading_post_driver
-                    .after(run_shading_response_driver)
+                run_scene_fabric_post
+                    .after(run_scene_fabric_response)
                     .before(composite_shading)
                     .before(bevy_core_pipeline::Core3dSystems::PostProcess),
             );
@@ -718,13 +748,14 @@ impl Plugin for PrismShadingPlugin {
             .init_resource::<PrismShadingDiagnostics>()
             .init_resource::<ClassificationDiagnosticsReadback>()
             .init_resource::<ResolveMotionHistory>()
+            .init_resource::<TaaHistoryCache>()
             .insert_resource(ShadowAtlasConfig::new(
                 DEFAULT_SHADOW_ATLAS_LAYERS,
                 DEFAULT_SHADOW_ATLAS_RESOLUTION,
             ))
             .init_resource::<ExtractedShadows>()
             .init_resource::<PrismShadowSettings>()
-            .init_resource::<ExtractedIblSource>()
+            .init_resource::<IblSceneInput>()
             .init_resource::<EnvPrefilterBindGroups>()
             .init_resource::<VsmPrimaryLight>()
             .init_resource::<PrismVirtualShadowSettings>()
@@ -742,7 +773,6 @@ impl Plugin for PrismShadingPlugin {
             .init_resource::<PrismMotionBlurSettings>()
             .init_resource::<PrismVolumetricsSettings>()
             .init_resource::<VolumetricsTextureCache>()
-            .init_resource::<PrismVolumetricCloudsSettings>()
             .init_resource::<VolumetricCloudViewCache>()
             .init_resource::<PrismDofSettings>()
             .init_resource::<PrismChromaticAberrationSettings>()
@@ -784,9 +814,9 @@ impl Plugin for PrismShadingPlugin {
                         .after(init_gpu_resource::<crate::MaterialBindGroup>),
                     init_shading_resolve_pipeline
                         .after(init_gpu_resource::<crate::MaterialBindGroup>)
-                        .after(init_gpu_resource::<crate::LightBindGroup>)
+                        .after(init_gpu_resource::<crate::scene_lighting::LightBindGroup>)
                         .after(init_gpu_resource::<ShadowBindGroup>)
-                        .after(init_gpu_resource::<crate::ClusterBindGroup>),
+                        .after(init_gpu_resource::<crate::scene_lighting::ClusterBindGroup>),
                     init_shading_composite_pipeline,
                     init_oit_composite_pipeline,
                     // Nested to keep this RenderStartup tuple within Bevy's
@@ -892,7 +922,7 @@ impl Plugin for PrismShadingPlugin {
             // stay within Bevy's 20-element limit.
             .add_systems(RenderStartup, (init_sky_transmittance_lut, init_sky_transmittance_pipeline))
             .add_systems(RenderStartup, (init_sky_view_lut, init_sky_view_pipeline))
-            .add_systems(RenderStartup, init_volumetric_cloud_pipelines)
+            .add_systems(RenderStartup, (init_volumetric_cloud_pipelines, init_cloud_composite_pipeline))
             // Light-routing (Lighting Channels) cull pipeline. Its own
             // `add_systems` call so the already-full RenderStartup tuples stay
             // within Bevy's 20-element limit.
@@ -931,6 +961,7 @@ impl Plugin for PrismShadingPlugin {
                     prepare_volumetric_cloud_domain.in_set(RenderSystems::PrepareResources),
                     prepare_volumetric_cloud_views
                         .after(prepare_volumetric_cloud_domain)
+                        .after(prepare_visibility_buffers)
                         .in_set(RenderSystems::PrepareResources),
                     prepare_volumetric_cloud_domain_bind_groups
                         .in_set(RenderSystems::PrepareBindGroups),
@@ -963,6 +994,7 @@ impl Plugin for PrismShadingPlugin {
             .add_systems(
                 Render,
                 (
+                    prepare_lobe_sample_budget.in_set(RenderSystems::PrepareResources),
                     prepare_shading_work
                         .after(super::super::visibility::systems::build_unified_visibility)
                         .in_set(RenderSystems::PrepareResources),
@@ -999,8 +1031,10 @@ impl Plugin for PrismShadingPlugin {
                     prepare_gtao_prepass_bind_groups
                         .after(prepare_gtao_textures)
                         .in_set(RenderSystems::PrepareBindGroups),
-                    ensure_shadow_atlas.in_set(RenderSystems::PrepareResources),
-                    rebuild_shadow_buffers.in_set(RenderSystems::PrepareResources),
+                    (
+                        ensure_shadow_atlas.in_set(RenderSystems::PrepareResources),
+                        rebuild_shadow_buffers.in_set(RenderSystems::PrepareResources),
+                    ),
                     write_shadow_buffers.in_set(RenderSystems::PrepareResourcesFlush),
                     prepare_shadow_bind_group
                         .after(write_shadow_buffers)
@@ -1170,6 +1204,7 @@ impl Plugin for PrismShadingPlugin {
                     (
                         prepare_taa_textures
                             .after(prepare_visibility_buffers)
+                            .after(crate::fabric_frame::build_render_fabric_frame_system)
                             .in_set(RenderSystems::PrepareResources),
                         prepare_taa_bind_groups
                             .after(prepare_taa_textures)
@@ -1451,10 +1486,6 @@ impl Plugin for PrismShadingPlugin {
                         .after(prepare_light_routing_buffers)
                         .in_set(RenderSystems::PrepareBindGroups),
                 ),
-            )
-            .add_systems(
-                ExtractSchedule,
-                (extract_shadows, extract_ibl_source, extract_vsm_primary_light),
             );
         // Camera jitter must land before `prepare_view_uniforms` bakes the
         // projection; `PrepareViews` is ordered ahead of that `PrepareResources`
@@ -1568,35 +1599,35 @@ impl Plugin for PrismShadingPlugin {
         render_app.add_systems(
             bevy_core_pipeline::Core3d,
             (
-                shadow_depth_pass.before(run_shading_pre_resolve_driver),
+                shadow_depth_pass.before(run_scene_fabric_pre_resolve),
                 // Nested to keep the Core3d tuple within Bevy's 20-element
                 // limit: the three GTAO passes chain prepass -> horizon kernel
                 // -> spatial denoise, all feeding the shading resolve.
                 (
                     gtao_prepass_pass
-                        .after(run_shading_pre_resolve_driver)
-                        .before(run_shading_resolve_driver),
+                        .after(run_scene_fabric_pre_resolve)
+                        .before(run_scene_fabric_resolve),
                     gtao_compute_pass
                         .after(gtao_prepass_pass)
-                        .before(run_shading_resolve_driver),
+                        .before(run_scene_fabric_resolve),
                     gtao_denoise_pass
                         .after(gtao_compute_pass)
-                        .before(run_shading_resolve_driver),
+                        .before(run_scene_fabric_resolve),
                     gtao_temporal_pass
                         .after(gtao_denoise_pass)
-                        .before(run_shading_resolve_driver),
+                        .before(run_scene_fabric_resolve),
                 ),
                 // Nested to keep the Core3d tuple within Bevy's 20-element
                 // limit: the IBL precomputes and the light-routing cull all
                 // feed the shading resolve and so must run before it.
                 (
-                    dfg_lut_precompute_pass.before(run_shading_resolve_driver),
-                    env_prefilter_precompute_pass.before(run_shading_resolve_driver),
+                    dfg_lut_precompute_pass.before(run_scene_fabric_resolve),
+                    env_prefilter_precompute_pass.before(run_scene_fabric_resolve),
                     // Light-routing (Lighting Channels) cull refines the
                     // per-word punctual-light visibility mask the resolve's
                     // channel gate reads, so it must run before the resolve
                     // dispatch. No-op unless the opt-in subsystem is enabled.
-                    light_routing_cull_pass.before(run_shading_resolve_driver),
+                    light_routing_cull_pass.before(run_scene_fabric_resolve),
                 ),
                 (
                     // Screen-space spec-GI reuse, denoising and composite are
@@ -1607,7 +1638,7 @@ impl Plugin for PrismShadingPlugin {
                     // folds the indirect diffuse back in (energy-conserving
                     // ambient substitution) before TAA resolves the buffer.
                     world_space_gi_pass
-                        .after(run_shading_resolve_driver)
+                        .after(run_scene_fabric_resolve)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
                     world_space_gi_composite_pass
                         .after(world_space_gi_pass)
@@ -1648,10 +1679,10 @@ impl Plugin for PrismShadingPlugin {
                 composite_shading
                     .after(bevy_core_pipeline::Core3dSystems::MainPass)
                     .after(ResponseCompositionSystems::Compose)
-                    .after(run_shading_post_driver)
+                    .after(run_scene_fabric_post)
                     .before(bevy_core_pipeline::Core3dSystems::PostProcess),
                 transparent_forward_pass
-                    .after(run_shading_resolve_driver)
+                    .after(run_scene_fabric_resolve)
                     .before(bevy_core_pipeline::Core3dSystems::MainPass),
                 oit_composite
                     .after(composite_shading)
@@ -1663,7 +1694,7 @@ impl Plugin for PrismShadingPlugin {
                 // both before the main pass.
                 (
                     vsm_receiver_gen_pass
-                        .after(run_shading_resolve_driver)
+                        .after(run_scene_fabric_resolve)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
                     vsm_mark_pages_pass
                         .after(vsm_receiver_gen_pass)
@@ -1677,23 +1708,28 @@ impl Plugin for PrismShadingPlugin {
                     // Froxel fog is self-contained (its own per-view volumes),
                     // so it only needs to finish before the main pass composites.
                     volumetrics_pass
-                        .after(run_shading_resolve_driver)
+                        .after(run_scene_fabric_resolve)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
                 ),
             ),
         );
-        // Volumetric-cloud compute solve. A self-contained device node: it
-        // records the eight cloud kernels (five view-independent domain passes
-        // once, three per-view passes per sized view) into its own compute
-        // passes, writing only its resident cloud targets -- it never touches
-        // scene_color, so it needs no serialisation with the post-process
-        // copy-back chain and only has to finish before the main pass so the
-        // resident cloud output is available to sample. No-ops while the clouds
-        // are disabled or any kernel is still compiling. Its own `add_systems`
-        // call keeps the primary Core3d tuple within Bevy's 20-element limit.
+        // Shared solve exactly once, not once per camera's Core3d invocation.
+        // All view raymarches read the previous shadow before ShadowMarch
+        // updates it. Each camera then folds its own current output into real
+        // scene_color after surface response and before post processing.
+        render_app.add_systems(
+            RenderGraph,
+            dispatch_volumetric_clouds
+                .before(camera_driver)
+                .in_set(RenderGraphSystems::Render),
+        );
         render_app.add_systems(
             bevy_core_pipeline::Core3d,
-            dispatch_volumetric_clouds.before(bevy_core_pipeline::Core3dSystems::MainPass),
+            composite_volumetric_clouds
+                .after(run_scene_fabric_response)
+                .before(run_scene_fabric_post)
+                .before(composite_shading)
+                .before(bevy_core_pipeline::Core3dSystems::PostProcess),
         );
 
         // Virtual-shadow-map page-table upload bridge: read the GPU page-mark
@@ -2088,10 +2124,12 @@ mod tests {
                 "scene capability {capability:?} must describe its actual device"
             );
         }
-        assert_eq!(
-            selection.roots(),
-            &builtin_roots(&builtin_catalog().unwrap()).unwrap()
-        );
+        let builtin = builtin_roots(&builtin_catalog().unwrap()).unwrap();
+        assert_eq!(selection.roots().responses(), builtin.responses());
+        let mut subsystems = builtin.subsystems().to_vec();
+        subsystems.push(super::super::composition::COMPOSITION_FEATURE_ID);
+        subsystems.sort_unstable();
+        assert_eq!(selection.roots().subsystems(), subsystems);
         assert_eq!(selection.quality(), RenderQualityTier::High);
         assert!(world
             .resource::<ShadingExternalExecutors>()
