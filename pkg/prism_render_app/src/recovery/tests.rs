@@ -14,8 +14,9 @@ use std::sync::{
 
 use crate::{
     DeviceRecoveryStatus, GpuResourceAppExt, PrismRenderPlugin, RenderApp, RenderAppConfig,
-    RenderFrameStats, SpineMeshPipeline,
+    RenderFrameStats,
 };
+use crate::mesh_pipelines::SurfaceEncodeProvider;
 
 #[derive(Default)]
 struct Controls {
@@ -543,7 +544,7 @@ fn recovery_replay_failure_does_not_publish_restored_or_commit_generation() {
 #[test]
 fn recovery_custom_provider_fails_before_replacing_device() {
     let (mut app, controls) = app();
-    let provider = SpineMeshPipeline::new(runtime(&app).device(), crate::RENDER_TARGET_FORMAT);
+    let provider = SurfaceEncodeProvider::new(runtime(&app).device());
     app.sub_app_mut(RenderApp)
         .unwrap()
         .world
@@ -571,17 +572,15 @@ fn recovery_custom_provider_factory_retries_on_the_same_replacement_device() {
     let fail_factory = Arc::new(AtomicBool::new(true));
     let calls = factory_calls.clone();
     let fail = fail_factory.clone();
-    let provider = SpineMeshPipeline::new(runtime(&app).device(), crate::RENDER_TARGET_FORMAT);
+    let provider = SurfaceEncodeProvider::new(runtime(&app).device());
     app.sub_app_mut(RenderApp).unwrap().world.insert_resource(
         MeshPipelines::with_recovery_factory(provider, move |device, _modules| {
             calls.fetch_add(1, Ordering::SeqCst);
             if fail.load(Ordering::SeqCst) {
                 return Err("provider is warming up".into());
             }
-            Ok(
-                Box::new(SpineMeshPipeline::new(device, crate::RENDER_TARGET_FORMAT))
-                    as Box<dyn crate::MeshPipelineProvider + Send + Sync>,
-            )
+            Ok(Box::new(SurfaceEncodeProvider::new(device))
+                as Box<dyn crate::MeshPipelineProvider + Send + Sync>)
         }),
     );
     app.update();
@@ -594,6 +593,11 @@ fn recovery_custom_provider_factory_retries_on_the_same_replacement_device() {
     assert_eq!(controls.created.load(Ordering::SeqCst), 2);
     assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
     assert!(app.world().resource::<DeviceRecoveryStatus>().recovering);
+    assert_eq!(
+        app.world().resource::<DeviceRecoveryStatus>().attempts,
+        1,
+        "provider backoff frames are not recovery attempts"
+    );
     assert!(app
         .world()
         .resource::<DeviceRecoveryStatus>()
@@ -607,6 +611,11 @@ fn recovery_custom_provider_factory_retries_on_the_same_replacement_device() {
     app.update();
     assert_eq!(runtime(&app).device_generation(), 1);
     assert_eq!(factory_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        app.world().resource::<DeviceRecoveryStatus>().attempts,
+        2,
+        "the successful retry is the second actual recovery attempt"
+    );
     assert!(!app.world().resource::<DeviceRecoveryStatus>().recovering);
 }
 
@@ -615,13 +624,22 @@ fn recovery_material_buffers_restore_bytes_and_preserve_allocations() {
     let (app, _) = app();
     let old_device = runtime(&app).device();
     let mut buffers = MaterialParameterBuffers::new(old_device, 2, 64, 4, rhi::BufferUsages::NONE);
-    let record = prism_render_material::fallback_material_record(
-        prism_render_architecture::abi::GenerationalHandle::new(0, 1),
-        1,
-    );
-    buffers.sync(old_device, runtime(&app).queue(), [(0, record)], 7);
-    let header = *buffers.header(0).unwrap();
-    let words = buffers.parameters_of(0).unwrap().to_vec();
+    let mut registry = prism_render_material::MaterialRegistry::new(1);
+    let handle = registry.allocate().unwrap();
+    let record = prism_render_material::fallback_material_record(handle, 1);
+    registry.publish(record).unwrap();
+    let dynamic = prism_render_material::DynamicChannels {
+        wetness: 0.25,
+        snow: 0.5,
+        damage: 0.75,
+        dissolve: 0.125,
+    };
+    registry.set_dynamic_channels(handle, dynamic).unwrap();
+    let dirty = registry.take_dirty();
+    buffers.sync_registry(old_device, runtime(&app).queue(), &registry, dirty);
+    let header = *buffers.header(handle.index).unwrap();
+    assert_eq!(header.dynamic_wetness, dynamic.to_words()[0]);
+    let words = buffers.parameters_of(handle.index).unwrap().to_vec();
     let used = buffers.used_words();
     let instance = TestInstance(Arc::new(Controls::default()));
     let adapter = instance.request_adapter(&Default::default()).unwrap();
@@ -630,15 +648,23 @@ fn recovery_material_buffers_restore_bytes_and_preserve_allocations() {
         .unwrap();
     buffers.recover(&device, &queue);
     assert_eq!(device.inner.live_resource_count(), 3);
-    assert_eq!(buffers.header(0).unwrap(), &header);
-    assert_eq!(buffers.parameters_of(0).unwrap(), words);
+    assert_eq!(buffers.header(handle.index).unwrap(), &header);
+    assert_eq!(buffers.parameters_of(handle.index).unwrap(), words);
     assert_eq!(buffers.used_words(), used);
     let writes = queue.writes.lock().unwrap();
     assert_eq!(writes.len(), 3);
     let header_bytes: &[u8] = bytemuck::bytes_of(&header);
-    assert_eq!(&writes[0].2[..header_bytes.len()], header_bytes);
+    let header_offset = handle.index as usize * header_bytes.len();
+    assert_eq!(
+        &writes[0].2[header_offset..header_offset + header_bytes.len()],
+        header_bytes
+    );
     let word_bytes: &[u8] = bytemuck::cast_slice(&words);
-    assert_eq!(&writes[1].2[..word_bytes.len()], word_bytes);
+    let word_offset = header.parameter_offset as usize * core::mem::size_of::<u32>();
+    assert_eq!(
+        &writes[1].2[word_offset..word_offset + word_bytes.len()],
+        word_bytes
+    );
     assert_eq!(
         writes[2].2.len(),
         4 * core::mem::size_of::<prism_render_material::GpuMaterialTexture>()
@@ -660,24 +686,23 @@ struct RecoveryAsset(rhi::BufferId);
 impl crate::RenderAsset for RecoveryAsset {
     type SourceAsset = RecoverySource;
 
-    fn prepare(
+    fn prepare_with_context(
         source: &RecoverySource,
         id: prism_asset::AssetId<RecoverySource>,
-        device: &dyn RenderDevice,
-        queue: &dyn RenderQueue,
+        context: &mut crate::PrepareContext<'_>,
         previous: Option<&Self>,
     ) -> Result<Self, crate::PrepareAssetError<RecoverySource>> {
         if source.retry.load(Ordering::SeqCst) {
             return Err(crate::PrepareAssetError::RetryNextUpdate(id));
         }
         assert!(previous.is_none(), "old device assets must be invalidated");
-        let buffer = device.create_buffer(&rhi::BufferDescriptor {
+        let buffer = context.create_buffer(&rhi::BufferDescriptor {
             label: None,
             size: source.bytes.len() as u64,
             usage: rhi::BufferUsages::STORAGE | rhi::BufferUsages::COPY_DST,
             mapped_at_creation: false,
-        });
-        queue.write_buffer(buffer, 0, &source.bytes);
+        }).map_err(|_| crate::PrepareAssetError::RetryNextUpdate(id))?;
+        context.queue().write_buffer(buffer, 0, &source.bytes);
         Ok(Self(buffer))
     }
 
@@ -882,12 +907,15 @@ fn recovery_replays_latest_transform_before_restored_and_rejects_invalid_publica
     app.update();
     let render = app.get_sub_app(RenderApp).unwrap();
     let transforms = render.world.resource::<crate::RenderTransforms>();
-    assert_eq!(transforms.stats().uploaded_bytes, 48);
+    assert_eq!(
+        transforms.stats().uploaded_bytes,
+        crate::transforms::STRIDE as u64
+    );
     assert!(transforms.last_error().is_none());
     assert!(!Arc::ptr_eq(&old_device, &runtime(&app).device_handle()));
     let writes = runtime(&app).queue().writes.lock().unwrap();
     assert!(writes.iter().any(|(_, offset, bytes)| *offset == 0
-        && bytes.len() == 48
+        && bytes.len() == crate::transforms::STRIDE
         && f32::from_le_bytes(bytes[12..16].try_into().unwrap()) == 0.25));
     drop(writes);
     app.update();

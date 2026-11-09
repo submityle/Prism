@@ -9,6 +9,26 @@ use prism_render_driver::{RenderDevice, RenderQueue};
 use super::extract::ExtractedAssets;
 use super::{GpuPrepareBudget, PrepareCancellation, PrepareContext, RenderAsset, RenderAssets};
 
+/// Internal convenience for tests and registration code that do not need a
+/// custom budget. The public contract remains the contextual entry point.
+pub(crate) fn prepare_extracted_assets<A: RenderAsset>(
+    extracted: &mut ExtractedAssets<A>,
+    prepared: &mut RenderAssets<A>,
+    device: &dyn RenderDevice,
+    queue: &dyn RenderQueue,
+) -> AssetSyncReport {
+    let mut budget = GpuPrepareBudget::unlimited();
+    let cancellation = PrepareCancellation::new(false);
+    prepare_extracted_assets_with_context(
+        extracted,
+        prepared,
+        device,
+        queue,
+        &mut budget,
+        &cancellation,
+    )
+}
+
 /// Why a prepare could not produce a representation (yet).
 ///
 /// Carries the source asset id back, because the caller's next move is almost
@@ -66,31 +86,8 @@ impl AssetSyncReport {
 /// "still loading" from "broken". The copied source is retained in the
 /// extracted frame for the next prepare pass; this is important because the
 /// source may become ready without producing another asset event.
-pub fn prepare_extracted_assets<A: RenderAsset>(
-    extracted: &mut ExtractedAssets<A>,
-    prepared: &mut RenderAssets<A>,
-    device: &dyn RenderDevice,
-    queue: &dyn RenderQueue,
-) -> AssetSyncReport {
-    let mut budget = GpuPrepareBudget::unlimited();
-    let cancellation = PrepareCancellation::new(false);
-    prepare_extracted_assets_with_context(
-        extracted,
-        prepared,
-        device,
-        queue,
-        &mut budget,
-        &cancellation,
-    )
-}
-
-/// Context-aware form of [`prepare_extracted_assets`].
-///
-/// The old entry point remains unchanged and uses an unlimited, never-cancelled
-/// context. Callers that need a frame allocation budget or cancellation use
-/// this form. A contextual implementation must map [`PrepareContextError`] to
-/// [`PrepareAssetError::RetryNextUpdate`]; the transaction then rolls back its
-/// tracked resources before the source is queued again.
+/// Context-aware render-asset preparation. Allocation budgets and cancellation
+/// are part of the production contract for every asset type.
 pub fn prepare_extracted_assets_with_context<A: RenderAsset>(
     extracted: &mut ExtractedAssets<A>,
     prepared: &mut RenderAssets<A>,

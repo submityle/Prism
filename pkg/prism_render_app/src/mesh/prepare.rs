@@ -1,6 +1,7 @@
 //! Preparing and releasing a mesh's GPU buffers.
 
 use prism_asset::AssetId;
+use core::sync::atomic::AtomicBool;
 use prism_mesh::Mesh;
 use prism_render_driver::{
     BufferDescriptor, BufferId, BufferUsages, IndexFormat, RenderDevice, RenderQueue,
@@ -103,7 +104,15 @@ pub fn prepare_mesh_buffers(
     };
 
     MeshBuffersAllocation {
-        buffers: MeshBuffers { vertices, indices },
+        buffers: MeshBuffers {
+            vertices,
+            vertex_sizes: vertex_streams
+                .iter()
+                .map(|bytes| bytes.len() as u64)
+                .collect(),
+            indices,
+            index_size: index_bytes.map(|(bytes, _)| bytes.len() as u64),
+        },
         vertex_capacity,
         index_capacity,
     }
@@ -130,11 +139,10 @@ fn create_buffer(
 impl RenderAsset for RenderMesh {
     type SourceAsset = Mesh;
 
-    fn prepare(
+    fn prepare_with_context(
         source: &Mesh,
         id: AssetId<Mesh>,
-        device: &dyn RenderDevice,
-        queue: &dyn RenderQueue,
+        context: &mut crate::render_asset::PrepareContext<'_>,
         previous: Option<&Self>,
     ) -> Result<Self, PrepareAssetError<Mesh>> {
         // An unusable mesh is a content bug, not a missing dependency: waiting
@@ -154,9 +162,31 @@ impl RenderAsset for RenderMesh {
         let index_bytes = source
             .indices()
             .map(|indices| (indices.to_bytes(), indices.format()));
+        let required_bytes = vertex_streams
+            .iter()
+            .enumerate()
+            .filter_map(|(index, bytes)| {
+                let capacity = previous
+                    .and_then(|mesh| mesh.vertex_capacity.get(index).copied())
+                    .unwrap_or(0);
+                (capacity < bytes.len() as u64).then_some(bytes.len().max(4) as u64)
+            })
+            .chain(index_bytes.as_ref().into_iter().filter_map(|(bytes, format)| {
+                let reusable = previous.and_then(|mesh| mesh.buffers.indices).is_some_and(
+                    |(_, previous_format)| {
+                        previous_format == *format
+                            && previous.is_some_and(|mesh| mesh.index_capacity >= bytes.len() as u64)
+                    },
+                );
+                (!reusable).then_some(bytes.len().max(4) as u64)
+            }))
+            .sum();
+        context
+            .reserve(required_bytes)
+            .map_err(|_| PrepareAssetError::RetryNextUpdate(id))?;
         let allocation = prepare_mesh_buffers(
-            device,
-            queue,
+            context.device(),
+            context.queue(),
             &vertex_streams,
             index_bytes
                 .as_ref()
@@ -195,5 +225,27 @@ impl RenderAsset for RenderMesh {
         if let Some((indices, _)) = prepared.buffers.indices {
             device.destroy_buffer(indices);
         }
+    }
+}
+
+impl RenderMesh {
+    /// Internal test/fixture helper; production registration uses the
+    /// contextual render-asset stage directly.
+    pub(crate) fn prepare(
+        source: &Mesh,
+        id: AssetId<Mesh>,
+        device: &dyn RenderDevice,
+        queue: &dyn RenderQueue,
+        previous: Option<&Self>,
+    ) -> Result<Self, PrepareAssetError<Mesh>> {
+        let mut budget = crate::render_asset::GpuPrepareBudget::unlimited();
+        let cancellation = AtomicBool::new(false);
+        let mut context = crate::render_asset::PrepareContext::new(
+            device,
+            queue,
+            &mut budget,
+            &cancellation,
+        );
+        <Self as RenderAsset>::prepare_with_context(source, id, &mut context, previous)
     }
 }

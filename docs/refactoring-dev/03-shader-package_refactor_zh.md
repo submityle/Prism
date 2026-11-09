@@ -187,3 +187,5 @@ bin 路径位于 `pkg/prism_render_app/src/bin_queue.rs`：
 仍未验证：architecture `shader_package`/acceptance 的当前完整重跑（不含已更新的 `render_fabric` 200/200）；完整 Scene/Fabric 每帧由冻结选择生成并消费真实 PSO 的端到端路径；真实 driver binary、跨适配器 cache/PSO 行为；完整水体/Scene/TAA GPU replay；以及编译队列、显存、缓存命中率和 P50/P95/P99 性能数据。历史 `scene lib 1909/1909`、`shader_package 95/0`、`render_fabric 136/0`，以及本次局部 `render_fabric 200/200`、multipass 9/9 都不能替代全场景闭环。
 
 **2026-11-09 Water 入口同步**：Water 生产路径不再保留独立 recorder/ledger，真实 dispatch 由顶层 coordinator 使用冻结 SceneFabric selection 接收；Water 定向测试 **230/230** 通过。真实 driver binary、跨 adapter PSO/cache、全场景冻结选择消费与完整性能数据仍未验证。
+
+**2026-11-09 原生 composite 修正补记**：Registered response 在 Native composite 的左右臂现在使用独立 program identity；该修正只涉及已生成 shader 的正确性，不等于 driver binary 导入/导出、全场景 PSO 消费、跨适配器 cache 行为或性能验收已完成。

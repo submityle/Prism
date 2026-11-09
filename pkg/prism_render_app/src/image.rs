@@ -7,6 +7,7 @@
 //! anything about the image's authoring side.
 
 use prism_asset::AssetId;
+use core::sync::atomic::AtomicBool;
 use prism_image::Image;
 use prism_render_driver::{
     Extent3d, ImageDataLayout, RenderDevice, RenderQueue, SamplerDescriptor, SamplerId,
@@ -111,6 +112,26 @@ pub struct GpuImage {
 }
 
 impl GpuImage {
+    /// Internal test/fixture helper; production registration uses the
+    /// contextual render-asset stage directly.
+    pub(crate) fn prepare(
+        source: &Image,
+        id: AssetId<Image>,
+        device: &dyn RenderDevice,
+        queue: &dyn RenderQueue,
+        previous: Option<&Self>,
+    ) -> Result<Self, PrepareAssetError<Image>> {
+        let mut budget = crate::render_asset::GpuPrepareBudget::unlimited();
+        let cancellation = AtomicBool::new(false);
+        let mut context = crate::render_asset::PrepareContext::new(
+            device,
+            queue,
+            &mut budget,
+            &cancellation,
+        );
+        <Self as RenderAsset>::prepare_with_context(source, id, &mut context, previous)
+    }
+
     /// The byte length of one texel row, as uploaded and as read back.
     #[must_use]
     pub const fn bytes_per_row(&self) -> u32 {
@@ -196,11 +217,10 @@ pub fn prepare_image(
 impl RenderAsset for GpuImage {
     type SourceAsset = Image;
 
-    fn prepare(
+    fn prepare_with_context(
         source: &Image,
         id: AssetId<Image>,
-        device: &dyn RenderDevice,
-        queue: &dyn RenderQueue,
+        context: &mut crate::render_asset::PrepareContext<'_>,
         previous: Option<&Self>,
     ) -> Result<Self, PrepareAssetError<Image>> {
         // `Image::new` already validated the data; re-validating here would
@@ -208,7 +228,14 @@ impl RenderAsset for GpuImage {
         if source.extent().width == 0 || source.extent().height == 0 {
             return Err(PrepareAssetError::Unpreparable { id });
         }
-        Ok(prepare_image(device, queue, source, previous))
+        let bytes = (0..source.mip_level_count())
+            .filter_map(|level| source.mip_data(level))
+            .map(|data| data.len() as u64)
+            .sum();
+        context
+            .reserve(bytes)
+            .map_err(|_| PrepareAssetError::RetryNextUpdate(id))?;
+        Ok(prepare_image(context.device(), context.queue(), source, previous))
     }
 
     fn unload(prepared: &Self, device: &dyn RenderDevice) {

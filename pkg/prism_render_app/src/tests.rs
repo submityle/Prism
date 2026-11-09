@@ -3754,6 +3754,11 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
     {
         app.add_plugins(crate::visibility::PrismVisibilityPlugin);
     }
+    app.sub_app_mut(RenderApp)
+        .expect("the render sub-app")
+        .world
+        .resource_mut::<crate::NativeMaterialVt<prism_render_driver_wgpu::WgpuDevice>>()
+        .activate_empty();
     // The target-aware lighting contract requires one finite view position.
     // Keep the camera's work list empty so this remains a clear/composite
     // regression rather than depending on a geometry raster result.
@@ -3904,6 +3909,10 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
         );
     }
 
+    // The first frame may only complete the native material/VT publication
+    // callback on a real backend. The next frame must then submit the same
+    // offscreen graph rather than leaving the poisoned target untouched.
+    app.update();
     app.update();
 
     let render = app.get_sub_app(RenderApp).expect("render sub-app");

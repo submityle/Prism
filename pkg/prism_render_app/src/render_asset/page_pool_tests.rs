@@ -751,7 +751,9 @@ fn gpu_fixed_page_pool_upload_and_replace_are_readable() {
         allocation
     };
     assert_eq!(
-        queue.read_buffer(pool.buffer(), 8),
+        queue
+            .read_buffer(pool.buffer(), 8)
+            .expect("fixed-page initial readback must complete"),
         vec![1, 2, 3, 4, 5, 6, 7, 8]
     );
 
@@ -767,7 +769,9 @@ fn gpu_fixed_page_pool_upload_and_replace_are_readable() {
         transaction.commit().expect("publish replacement");
         allocation
     };
-    let bytes = queue.read_buffer(pool.buffer(), 32);
+    let bytes = queue
+        .read_buffer(pool.buffer(), 32)
+        .expect("fixed-page replacement readback must complete");
     assert_eq!(&bytes[0..8], &[1, 2, 3, 4, 5, 6, 7, 8]);
     let offset = second.offset_bytes(pool.page_size()) as usize;
     assert_eq!(&bytes[offset..offset + 8], &[9, 10, 11, 12, 13, 14, 15, 16]);

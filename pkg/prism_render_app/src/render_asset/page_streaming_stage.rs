@@ -748,7 +748,8 @@ mod tests {
             .read_buffer(
                 gpu.bridge.pool().buffer(),
                 allocation.offset_bytes(gpu.bridge.pool().page_size()) + 4,
-            );
+            )
+            .expect("fixed-page streaming readback must complete");
         let start = allocation.offset_bytes(gpu.bridge.pool().page_size()) as usize;
         assert_eq!(&bytes[start..start + 4], b"efgh");
         assert_eq!(

@@ -7,11 +7,12 @@ use std::sync::{
     Mutex,
 };
 
+use prism_app::App;
 use prism_render_architecture::{
     gpu_scene::{SceneBounds, SceneMaterialHandle},
     paging::RequestBatch,
     virtual_geometry::{
-        cluster_payload::encode_cluster_payload, ClusterNode, GeometryPageKey,
+        cluster_payload::encode_cluster_payload_with_attributes, ClusterNode, GeometryPageKey,
         VirtualGeometryAsset, VirtualGeometryAssetHeader, VirtualGeometryClusterRecord,
         VirtualGeometryCompression, VirtualGeometryMaterialBinding, VirtualGeometryPage,
         VirtualGeometryPageRecord, VIRTUAL_GEOMETRY_ASSET_SCHEMA,
@@ -105,10 +106,12 @@ fn bounds() -> SceneBounds {
 
 fn asset() -> Arc<VirtualGeometryAsset> {
     let bounds = bounds();
-    let payload = encode_cluster_payload(
+    let payload = encode_cluster_payload_with_attributes(
         bounds,
         &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
         &[0, 1, 2],
+        0,
+        &[],
     )
     .expect("valid CLST page payload");
     let payload_size = payload.len() as u32;
@@ -324,4 +327,134 @@ fn retire_requires_confirmed_completion_and_is_idempotent() {
     assert_eq!(device.live_resource_count(), 0);
     assert_eq!(store.buffers(42), None);
     store.retire(&queue).expect("empty-store retirement");
+}
+
+#[test]
+fn render_app_bridge_applies_ordered_register_reconcile_and_reports_failures() {
+    use prism_render_architecture::virtual_geometry::VirtualGeometryMaterialBinding;
+
+    let mut app = App::new();
+    app.add_plugins(crate::PrismRenderPlugin::with_config(
+        NullInstance::new(),
+        crate::RenderAppConfig::default(),
+    ));
+    register_virtual_geometry_publication_bridge::<NullInstance>(&mut app);
+    // PrismRenderPlugin installs the native bridge by default; an explicit
+    // application registration must be idempotent and must not add a second
+    // extract/PrepareResources pair that overwrites the diagnostics.
+    register_virtual_geometry_publication_bridge::<NullInstance>(&mut app);
+
+    let mut requests = VirtualGeometryPublicationRequests::default();
+    let register_sequence = requests.push(VirtualGeometryPublicationRequest::Register {
+        asset: asset(),
+        content_revision: [5; 32],
+        generation: 7,
+        physical_capacity: 1,
+        resident_budget: 1,
+        material_bindings: vec![VirtualGeometryMaterialBinding {
+            material_slot: 0,
+            material: SceneMaterialHandle::new(2, 3),
+        }],
+    });
+    assert_eq!(register_sequence, 0);
+    let mut batch = RequestBatch::new();
+    batch.record(GeometryPageKey::new(42, 0), 1.0);
+    requests.push(VirtualGeometryPublicationRequest::Reconcile {
+        asset_id: 42,
+        generation: 7,
+        requests: batch,
+        frame: 1,
+    });
+    requests.push(VirtualGeometryPublicationRequest::Reconcile {
+        asset_id: 999,
+        generation: 7,
+        requests: RequestBatch::new(),
+        frame: 1,
+    });
+    requests.push(VirtualGeometryPublicationRequest::Reconcile {
+        asset_id: 42,
+        generation: 8,
+        requests: RequestBatch::new(),
+        frame: 2,
+    });
+    *app.world_mut()
+        .resource_mut::<VirtualGeometryPublicationRequests>() = requests;
+
+    app.update();
+
+    let render = app.get_sub_app(crate::RenderApp).expect("render app");
+    let store = render
+        .world
+        .resource::<VirtualGeometryGpuPublicationStore<NullInstance>>();
+    assert_eq!(store.publication(42).unwrap().generation(), 7);
+    assert!(store.publication(42).unwrap().pages()[0].is_resident());
+    let diagnostics = render
+        .world
+        .resource::<VirtualGeometryPublicationDiagnostics>();
+    assert_eq!(diagnostics.attempted, 4);
+    assert_eq!(diagnostics.succeeded, 2);
+    assert_eq!(diagnostics.errors.len(), 2);
+    assert_eq!(diagnostics.errors[0].0, 2);
+    assert_eq!(
+        diagnostics.errors[0].1,
+        VirtualGeometryGpuStoreError::UnknownAsset(999)
+    );
+    assert_eq!(diagnostics.errors[1].0, 3);
+    assert_eq!(
+        diagnostics.errors[1].1,
+        VirtualGeometryGpuStoreError::GenerationMismatch {
+            asset: 42,
+            expected: 7,
+            actual: 8,
+        }
+    );
+    assert!(render
+        .world
+        .resource::<ExtractedVirtualGeometryPublicationRequests>()
+        .requests
+        .is_empty());
+}
+
+#[test]
+fn residency_updates_are_owned_by_render_until_the_host_drains_them() {
+    let key = GeometryPageKey::new(42, 0);
+    let mut residency = VirtualGeometryResidencySnapshot {
+        assets: vec![VirtualGeometryResidencyAssetSnapshot {
+            asset_id: 42,
+            content_revision: [5; 32],
+            generation: 7,
+            active: true,
+            changed_pages: vec![(key, true)],
+        }],
+    };
+    let drained = residency.drain_updates();
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0].changed_pages, vec![(key, true)]);
+    assert!(residency.drain_updates().is_empty());
+}
+
+#[test]
+fn residency_page_merge_is_sorted_linear_and_latest_delta_wins() {
+    let mut pages = vec![
+        (GeometryPageKey::new(42, 1), true),
+        (GeometryPageKey::new(42, 4), true),
+    ];
+    merge_sorted_residency_pages(
+        &mut pages,
+        vec![
+            (GeometryPageKey::new(42, 3), true),
+            (GeometryPageKey::new(42, 1), false),
+            (GeometryPageKey::new(42, 2), true),
+            (GeometryPageKey::new(42, 3), false),
+        ],
+    );
+    assert_eq!(
+        pages,
+        vec![
+            (GeometryPageKey::new(42, 1), false),
+            (GeometryPageKey::new(42, 2), true),
+            (GeometryPageKey::new(42, 3), false),
+            (GeometryPageKey::new(42, 4), true),
+        ]
+    );
 }

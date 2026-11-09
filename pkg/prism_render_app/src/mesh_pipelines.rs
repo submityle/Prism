@@ -6,10 +6,9 @@
 //! descriptor can name it). This module is the render-world resource that holds
 //! the provider and its device-rebuild recipe.
 //!
-//! The production constructor is [`MeshPipelines::surface_encode`]. The explicit
-//! legacy [`MeshPipelines::spine`] constructor remains available only for
-//! callers that deliberately request that provider; it is never selected by
-//! surface-encode construction or recovery.
+//! The production constructor is [`MeshPipelines::surface_encode`]. Providers
+//! without a real Surface ABI are not synthesized here: callers must install a
+//! complete provider explicitly or receive an observable recovery error.
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -49,9 +48,6 @@ pub struct MeshPipelines {
 
 enum MeshPipelineRecovery {
     SurfaceEncode,
-    Spine {
-        color_format: TextureFormat,
-    },
     Custom {
         factory: Box<MeshPipelineRecoveryFactory>,
         modules_rebuilt: bool,
@@ -140,8 +136,6 @@ pub enum ResponseModuleCacheError {
     DescriptorChanged(ModuleId),
     /// A custom response attempted to use the fused path.
     FusedCustom,
-    /// A reserved spine declaration must be a built-in fused module.
-    InvalidReserved,
     /// An already resident module was offered under a different execution
     /// family or built-in classification.
     ExecutionDeclarationChanged(ModuleId),
@@ -176,62 +170,6 @@ impl ResponseModuleCache {
         let module_id = self
             .interner
             .intern(
-                spec.identity.clone(),
-                spec.permutations.clone(),
-                spec.full_lobe_fallback,
-            )
-            .map_err(ResponseModuleCacheError::Intern)?;
-        if let Some(existing) = self.modules.get(&module_id) {
-            if existing.descriptor != spec.descriptor {
-                return Err(ResponseModuleCacheError::DescriptorChanged(module_id));
-            }
-            if existing.execution_family != spec.execution_family
-                || existing.builtin != spec.builtin
-            {
-                return Err(ResponseModuleCacheError::ExecutionDeclarationChanged(
-                    module_id,
-                ));
-            }
-            return Ok(module_id);
-        }
-        let shader_module = device.create_shader_module(&spec.descriptor);
-        self.modules.insert(
-            module_id,
-            ResidentResponseModule {
-                module_id,
-                shader_module,
-                permutations: spec.permutations,
-                full_lobe_fallback: spec.full_lobe_fallback,
-                execution_family: spec.execution_family,
-                builtin: spec.builtin,
-                identity: spec.identity,
-                descriptor: spec.descriptor,
-            },
-        );
-        Ok(module_id)
-    }
-
-    /// Installs the renderer's reserved spine module without allocating a
-    /// second numeric identity. It is still represented in the same resident
-    /// table, so the default path participates in permutation validation.
-    pub fn install_reserved<D: RenderDevice + ?Sized>(
-        &mut self,
-        device: &D,
-        module_id: ModuleId,
-        spec: ResponseModuleSpec,
-    ) -> Result<ModuleId, ResponseModuleCacheError> {
-        assert_eq!(
-            module_id,
-            ModuleId::SPINE,
-            "only the spine may use the reserved module id"
-        );
-        if spec.execution_family != ExecutionFamily::FusedBuiltin || !spec.builtin {
-            return Err(ResponseModuleCacheError::InvalidReserved);
-        }
-        let module_id = self
-            .interner
-            .reserve(
-                module_id,
                 spec.identity.clone(),
                 spec.permutations.clone(),
                 spec.full_lobe_fallback,
@@ -385,42 +323,6 @@ impl MeshPipelines {
         }
     }
 
-    /// The spine's default: a flat pass-through pipeline.
-    ///
-    /// Built against `device` because a pipeline descriptor names a shader
-    /// module, and the module has to exist first.
-    #[must_use]
-    pub fn spine(device: &dyn RenderDevice, color_format: TextureFormat) -> Self {
-        let mut response_modules = ResponseModuleCache::new();
-        let spec = ResponseModuleSpec {
-            execution_family: ExecutionFamily::FusedBuiltin,
-            identity: ModuleIdentity {
-                package: ShaderPackageId::new("prism.spine"),
-                digest: ArtifactDigest([0x53; 32]),
-                entry_point: "fs".into(),
-                binding_layout_digest: [0x53; 32],
-            },
-            permutations: PermutationSpace::try_new([]).expect("empty spine space is valid"),
-            full_lobe_fallback: None,
-            descriptor: ShaderModuleDescriptor::wgsl(SpineMeshPipeline::WGSL),
-            builtin: true,
-        };
-        let module = response_modules
-            .install_reserved(device, ModuleId::SPINE, spec)
-            .expect("install the spine response module");
-        let shader_module = response_modules
-            .get(module)
-            .expect("resident spine module")
-            .shader_module;
-        Self {
-            provider: Box::new(SpineMeshPipeline::from_module(shader_module, color_format)),
-            response_modules,
-            recovery: MeshPipelineRecovery::Spine { color_format },
-            surface_bind_group_layout: None,
-            surface_vt_bind_group_layout: None,
-        }
-    }
-
     /// Builds the production opaque surface-encode provider.
     ///
     /// The caller binds frame and material uniforms at group 0 with dynamic
@@ -441,9 +343,9 @@ impl MeshPipelines {
 
     /// The active native surface provider's actual group-0 layout.
     ///
-    /// Custom and spine providers return `None`. Recovery invalidates this id
-    /// before rebuilding and publishes the replacement provider's layout;
-    /// callers must recreate bind groups on the replacement device.
+    /// Custom providers return `None`. Recovery invalidates this id before
+    /// rebuilding and publishes the replacement provider's layout; callers
+    /// must recreate bind groups on the replacement device.
     #[must_use]
     pub const fn surface_bind_group_layout(&self) -> Option<BindGroupLayoutId> {
         self.surface_bind_group_layout
@@ -474,10 +376,10 @@ impl MeshPipelines {
 
     /// Rebuilds the provider and its resident shader modules on `device`.
     ///
-    /// The surface-encode and spine providers each carry an explicit built-in
-    /// recipe. A custom provider created with [`Self::new`] is rejected instead
-    /// of being silently replaced by either built-in provider, so recovery
-    /// remains observable and the app stays paused.
+    /// The surface-encode provider carries an explicit built-in recipe. A
+    /// custom provider created with [`Self::new`] is rejected instead of being
+    /// silently replaced by a different provider, so recovery remains
+    /// observable and the app stays paused.
     pub(crate) fn recover(
         &mut self,
         device: &dyn RenderDevice,
@@ -488,17 +390,6 @@ impl MeshPipelines {
                 self.surface_bind_group_layout = Some(provider.bind_group_layout());
                 self.surface_vt_bind_group_layout = Some(provider.vt_bind_group_layout());
                 self.provider = Box::new(provider);
-                Ok(())
-            }
-            MeshPipelineRecovery::Spine { color_format } => {
-                Self::rebuild_response_modules(&mut self.response_modules, device);
-                self.provider = match self.response_modules.get(ModuleId::SPINE) {
-                    Some(module) => Box::new(SpineMeshPipeline::from_module(
-                        module.shader_module,
-                        *color_format,
-                    )),
-                    None => Box::new(SpineMeshPipeline::new(device, *color_format)),
-                };
                 Ok(())
             }
             MeshPipelineRecovery::Custom {
@@ -520,9 +411,7 @@ impl MeshPipelines {
 
     pub(crate) fn check_recovery(&self) -> Result<(), MeshPipelineRecoveryError> {
         match &self.recovery {
-            MeshPipelineRecovery::SurfaceEncode
-            | MeshPipelineRecovery::Spine { .. }
-            | MeshPipelineRecovery::Custom { .. } => Ok(()),
+            MeshPipelineRecovery::SurfaceEncode | MeshPipelineRecovery::Custom { .. } => Ok(()),
             MeshPipelineRecovery::Unavailable => Err(MeshPipelineRecoveryError::CustomProvider),
         }
     }
@@ -545,7 +434,6 @@ impl MeshPipelines {
     fn recovery_kind(&self) -> &'static str {
         match &self.recovery {
             MeshPipelineRecovery::SurfaceEncode => "surface-encode",
-            MeshPipelineRecovery::Spine { .. } => "spine",
             MeshPipelineRecovery::Custom { .. } => "custom",
             MeshPipelineRecovery::Unavailable => "unavailable",
         }
@@ -636,6 +524,9 @@ mod tests {
                 )),
                 Some(ColorTargetState::opaque(
                     crate::target::SURFACE_ID_GBUFFER_FORMAT
+                )),
+                Some(ColorTargetState::opaque(
+                    crate::target::SURFACE_DATA_GBUFFER_FORMAT
                 )),
             ]
         );
@@ -753,6 +644,9 @@ mod tests {
                 Some(ColorTargetState::opaque(
                     crate::target::SURFACE_ID_GBUFFER_FORMAT
                 )),
+                Some(ColorTargetState::opaque(
+                    crate::target::SURFACE_DATA_GBUFFER_FORMAT
+                )),
             ]
         );
     }
@@ -768,106 +662,16 @@ mod tests {
     }
 
     #[test]
-    fn other_providers_do_not_advertise_a_native_surface_layout() {
+    fn wrapped_providers_do_not_advertise_an_unowned_native_surface_layout() {
         let device = device();
-        let spine = MeshPipelines::spine(&device, TextureFormat::Rgba8Unorm);
-        assert_eq!(spine.surface_bind_group_layout(), None);
-        let custom = MeshPipelines::new(SpineMeshPipeline::new(&device, TextureFormat::Rgba8Unorm));
+        let custom = MeshPipelines::new(SurfaceEncodeProvider::new(&device));
         assert_eq!(custom.surface_bind_group_layout(), None);
         let recoverable = MeshPipelines::with_recovery_factory(
-            SpineMeshPipeline::new(&device, TextureFormat::Rgba8Unorm),
+            SurfaceEncodeProvider::new(&device),
             |device, _| {
-                Ok(Box::new(SpineMeshPipeline::new(
-                    device,
-                    TextureFormat::Rgba8Unorm,
-                )))
+                Ok(Box::new(SurfaceEncodeProvider::new(device)))
             },
         );
         assert_eq!(recoverable.surface_bind_group_layout(), None);
-    }
-}
-
-/// The spine's stand-in pipeline: position in, one colour out.
-///
-/// See the module docs — this is what makes the spine runnable before the
-/// material system's shading is ported, and installing a different
-/// [`MeshPipelineProvider`] replaces it.
-pub struct SpineMeshPipeline {
-    module: ShaderModuleId,
-    color_format: TextureFormat,
-}
-
-impl SpineMeshPipeline {
-    /// The vertex stage: the mesh's first attribute is its clip-space position.
-    ///
-    /// The fragment stage is one flat colour. Both entry points live in one
-    /// module, so a variant costs no extra shader creation.
-    const WGSL: &'static str = "\
-@vertex fn vs(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {\n\
-    return vec4<f32>(position, 1.0);\n\
-}\n\
-@vertex fn vs_transform(@location(0) position: vec3<f32>,\n\
-    @location(13) row0: vec4<f32>, @location(14) row1: vec4<f32>,\n\
-    @location(15) row2: vec4<f32>) -> @builtin(position) vec4<f32> {\n\
-    let p = vec4<f32>(position, 1.0);\n\
-    return vec4<f32>(dot(row0, p), dot(row1, p), dot(row2, p), 1.0);\n\
-}\n\
-@fragment fn fs() -> @location(0) vec4<f32> {\n\
-    return vec4<f32>(1.0, 1.0, 1.0, 1.0);\n\
-}\n";
-
-    /// Creates the pipeline source against `device`.
-    #[must_use]
-    pub fn new(device: &dyn RenderDevice, color_format: TextureFormat) -> Self {
-        Self {
-            module: device.create_shader_module(&ShaderModuleDescriptor::wgsl(Self::WGSL)),
-            color_format,
-        }
-    }
-
-    fn from_module(module: ShaderModuleId, color_format: TextureFormat) -> Self {
-        Self {
-            module,
-            color_format,
-        }
-    }
-}
-
-impl MeshPipelineProvider for SpineMeshPipeline {
-    fn transformed_descriptor(
-        &self,
-        variant: &MeshPipelineKey,
-    ) -> Option<RenderPipelineDescriptor> {
-        let mut descriptor = self.descriptor(variant);
-        descriptor.vertex.entry_point = "vs_transform".into();
-        Some(descriptor)
-    }
-
-    fn descriptor(&self, variant: &MeshPipelineKey) -> RenderPipelineDescriptor {
-        RenderPipelineDescriptor {
-            label: Some("prism-spine-mesh".into()),
-            layout: None,
-            vertex: VertexState {
-                module: self.module,
-                entry_point: "vs".into(),
-                // Replaced by the specializer with the mesh's own layout, which
-                // is the layout the pipeline key hashes.
-                buffers: Vec::new(),
-            },
-            primitive: PrimitiveState::default(),
-            // The pass a variant names decides whether there is depth; a variant
-            // with no depth format must not declare depth state, or the pipeline
-            // would not match its pass.
-            depth_stencil: variant.depth_format.map(DepthStencilState::reverse_z),
-            multisample: MultisampleState {
-                count: variant.sample_count,
-                ..Default::default()
-            },
-            fragment: Some(FragmentState {
-                module: self.module,
-                entry_point: "fs".into(),
-                targets: vec![Some(ColorTargetState::opaque(self.color_format))],
-            }),
-        }
     }
 }

@@ -18,9 +18,9 @@
 
 mod context;
 mod extract;
+mod lighting_virtual_residency;
 #[cfg(feature = "fixed-page-feedback")]
 mod page_feedback;
-mod lighting_virtual_residency;
 mod page_pool;
 mod page_residency_bridge;
 #[cfg(feature = "resident-page-streaming")]
@@ -45,6 +45,10 @@ use prism_render_driver::{RenderDevice, RenderQueue};
 
 pub use context::{GpuPrepareBudget, PrepareCancellation, PrepareContext, PrepareContextError};
 pub use extract::{extract_assets, ExtractedAssets};
+pub use lighting_virtual_residency::{
+    LightingPageUpload, LightingResidencySync, LightingVirtualResidencyError,
+    LightingVirtualResidencyGpuAdapter,
+};
 #[cfg(feature = "fixed-page-feedback")]
 pub use page_feedback::{
     register_fixed_page_feedback, FixedPageFeedback, FixedPageFeedbackConfig,
@@ -54,10 +58,6 @@ pub use page_pool::{
     FixedPageDeferredRelease, FixedPageDeferredReplacement, FixedPagePool, FixedPagePoolDescriptor,
     FixedPagePoolEvent, FixedPageReclaimEvent, FixedPageUpload, PageAllocation, PagePoolError,
     PageReleaseTransaction, PageReplaceTransaction, PageUploadTransaction,
-};
-pub use lighting_virtual_residency::{
-    LightingPageUpload, LightingResidencySync, LightingVirtualResidencyError,
-    LightingVirtualResidencyGpuAdapter,
 };
 pub use page_residency_bridge::{FixedPageResidencyBridge, PageResidencyBridgeError};
 #[cfg(feature = "resident-page-streaming")]
@@ -72,10 +72,8 @@ pub use page_streaming_stage::{
     register_fixed_page_streaming, FixedPageStreamingConfig, FixedPageStreamingGpu,
     FixedPageStreamingStats,
 };
-pub use prepare::{
-    prepare_extracted_assets, prepare_extracted_assets_with_context, AssetSyncReport,
-    PrepareAssetError,
-};
+pub use prepare::{prepare_extracted_assets_with_context, AssetSyncReport, PrepareAssetError};
+pub(crate) use prepare::prepare_extracted_assets;
 pub(crate) use stage::{
     invalidate_registered_render_assets, recovered_assets_pending, PrepareRecoveredAssets,
 };
@@ -104,39 +102,10 @@ pub trait RenderAsset: Send + Sync + 'static + Sized {
     /// frame (the simulation keeps its asset; see [`extract_assets`]).
     type SourceAsset: Asset + Clone;
 
-    /// Prepares (or re-prepares) the GPU form of `source`.
-    ///
-    /// `previous` is the representation from the last successful prepare, so an
-    /// update can grow an existing buffer instead of reallocating, or keep the
-    /// parts that did not change. `device` creates and destroys objects; `queue`
-    /// is the upload path for their contents (the RHI writes buffers and
-    /// textures through the queue, not the device).
-    ///
-    /// Returns [`PrepareAssetError::RetryNextUpdate`] when a dependency is not
-    /// ready yet (a mesh waiting on its texture, a material waiting on its
-    /// pipeline); the sync then leaves the previous representation in place and
-    /// retries next frame rather than recording a half-built asset.
-    ///
-    /// # Ownership of the previous representation
-    ///
-    /// `previous` is borrowed, and the value it describes is dropped right after
-    /// a successful prepare returns (the new representation replaces it in the
-    /// table). That makes `prepare` the only place that knows whether the old GPU
-    /// objects are being reused: releasing them anywhere else would double-free a
-    /// reused buffer. So a prepare must **either** reuse the previous objects
-    /// (returning them) **or** release them through `device` — returning a fresh
-    /// representation that ignores `previous` without releasing it leaks its
-    /// objects. A prepare that fails must leave `previous` alone: the table still
-    /// holds it, and the next attempt gets it back.
-    fn prepare(
-        source: &Self::SourceAsset,
-        id: AssetId<Self::SourceAsset>,
-        device: &dyn RenderDevice,
-        queue: &dyn RenderQueue,
-        previous: Option<&Self>,
-    ) -> Result<Self, PrepareAssetError<Self::SourceAsset>>;
-
-    /// Contextual variant of [`Self::prepare`] with a transactional allocation
+    /// Contextual preparation with a transactional allocation budget and
+    /// cancellation checkpoint. A retry leaves `previous` authoritative, while
+    /// allocations tracked by the context are rolled back before the source is
+    /// queued again.
     /// budget and cancellation checkpoint.
     ///
     /// This default keeps existing implementations source-compatible. New
@@ -149,9 +118,7 @@ pub trait RenderAsset: Send + Sync + 'static + Sized {
         id: AssetId<Self::SourceAsset>,
         context: &mut PrepareContext<'_>,
         previous: Option<&Self>,
-    ) -> Result<Self, PrepareAssetError<Self::SourceAsset>> {
-        Self::prepare(source, id, context.device(), context.queue(), previous)
-    }
+    ) -> Result<Self, PrepareAssetError<Self::SourceAsset>>;
 
     /// Releases the RHI objects `prepared` owns.
     ///

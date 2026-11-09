@@ -164,3 +164,7 @@ Surface schema/codegen 与 Rust/WESL mirror 的局部门禁已有记录，但下
 仍未验证：跨适配器 ABI/shader 消费；Surface ABI 在统一 Scene/Fabric 每帧提取、绑定、barrier 和真实 recorder 中的端到端使用；以及完整帧图像 parity、资源/性能数据。material 全 package 通过仅关闭分包 CPU/生成物验收，不等于全场景验收完成。
 
 **2026-11-09 状态同步**：Water 已移除独立 Core3d recorder，改由顶层 SceneFabric coordinator 统一提交；Water 定向测试 **230/230** 通过。该接线不构成 Surface ABI 在全场景帧中的完整消费证据；统一多域 payload、barrier、跨适配器和全帧 parity 仍未完成。
+
+**2026-11-09 原生 TAA/response 接线补记**：原生 `prism_render_app` 已在 Surface graph 的提交成功、提交失败和 graph 构建失败路径分别记账或取消 TAA history，并在帧末按 live key 执行 completion-gated 回收；这关闭了宿主未调用 history publication 的具体断点。Registered MaskBlend 左右臂现分别传递各自 program identity。仍未完成的是同一原生帧中的全域 ABI 消费、完整 response/split 语义、跨适配器和全帧图像 parity。
+
+**2026-11-09 白色旧路径清理**：审计确认白色 `SpineMeshPipeline` 只由未发布兼容构造和测试使用，默认插件生产入口一直是 `MeshPipelines::surface_encode`；已删除白色 shader、单色 color target、`MeshPipelines::spine` 及其 reserved-module 安装/恢复分支。自定义 provider 不再被替换成假输出；没有 Surface ABI 的 provider 在 recovery 中显式报错并保持暂停。`ModuleId::SPINE` 仍作为现有原生 Surface pass 的模块标识使用，不代表白色 shader，也未被删除。

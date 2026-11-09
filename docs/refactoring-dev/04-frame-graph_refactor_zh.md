@@ -152,6 +152,8 @@ prism_render_graph 的编译器、SSA、hazard、barrier、alias、lifetime 和 
 3. 完成多视图、多队列、resize、device loss、submission failure 和 completion retirement 的端到端 readback/parity，证明被裁剪或失败的 pass 不提交残留命令。
 4. 取得完整帧图像 parity、至少两个 physical adapter 的严格结果，以及 graph compile/record/submit 的内存、队列等待、吞吐和 P50/P95/P99 数据。
 
+**2026-11-09 原生宿主接线补记**：基础 native `RenderApp` 入口已实际执行 graph prepare、tracked submit 和 completion；TAA history 的成功提交、失败取消及 live-key retirement 已接入该宿主，Registered response 右臂 identity 错误也已修正。当前未完成项因此收窄为完整 31-pass 原生覆盖、真实多队列、全帧 readback/parity、第二 physical adapter 和性能证据，不能把历史 Bevy/SceneRhi recorder 作为替代。
+
 ## 7. 历史依据
 
 - `352d594b1 refactor(render): unify frame graph execution planning`：删除重复的 frame-graph compiler 推导，统一执行规划和 codegen 接口。

@@ -28,9 +28,10 @@
 //! and does not fetch adjacent virtual pages, so it cannot promise seamless
 //! filtering across page boundaries.
 //!
-//! [`plan_atlas_copies`] packs each upload's staging bytes back-to-back; because
-//! every tile's padded size is a multiple of [`COPY_BYTES_PER_ROW_ALIGNMENT`],
-//! all per-tile offsets stay aligned without extra padding between tiles.
+//! [`try_plan_atlas_copies`] packs each upload's staging bytes back-to-back;
+//! because every tile's padded size is a multiple of
+//! [`COPY_BYTES_PER_ROW_ALIGNMENT`], all per-tile offsets stay aligned without
+//! extra padding between tiles.
 
 use super::pool::PageUpload;
 use super::TexturePageKey;
@@ -365,14 +366,42 @@ pub struct SlotPlacement {
 /// Resolves every upload into an [`AtlasCopy`] against `geometry`, packing the
 /// staging bytes back-to-back in input order.
 ///
-/// Returns the copies and the total staging-buffer size in bytes. Because each
+/// Returns `None` if the aggregate staging-buffer size overflows. Because each
 /// tile's padded footprint is a multiple of [`COPY_BYTES_PER_ROW_ALIGNMENT`],
 /// every per-tile offset is aligned with no inter-tile padding. The result
 /// order matches `uploads`; the caller controls ordering (the pool already
 /// emits evict-then-load, key-sorted uploads).
 #[must_use]
-pub fn plan_atlas_copies(geometry: &AtlasGeometry, uploads: &[PageUpload]) -> AtlasCopyPlan {
-    try_plan_atlas_copies(geometry, uploads).expect("atlas staging plan size must fit in u64")
+pub fn try_plan_atlas_copies(
+    geometry: &AtlasGeometry,
+    uploads: &[PageUpload],
+) -> Option<AtlasCopyPlan> {
+    let bytes_per_row = geometry.bytes_per_row();
+    let rows = geometry.blocks_per_tile_edge();
+    let tile_bytes = geometry.tile_staging_bytes();
+
+    let mut copies = Vec::with_capacity(uploads.len());
+    let mut offset: u64 = 0;
+    for upload in uploads {
+        let placement = geometry.slot_placement(upload.slot);
+        copies.push(AtlasCopy {
+            key: upload.key,
+            slot: upload.slot,
+            dst_layer: placement.layer,
+            dst_origin_x: placement.origin_x_px,
+            dst_origin_y: placement.origin_y_px,
+            extent_px: geometry.tile_extent_px(),
+            staging_offset: offset,
+            bytes_per_row,
+            rows,
+        });
+        offset = offset.checked_add(tile_bytes)?;
+    }
+
+    Some(AtlasCopyPlan {
+        copies,
+        staging_bytes: offset,
+    })
 }
 
 /// Plans staging copies for pages laid out by [`AtlasPageLayout`].
@@ -385,8 +414,7 @@ pub fn plan_atlas_copies(geometry: &AtlasGeometry, uploads: &[PageUpload]) -> At
 /// guttered/encoded tile; this planner only describes copies.
 ///
 /// Returns `None` if geometry and layout disagree or the aggregate staging
-/// size overflows. The legacy [`plan_atlas_copies`] remains available for
-/// existing no-gutter callers.
+/// size overflows.
 #[must_use]
 pub fn plan_atlas_page_copies(
     geometry: &AtlasGeometry,
@@ -545,38 +573,6 @@ pub fn build_neighbor_guttered_page<T: Copy>(
     Some(AtlasGutteredPage { layout, texels })
 }
 
-fn try_plan_atlas_copies(
-    geometry: &AtlasGeometry,
-    uploads: &[PageUpload],
-) -> Option<AtlasCopyPlan> {
-    let bytes_per_row = geometry.bytes_per_row();
-    let rows = geometry.blocks_per_tile_edge();
-    let tile_bytes = geometry.tile_staging_bytes();
-
-    let mut copies = Vec::with_capacity(uploads.len());
-    let mut offset: u64 = 0;
-    for upload in uploads {
-        let placement = geometry.slot_placement(upload.slot);
-        copies.push(AtlasCopy {
-            key: upload.key,
-            slot: upload.slot,
-            dst_layer: placement.layer,
-            dst_origin_x: placement.origin_x_px,
-            dst_origin_y: placement.origin_y_px,
-            extent_px: geometry.tile_extent_px(),
-            staging_offset: offset,
-            bytes_per_row,
-            rows,
-        });
-        offset = offset.checked_add(tile_bytes)?;
-    }
-
-    Some(AtlasCopyPlan {
-        copies,
-        staging_bytes: offset,
-    })
-}
-
 /// Output of [`plan_atlas_page_copies`]: validated page layout and resolved
 /// physical copy plan.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -587,7 +583,7 @@ pub struct AtlasPageCopyPlan {
     pub copy_plan: AtlasCopyPlan,
 }
 
-/// Output of [`plan_atlas_copies`]: the per-tile copies plus the staging size.
+/// Output of [`try_plan_atlas_copies`]: the per-tile copies plus the staging size.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AtlasCopyPlan {
     /// Resolved copies, one per input upload, in input order.
@@ -766,7 +762,8 @@ mod tests {
     fn plan_packs_offsets_back_to_back_and_resolves_destinations() {
         let g = AtlasGeometry::new(64, 2, RGBA8).unwrap();
         let tile = g.tile_staging_bytes();
-        let plan = plan_atlas_copies(&g, &[upload(1, 0), upload(2, 3), upload(3, 4)]);
+        let plan = try_plan_atlas_copies(&g, &[upload(1, 0), upload(2, 3), upload(3, 4)])
+            .expect("valid atlas staging plan");
         assert_eq!(plan.copies.len(), 3);
         assert_eq!(plan.staging_bytes, tile * 3);
 
@@ -790,7 +787,7 @@ mod tests {
     fn every_offset_is_alignment_multiple() {
         let g = AtlasGeometry::new(40, 4, RGBA8).unwrap();
         let uploads: Vec<_> = (0..7).map(|s| upload(s, s)).collect();
-        let plan = plan_atlas_copies(&g, &uploads);
+        let plan = try_plan_atlas_copies(&g, &uploads).expect("valid atlas staging plan");
         for copy in &plan.copies {
             assert_eq!(copy.bytes_per_row % COPY_BYTES_PER_ROW_ALIGNMENT, 0);
             assert_eq!(
@@ -803,7 +800,7 @@ mod tests {
     #[test]
     fn empty_uploads_plan_is_empty() {
         let g = AtlasGeometry::new(64, 2, RGBA8).unwrap();
-        let plan = plan_atlas_copies(&g, &[]);
+        let plan = try_plan_atlas_copies(&g, &[]).expect("empty atlas staging plan");
         assert!(plan.copies.is_empty());
         assert_eq!(plan.staging_bytes, 0);
     }

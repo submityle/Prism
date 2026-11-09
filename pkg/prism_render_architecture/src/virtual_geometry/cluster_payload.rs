@@ -14,9 +14,6 @@ pub use attributes::{
 pub const STATIC_CLUSTER_PAYLOAD_MAGIC: [u8; 4] = *b"CLST";
 /// Current quantized position and lossless attribute payload schema.
 pub const STATIC_CLUSTER_PAYLOAD_VERSION: u16 = 3;
-/// Legacy position-only schema accepted by the decoder and emitted by
-/// [`encode_cluster_payload`].
-pub const POSITION_ONLY_CLUSTER_PAYLOAD_VERSION: u16 = 2;
 
 /// Decoded quantized cluster payload.
 #[derive(Clone, Debug, PartialEq)]
@@ -25,7 +22,7 @@ pub struct QuantizedClusterPayload {
     pub positions: Vec<[f32; 3]>,
     /// Local triangle indices.
     pub indices: Vec<u16>,
-    /// Authored shader location of `Vertex_Position` (zero in legacy v2).
+    /// Authored shader location of `Vertex_Position`.
     pub position_shader_location: u32,
     /// Losslessly preserved non-position attributes in shader-location order.
     pub attributes: Vec<ClusterVertexAttribute>,
@@ -74,10 +71,11 @@ impl core::fmt::Display for ClusterPayloadError {
     }
 }
 
-/// Encodes a legacy v2 position-only payload as normalized `u16x3` values.
-/// Use [`encode_cluster_payload_with_attributes`] for the current v3 schema.
-#[must_use]
-pub fn encode_cluster_payload(
+/// Encodes the common CLST geometry section as normalized `u16x3` values.
+///
+/// The v3 footer is appended by
+/// [`encode_cluster_payload_with_attributes`](crate::virtual_geometry::cluster_payload::encode_cluster_payload_with_attributes).
+fn encode_quantized_geometry(
     bounds: SceneBounds,
     positions: &[[f32; 3]],
     indices: &[u16],
@@ -111,7 +109,7 @@ pub fn encode_cluster_payload(
     }
     let mut bytes = Vec::with_capacity(10 + 24 + positions.len() * 6 + indices.len() * 2);
     bytes.extend_from_slice(&STATIC_CLUSTER_PAYLOAD_MAGIC);
-    bytes.extend_from_slice(&POSITION_ONLY_CLUSTER_PAYLOAD_VERSION.to_le_bytes());
+    bytes.extend_from_slice(&STATIC_CLUSTER_PAYLOAD_VERSION.to_le_bytes());
     bytes.extend_from_slice(&(positions.len() as u16).to_le_bytes());
     bytes.extend_from_slice(&((indices.len() / 3) as u16).to_le_bytes());
     for value in min.into_iter().chain(max) {
@@ -153,21 +151,11 @@ pub fn decode_cluster_payload(
         });
     }
     let version = u16::from_le_bytes([bytes[4], bytes[5]]);
-    if !matches!(
-        version,
-        POSITION_ONLY_CLUSTER_PAYLOAD_VERSION | STATIC_CLUSTER_PAYLOAD_VERSION
-    ) || !bounds_finite(bounds)
-    {
-        return Err(
-            if matches!(
-                version,
-                POSITION_ONLY_CLUSTER_PAYLOAD_VERSION | STATIC_CLUSTER_PAYLOAD_VERSION
-            ) {
-                ClusterPayloadError::NonFinite
-            } else {
-                ClusterPayloadError::InvalidHeader
-            },
-        );
+    if version != STATIC_CLUSTER_PAYLOAD_VERSION {
+        return Err(ClusterPayloadError::InvalidHeader);
+    }
+    if !bounds_finite(bounds) {
+        return Err(ClusterPayloadError::NonFinite);
     }
     let vertex_count = u16::from_le_bytes([bytes[6], bytes[7]]) as usize;
     let triangle_count = u16::from_le_bytes([bytes[8], bytes[9]]) as usize;
@@ -180,15 +168,8 @@ pub fn decode_cluster_payload(
     if bytes.len() < index_end {
         return Err(ClusterPayloadError::Truncated);
     }
-    let (position_shader_location, attributes) = if version == POSITION_ONLY_CLUSTER_PAYLOAD_VERSION
-    {
-        if bytes.len() != index_end {
-            return Err(ClusterPayloadError::InvalidFraming);
-        }
-        (0, Vec::new())
-    } else {
-        attributes::decode_attributes(vertex_count, bytes, index_end)?
-    };
+    let (position_shader_location, attributes) =
+        attributes::decode_attributes(vertex_count, bytes, index_end)?;
     let mut cursor = 10;
     let mut stored_min = [0.0; 3];
     let mut stored_max = [0.0; 3];
@@ -324,6 +305,14 @@ fn distance_squared(a: [f32; 3], b: [f32; 3]) -> f32 {
 mod tests {
     use super::*;
 
+    fn encode_position_only_v3(
+        bounds: SceneBounds,
+        positions: &[[f32; 3]],
+        indices: &[u16],
+    ) -> Result<Vec<u8>, ClusterPayloadError> {
+        encode_cluster_payload_with_attributes(bounds, positions, indices, 0, &[])
+    }
+
     fn bounds() -> SceneBounds {
         SceneBounds {
             center: [1.0, 2.0, 3.0],
@@ -336,7 +325,7 @@ mod tests {
     #[test]
     fn quantized_payload_round_trips_with_bounded_error() {
         let positions = [[0.0, 0.0, 0.0], [2.0, 2.0, 3.0], [1.0, 4.0, 6.0]];
-        let bytes = encode_cluster_payload(bounds(), &positions, &[0, 1, 2]).expect("encodes");
+        let bytes = encode_position_only_v3(bounds(), &positions, &[0, 1, 2]).expect("encodes");
         let decoded = decode_cluster_payload(bounds(), &bytes).expect("decodes");
         assert_eq!(decoded.indices, vec![0, 1, 2]);
         assert_eq!(decoded.positions.len(), positions.len());
@@ -358,14 +347,14 @@ mod tests {
             [1.0, 4.001, 3.0],
             [1.0, 2.0, 6.001],
         ] {
-            let result = encode_cluster_payload(bounds(), &[position], &[0, 0, 0]);
+            let result = encode_position_only_v3(bounds(), &[position], &[0, 0, 0]);
             assert_eq!(result, Err(ClusterPayloadError::BoundsMismatch));
         }
     }
 
     #[test]
     fn non_finite_positions_report_non_finite_error() {
-        let result = encode_cluster_payload(bounds(), &[[f32::NAN, 2.0, 3.0]], &[0, 0, 0]);
+        let result = encode_position_only_v3(bounds(), &[[f32::NAN, 2.0, 3.0]], &[0, 0, 0]);
         assert_eq!(result, Err(ClusterPayloadError::NonFinite));
     }
 
@@ -389,7 +378,7 @@ mod tests {
             _padding: 0.0,
         };
         let source = [[-f32::MAX; 3], [f32::MAX; 3], [0.0; 3]];
-        let bytes = encode_cluster_payload(bounds, &source, &[0, 1, 2]).unwrap();
+        let bytes = encode_position_only_v3(bounds, &source, &[0, 1, 2]).unwrap();
         let decoded = decode_cluster_payload(bounds, &bytes).unwrap();
         assert_eq!(decoded.positions[0], source[0]);
         assert_eq!(decoded.positions[1], source[1]);
@@ -427,7 +416,7 @@ mod tests {
                     ]
                 })
                 .collect();
-            let payload = encode_cluster_payload(bounds, &source, &[0, 1, 2]).unwrap();
+            let payload = encode_position_only_v3(bounds, &source, &[0, 1, 2]).unwrap();
             let decoded = decode_cluster_payload(bounds, &payload).unwrap();
             assert_eq!(
                 decoded.max_error_squared,

@@ -17,7 +17,8 @@ use prism_render_driver_null::{NullDevice, NullInstance};
 
 use super::{
     extract_assets, prepare_extracted_assets, prepare_extracted_assets_with_context,
-    AssetSyncReport, ExtractedAssets, GpuPrepareBudget, PrepareAssetError, PrepareContextError,
+    AssetSyncReport, ExtractedAssets, GpuPrepareBudget, PrepareAssetError, PrepareCancellation,
+    PrepareContextError,
     RenderAsset, RenderAssets,
 };
 
@@ -72,24 +73,24 @@ struct RetryOnceGpuBlob {
 impl RenderAsset for RetryOnceGpuBlob {
     type SourceAsset = RetryOnceBlob;
 
-    fn prepare(
+    fn prepare_with_context(
         source: &RetryOnceBlob,
         id: AssetId<RetryOnceBlob>,
-        device: &dyn RenderDevice,
-        _queue: &dyn RenderQueue,
+        context: &mut super::super::render_asset::PrepareContext<'_>,
         _previous: Option<&Self>,
     ) -> Result<Self, PrepareAssetError<RetryOnceBlob>> {
         if source.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
             return Err(PrepareAssetError::RetryNextUpdate(id));
         }
         let bytes = source.bytes as u64;
-        Ok(Self {
-            buffer: device.create_buffer(&BufferDescriptor {
+        let buffer = context.create_buffer(&BufferDescriptor {
                 label: Some("retry-once-gpu-blob".into()),
                 size: bytes,
                 usage: BufferUsages::STORAGE,
                 mapped_at_creation: false,
-            }),
+            }).map_err(|_| PrepareAssetError::RetryNextUpdate(id))?;
+        Ok(Self {
+            buffer,
             bytes,
         })
     }
@@ -106,16 +107,6 @@ struct TransactionalBlob {
 
 impl RenderAsset for TransactionalBlob {
     type SourceAsset = Blob;
-
-    fn prepare(
-        _source: &Blob,
-        _id: AssetId<Blob>,
-        _device: &dyn RenderDevice,
-        _queue: &dyn RenderQueue,
-        _previous: Option<&Self>,
-    ) -> Result<Self, PrepareAssetError<Blob>> {
-        unreachable!("the contextual path is the contract under test")
-    }
 
     fn prepare_with_context(
         source: &Blob,
@@ -154,11 +145,10 @@ impl RenderAsset for TransactionalBlob {
 impl RenderAsset for GpuBlob {
     type SourceAsset = Blob;
 
-    fn prepare(
+    fn prepare_with_context(
         source: &Blob,
         id: AssetId<Blob>,
-        device: &dyn RenderDevice,
-        _queue: &dyn RenderQueue,
+        context: &mut super::super::render_asset::PrepareContext<'_>,
         previous: Option<&Self>,
     ) -> Result<Self, PrepareAssetError<Blob>> {
         let bytes = source.0.len() as u64;
@@ -175,16 +165,18 @@ impl RenderAsset for GpuBlob {
                     reused: true,
                 });
             }
-            // It has to grow: release the old buffer rather than leak it.
-            device.destroy_buffer(previous.buffer);
+            // It has to grow; the replacement owns a new buffer.
         }
-        Ok(Self {
-            buffer: device.create_buffer(&BufferDescriptor {
+        let buffer = context
+            .create_buffer(&BufferDescriptor {
                 label: Some("gpu-blob".into()),
                 size: bytes,
                 usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
                 mapped_at_creation: false,
-            }),
+            })
+            .map_err(|_| PrepareAssetError::RetryNextUpdate(id))?;
+        Ok(Self {
+            buffer,
             bytes,
             reused: false,
         })
@@ -219,7 +211,16 @@ fn run_frame<A: RenderAsset>(
     let mut table = render
         .remove_resource::<RenderAssets<A>>()
         .unwrap_or_default();
-    let report = prepare_extracted_assets::<A>(&mut extracted, &mut table, device, queue);
+    let mut budget = GpuPrepareBudget::unlimited();
+    let cancellation = PrepareCancellation::new(false);
+    let report = prepare_extracted_assets_with_context::<A>(
+        &mut extracted,
+        &mut table,
+        device,
+        queue,
+        &mut budget,
+        &cancellation,
+    );
     render.insert_resource(extracted);
     render.insert_resource(table);
     report

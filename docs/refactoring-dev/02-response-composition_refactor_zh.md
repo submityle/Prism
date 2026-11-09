@@ -239,4 +239,6 @@ water_surface_fs_mask_blend
 
 material package（unit 888 + integration 79）及修订后的 resident composition strict 3/3 待复跑缺口已关闭。仍未验证：其他 response/shading package、architecture acceptance 与相关 integration targets 的当前完整复验；完整 Scene/Fabric/TAA 前后版本图像 parity、统一 runtime/recorder 与全域生命周期；第二 physical adapter；完整 32 gate 端到端运行（gate 23 仍为 `partial`）；旧入口删除前八项护栏及 S2/S4/S5 历史先后顺序的可追溯记录；以及全场景资源峰值、吞吐和 P50/P95/P99 性能证据。TAA 的真实 resource import、bind-group、queue completion 与退休已取得局部 GPU 证据，但不能据此关闭完整帧验收。历史 scene library `1909/1909`、水体单 adapter `19/19`、本次 composition `3/3`、TAA `19/19` 与 runtime `9/9`（8 hardware + 1 CPU fixture）均不能升级为全系统 composition 完成。
 
+**2026-11-09 原生修正补记**：Native composite 的 Registered MaskBlend 右臂已改为使用 `right_program_id`，并加入左右 program identity 回归断言；TAA host submission/cancel/live-retirement 接线也已补入原生 output driver。通用 Texture/VertexAttr/UV/Region response 消费、完整 split 组合、全帧 parity 与跨适配器证据仍未完成。
+
 **2026-11-09 Water coordinator 同步**：Water simulation、spray history reset/publication 与 displacement history copy 已统一到顶层 SceneFabric coordinator 的单次 host submission；旧 Water recorder 已删除，Water 定向筛选 **230/230** 通过。该局部入口收口不等于 Composition/TAA 完整帧 parity、全域 history lifecycle、第二 adapter 或性能验收完成。

@@ -52,6 +52,8 @@ pub(crate) struct FrameGraphStages {
     /// Per-emitter raster passes admitted by the current physical Fabric frame.
     pub particle_passes: u32,
     pub ember_compute_passes: u32,
+    /// Surface/material identity reconstruction before lighting composite.
+    pub surface_identity_passes: u32,
     pub lighting_dispatches: u32,
     /// Graph texture consumed by the final present pass (OCIO output for windows).
     pub present_source: prism_render_graph::TextureHandle,
@@ -87,9 +89,12 @@ impl FrameGraphStages {
         );
         let direct_recipes = lighting.is_some_and(|pass| pass.run_direct) as u32;
         let gi_recipes = lighting.is_some_and(|pass| pass.run_gi) as u32;
-        // Direct lighting is evaluated per pixel by composite. Only GI has a
-        // separate lighting compute pass in this graph.
-        let lighting_dispatches = lighting.map_or(0, |pass| u32::from(pass.run_gi) + 1);
+        let surface_identity_passes = u32::from(lighting.is_some());
+        // Direct lighting is evaluated per pixel by composite. Surface
+        // identity is a separate compute pass, followed by optional GI and
+        // the composite dispatch.
+        let lighting_dispatches =
+            surface_identity_passes + gi_recipes + u32::from(lighting.is_some());
         Self {
             scene_passes,
             trace_dispatches,
@@ -107,6 +112,7 @@ impl FrameGraphStages {
                         .expect("admitted particle raster passes fit graph capacity")
                 }),
             ember_compute_passes: ember.map_or(0, |registry| registry.compute_pass_count() as u32),
+            surface_identity_passes,
             lighting_dispatches,
             present_source,
         }
@@ -138,6 +144,10 @@ impl FrameGraphStages {
             "direct lighting is evaluated by the lighting composite"
         );
         assert!(
+            self.surface_identity_passes <= self.composite_passes,
+            "surface identity requires an admitted lighting composite"
+        );
+        assert!(
             self.present_passes <= 1,
             "a frame has at most one presentation"
         );
@@ -153,7 +163,7 @@ impl FrameGraphStages {
         );
         assert_eq!(
             self.lighting_dispatches,
-            self.gi_recipes + self.composite_passes,
+            self.surface_identity_passes + self.gi_recipes + self.composite_passes,
             "lighting dispatch accounting must match recorded passes"
         );
     }
@@ -460,7 +470,16 @@ impl FrameGraphBuffers {
         if let Some(pass) = lighting {
             for (buffer, size, usage) in [
                 (pass.gi_output, OUTPUT_BYTES, BufferUsages::STORAGE),
-                (pass.params, 32, BufferUsages::UNIFORM),
+                (
+                    pass.params,
+                    crate::lighting_gpu::LIGHTING_PARAMS_BYTES,
+                    BufferUsages::UNIFORM,
+                ),
+                (
+                    pass.camera_view,
+                    crate::lighting_gpu::CAMERA_VIEW_BYTES,
+                    BufferUsages::UNIFORM,
+                ),
                 (pass.directionals, 0, BufferUsages::STORAGE),
                 (pass.punctuals, 0, BufferUsages::STORAGE),
                 (pass.areas, 0, BufferUsages::STORAGE),
@@ -472,6 +491,11 @@ impl FrameGraphBuffers {
                 (
                     pass.surfaces,
                     crate::lighting_gpu::LIGHTING_SURFACE_BUFFER_BYTES,
+                    BufferUsages::STORAGE,
+                ),
+                (
+                    pass.material_lighting_surfaces,
+                    crate::lighting_gpu::MATERIAL_LIGHTING_SURFACE_BYTES,
                     BufferUsages::STORAGE,
                 ),
             ] {
@@ -486,9 +510,7 @@ impl FrameGraphBuffers {
                     materials.headers_size_bytes,
                 ),
                 (
-                    materials
-                        .parameters
-                        .expect("validated material parameters"),
+                    materials.parameters.expect("validated material parameters"),
                     materials.parameters_size_bytes,
                 ),
                 (
@@ -852,6 +874,39 @@ fn append_target_graph(
             array_layers: 1,
         },
     );
+    let mut surface_data = graph.import_texture(
+        "prism-render-app-gbuffer-surface-data",
+        TextureDesc::color(target.surface_data_format())
+            .with_size(prism_render_graph::SizeClass::absolute_2d(
+                target.viewport().width,
+                target.viewport().height,
+            ))
+            .with_usage(
+                TextureUsages::COPY_SRC
+                    .union(TextureUsages::COPY_DST)
+                    .union(TextureUsages::TEXTURE_BINDING),
+            ),
+        ImportedTexture {
+            texture: target.surface_data_texture(),
+            default_view: target.surface_data_view(),
+            entry_state: TextureState::initial(),
+            exit_state: TextureState::shader_read(
+                prism_render_driver::PipelineStages::COMPUTE_SHADER,
+            ),
+            mip_levels: 1,
+            array_layers: 1,
+        },
+    );
+    buffers.require(
+        target.surface_identity_buffer(),
+        BufferDesc::new(target.surface_identity_size_bytes(), BufferUsages::STORAGE),
+    );
+    let mut surface_identity = buffers.import(
+        graph,
+        "prism-render-app-surface-identity",
+        BufferDesc::new(target.surface_identity_size_bytes(), BufferUsages::STORAGE),
+        target.surface_identity_buffer(),
+    );
     let mut motion = graph.import_texture(
         "prism-render-app-taa-motion",
         TextureDesc::color(target.taa_motion_format())
@@ -1009,6 +1064,8 @@ fn append_target_graph(
                 normal = clear_color_or_write(builder, normal, clear, Color::TRANSPARENT);
                 albedo = clear_color_or_write(builder, albedo, clear, Color::TRANSPARENT);
                 surface_id = clear_color_or_write(builder, surface_id, clear, Color::TRANSPARENT);
+                surface_data =
+                    clear_color_or_write(builder, surface_data, clear, Color::TRANSPARENT);
                 depth = match clear {
                     ClearMode::ColorAndDepth | ClearMode::DepthOnly => {
                         builder.depth_attachment(depth)
@@ -1097,6 +1154,7 @@ fn append_target_graph(
                 normal = builder.color_attachment(normal);
                 albedo = builder.color_attachment(albedo);
                 surface_id = builder.color_attachment(surface_id);
+                surface_data = builder.color_attachment(surface_data);
                 depth = builder.depth_attachment(depth);
                 for handle in &vertex_reads {
                     let _ = builder.read_vertex(*handle);
@@ -1119,6 +1177,108 @@ fn append_target_graph(
                 let queues = queues.clone();
                 let functions = functions.clone();
                 move |ctx| queues.record(phase, ctx, &functions)
+            },
+        );
+    }
+
+    if let Some(lighting) = lighting {
+        let identity_bind_group = lighting
+            .surface_identity_bind_group
+            .expect("material lighting graph requires a surface identity bind group");
+        let identity_headers = lighting
+            .composite_material_buffers()
+            .and_then(|buffers| buffers.headers)
+            .expect("surface identity pass requires canonical material headers");
+        let identity_headers_handle = buffers.import(
+            graph,
+            "prism-material-headers-identity",
+            BufferDesc::new(
+                lighting
+                    .composite_material_buffers()
+                    .expect("material buffers")
+                    .headers_size_bytes,
+                BufferUsages::STORAGE,
+            ),
+            identity_headers,
+        );
+        let identity_materials = lighting
+            .composite_material_buffers()
+            .expect("material buffers");
+        let identity_plans = identity_materials
+            .execution_plans
+            .expect("surface identity pass requires canonical execution plans");
+        let identity_programs = identity_materials
+            .execution_programs
+            .expect("surface identity pass requires canonical execution programs");
+        let identity_plans_handle = buffers.import(
+            graph,
+            "prism-material-execution-plans-identity",
+            BufferDesc::new(
+                identity_materials.execution_plans_size_bytes,
+                BufferUsages::STORAGE,
+            ),
+            identity_plans,
+        );
+        let identity_programs_handle = buffers.import(
+            graph,
+            "prism-material-execution-programs-identity",
+            BufferDesc::new(
+                identity_materials.execution_programs_size_bytes,
+                BufferUsages::STORAGE,
+            ),
+            identity_programs,
+        );
+        let identity_mapping_handle = buffers.import(
+            graph,
+            "prism-lighting-material-surface-map",
+            BufferDesc::new(
+                crate::lighting_gpu::MATERIAL_LIGHTING_SURFACE_BYTES,
+                BufferUsages::STORAGE,
+            ),
+            lighting.material_lighting_surfaces,
+        );
+        let identity_params_handle = buffers.import(
+            graph,
+            "prism-lighting-params-identity",
+            BufferDesc::new(
+                crate::lighting_gpu::LIGHTING_PARAMS_BYTES,
+                BufferUsages::UNIFORM,
+            ),
+            lighting.params,
+        );
+        let identity_workgroups = [
+            target
+                .viewport()
+                .width
+                .div_ceil(crate::lighting_gpu::COMPOSITE_WORKGROUP_X),
+            target
+                .viewport()
+                .height
+                .div_ceil(crate::lighting_gpu::COMPOSITE_WORKGROUP_Y),
+            1,
+        ];
+        graph.add_compute_pass(
+            "prism-surface-identity",
+            PassFlags::SIDE_EFFECT,
+            |builder| {
+                let _normal = builder.read_texture(normal);
+                let _surface_id = builder.read_texture(surface_id);
+                let _headers = builder.read_storage_buffer(identity_headers_handle);
+                let _plans = builder.read_storage_buffer(identity_plans_handle);
+                let _programs = builder.read_storage_buffer(identity_programs_handle);
+                let _mapping = builder.read_storage_buffer(identity_mapping_handle);
+                let _params = builder.read_uniform(identity_params_handle);
+                surface_identity = builder.write_storage_buffer(surface_identity);
+                move |context| {
+                    context
+                        .set_compute_pipeline(lighting.surface_identity_pipeline)
+                        .set_compute_bind_group(0, identity_bind_group, Vec::new())
+                        .dispatch(
+                            identity_workgroups[0],
+                            identity_workgroups[1],
+                            identity_workgroups[2],
+                        );
+                }
             },
         );
     }
@@ -1290,6 +1450,7 @@ fn append_target_graph(
         external_texture_handles.insert(target.normal_view(), normal);
         external_texture_handles.insert(target.albedo_view(), albedo);
         external_texture_handles.insert(target.surface_id_view(), surface_id);
+        external_texture_handles.insert(target.surface_data_view(), surface_data);
         external_texture_handles.insert(target.taa_motion_view(), motion);
         external_texture_handles.insert(target.taa_reactive_view(), reactive);
         external_texture_handles.insert(target.depth_view(), depth);
@@ -1308,10 +1469,31 @@ fn append_target_graph(
         BufferDesc::new(OUTPUT_BYTES, BufferUsages::STORAGE),
         lighting.gi_output,
     );
+    let mut response_output = buffers.import(
+        graph,
+        "prism-lighting-response-output",
+        BufferDesc::new(
+            lighting.response_output_size_bytes,
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        ),
+        lighting.response_output,
+    );
+    let camera_view = buffers.import(
+        graph,
+        "prism-lighting-camera-view",
+        BufferDesc::new(
+            crate::lighting_gpu::CAMERA_VIEW_BYTES,
+            BufferUsages::UNIFORM,
+        ),
+        lighting.camera_view,
+    );
     let params = buffers.import(
         graph,
         "prism-lighting-plan-params",
-        BufferDesc::new(32, BufferUsages::UNIFORM),
+        BufferDesc::new(
+            crate::lighting_gpu::LIGHTING_PARAMS_BYTES,
+            BufferUsages::UNIFORM,
+        ),
         lighting.params,
     );
     let directionals = buffers.import(
@@ -1361,9 +1543,7 @@ fn append_target_graph(
         ),
         (
             "prism-material-parameters",
-            materials
-                .parameters
-                .expect("validated material parameters"),
+            materials.parameters.expect("validated material parameters"),
             materials.parameters_size_bytes,
         ),
         (
@@ -1389,6 +1569,8 @@ fn append_target_graph(
             buffer,
         )
     });
+    let [material_headers, material_parameters, _material_plans, _material_programs] =
+        material_reads;
     if let (Some(trace), Some(hits), Some((trace_triangles, trace_attributes, trace_rays)), true) =
         (trace, trace_hits, trace_inputs, lighting.run_gi)
         && let (
@@ -1476,15 +1658,17 @@ fn append_target_graph(
             normal = builder.sample(normal);
             albedo = builder.sample(albedo);
             surface_id = builder.sample(surface_id);
+            surface_data = builder.sample(surface_data);
+            let _surface_identity = builder.read_storage_buffer(surface_identity);
             let _gi = builder.read_storage_buffer(gi_output);
             let _params = builder.read_uniform(params);
+            let _camera_view = builder.read_uniform(camera_view);
             let _directionals = builder.read_storage_buffer(directionals);
             let _punctuals = builder.read_storage_buffer(punctuals);
             let _areas = builder.read_storage_buffer(areas);
-            assert_eq!(material_reads.len(), 4);
-            for handle in material_reads {
-                let _ = builder.read_storage_buffer(handle);
-            }
+            let _headers = builder.read_storage_buffer(material_headers);
+            let _parameters = builder.read_storage_buffer(material_parameters);
+            response_output = builder.write_storage_buffer(response_output);
             color = builder.write_storage_texture(color);
             move |context| {
                 context
@@ -1618,6 +1802,7 @@ fn append_target_graph(
     external_texture_handles.insert(target.normal_view(), normal);
     external_texture_handles.insert(target.albedo_view(), albedo);
     external_texture_handles.insert(target.surface_id_view(), surface_id);
+    external_texture_handles.insert(target.surface_data_view(), surface_data);
     external_texture_handles.insert(target.taa_motion_view(), motion);
     external_texture_handles.insert(target.taa_reactive_view(), reactive);
     external_texture_handles.insert(target.depth_view(), depth);
@@ -1981,7 +2166,7 @@ mod tests {
         target: &RenderTarget,
         plan: &ExecutionPlan,
         handles: &BTreeMap<TextureViewId, TextureHandle>,
-    ) -> [ResourceIndex; 6] {
+    ) -> [ResourceIndex; 7] {
         // f32 XYZ and full u32 identity remain independent planes. Coverage is
         // stored in normal alpha (f16), not the lossy/clamped sRGB8 albedo.
         let formats = [
@@ -1991,6 +2176,7 @@ mod tests {
             target.normal_format(),
             target.albedo_format(),
             target.surface_id_format(),
+            target.surface_data_format(),
         ];
         assert_eq!(
             formats,
@@ -2001,6 +2187,7 @@ mod tests {
                 TextureFormat::Rgba16Float,
                 TextureFormat::Rgba8UnormSrgb,
                 TextureFormat::R32Uint,
+                TextureFormat::Rgba16Float,
             ]
         );
         assert_eq!(target.format(), TextureFormat::Rgba16Float);
@@ -2011,6 +2198,7 @@ mod tests {
             target.normal_view(),
             target.albedo_view(),
             target.surface_id_view(),
+            target.surface_data_view(),
         ]
         .map(|view| handles[&view].resource());
         assert_eq!(
@@ -2040,7 +2228,7 @@ mod tests {
             );
             // Keep the concrete format accounting beside the ABI assertion:
             // WebGPU charges sRGB8 RGBA 8 attachment bytes, not its 4 storage
-            // bytes. Six GBuffer targets cost 4+4+4+8+8+4 = 32; HDR costs 8.
+            // bytes. Seven GBuffer targets cost 4+4+4+8+8+4+8 = 40; HDR costs 8.
             let bytes: u32 = raster
                 .colors
                 .iter()
@@ -2048,14 +2236,14 @@ mod tests {
                     if attachment.resource == hdr {
                         8
                     } else {
-                        [4, 4, 4, 8, 8, 4][gbuffer
+                        [4, 4, 4, 8, 8, 4, 8][gbuffer
                             .iter()
                             .position(|resource| *resource == attachment.resource)
                             .unwrap()]
                     }
                 })
                 .sum();
-            assert!(bytes <= 32);
+            assert!(bytes <= 40);
             assert!(raster.colors.iter().all(|a| a.store == StoreOp::Store));
             if raster
                 .colors
@@ -2068,7 +2256,7 @@ mod tests {
                         assert_eq!(
                             attachment.load,
                             LoadOp::Clear(Color::TRANSPARENT),
-                            "all six GBuffer planes must be initialized to zero; only normal alpha carries coverage"
+                            "all seven GBuffer planes must be initialized to zero; only normal alpha carries coverage"
                         );
                     }
                     let attachment = raster.depth.unwrap();
@@ -2112,7 +2300,7 @@ mod tests {
     }
 
     #[test]
-    fn no_lighting_empty_frame_clears_six_gbuffer_attachments_and_hdr_separately() {
+    fn no_lighting_empty_frame_clears_seven_gbuffer_attachments_and_hdr_separately() {
         let device = null_device();
         let target = RenderTarget::new(&device, Extent3d::new_2d(16, 8));
         let (plan, handles) =
@@ -2343,7 +2531,7 @@ mod tests {
                 None,
                 &imports,
             );
-        assert_eq!(handles.len(), 9, "eight builtins plus one owner import");
+        assert_eq!(handles.len(), 12, "eleven builtins plus one owner import");
         assert!(handles.contains_key(&external_view));
         assert!(handles.contains_key(&target.depth_view()));
         assert!(graph.compile().is_ok());
@@ -2410,7 +2598,8 @@ mod tests {
                 matches!(barrier, prism_render_graph::GraphBarrier::Texture(texture_barrier)
                 if texture_barrier.texture == resource
                     && texture_barrier.after == TextureState::shader_read(
-                        prism_render_driver::PipelineStages::FRAGMENT_SHADER
+                        prism_render_driver::PipelineStages::VERTEX_SHADER
+                            .union(prism_render_driver::PipelineStages::FRAGMENT_SHADER)
                     ))
             }),
             "surface pass must transition the imported view to sampled-read state"

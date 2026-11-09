@@ -172,6 +172,8 @@ Bevy `prism_render_scene` 路径现另有 Hair/Volume/Decal 的生产帧聚合 s
 
 因此，本系列当前结论是“局部契约和局部生产切片有证据，原生全帧闭环仍未完成”。本次文档同步未运行 Cargo 或 GPU；所有新增结论均为范围/证据口径收口，不把未验证内容写成完成。
 
+**2026-11-09 原生接线复核补记**：当前 `prism_render_app` 的基础生产入口已经完成 `prepare/finalize → RenderGraph → execute_tracked → completion`，Surface/Particle 的原生多视图与 recovery 也有对应实现；这些基础项不再单独当作“入口不存在”。本轮补上了原生 TAA 在 graph 成功提交后的 `mark_output_submitted`、失败路径的 `cancel_output`、逐帧 live-history completion 回收，并修正 Registered response MaskBlend 右臂使用左 program identity 的错误。该修正不关闭完整 31-pass 全帧、原生 Water/Hair/Volume/Decal 全域接线、跨适配器、图像 parity 或性能数据缺口。
+
 ## 6. Git 历史锚点
 
 - `0de14a400 refactor surface ABI lobe and mirror gates`：建立 schema/codegen、Surface ABI 与镜像门禁。
