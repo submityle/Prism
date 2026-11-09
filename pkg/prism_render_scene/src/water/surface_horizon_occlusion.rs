@@ -39,8 +39,10 @@
 
 #[cfg(test)]
 mod tests {
-    use bevy_math::{ops, Vec3};
+    use bevy_math::Vec3;
     use core::f32::consts::PI;
+    use prism_math::ops;
+    use prism_math::Vec3 as PrismVec3;
     use prism_render_shading::gi::occlusion::{
         cone_cone_intersection as golden_cone, horizon_occlusion as golden_horizon,
     };
@@ -52,7 +54,7 @@ mod tests {
 
     /// Byte-for-byte re-statement of the shader's `water_smoothstep01` helper:
     /// the single-parameter Hermite ramp, evaluated with the engine's
-    /// libm-deterministic [`bevy_math::ops`] arithmetic.
+    /// shared [`prism_math::ops`] arithmetic.
     fn water_smoothstep01(t: f32) -> f32 {
         let x = t.clamp(0.0, 1.0);
         x * x * (3.0 - 2.0 * x)
@@ -105,7 +107,8 @@ mod tests {
     }
 
     /// Byte-for-byte re-statement of the shader's `water_horizon_occlusion`
-    /// helper (closed-/open-cone early-outs and the aperture-scaled rim).
+    /// helper (closed-/open-cone early-outs and the aperture-scaled rim),
+    /// evaluated with the same math operations as the Prism shading golden.
     fn water_horizon_occlusion(
         reflection_dir: Vec3,
         bent_normal_view: Vec3,
@@ -174,7 +177,12 @@ mod tests {
                 for &ap_a in &apertures() {
                     for &ap_b in &apertures() {
                         let twin = water_cone_cone_intersection(da, ap_a, db, ap_b);
-                        let g = golden_cone(da, ap_a, db, ap_b);
+                        let g = golden_cone(
+                            PrismVec3::new(da.x, da.y, da.z),
+                            ap_a,
+                            PrismVec3::new(db.x, db.y, db.z),
+                            ap_b,
+                        );
                         assert_eq!(
                             twin.to_bits(),
                             g.to_bits(),
@@ -194,7 +202,11 @@ mod tests {
             for bent in dirs {
                 for &ap in &apertures() {
                     let twin = water_horizon_occlusion(refl, bent, ap);
-                    let g = golden_horizon(refl, bent, ap);
+                    let g = golden_horizon(
+                        PrismVec3::new(refl.x, refl.y, refl.z),
+                        PrismVec3::new(bent.x, bent.y, bent.z),
+                        ap,
+                    );
                     assert_eq!(
                         twin.to_bits(),
                         g.to_bits(),

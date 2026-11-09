@@ -206,7 +206,7 @@ mod tests {
         interpolate_irradiance, InterpolationConfig, ProbeNeighbor, ShL1Rgb,
     };
 
-    use bevy_math::Vec3;
+    use prism_math::Vec3;
 
     const EPS: f32 = 1.0e-6;
 

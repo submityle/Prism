@@ -9,10 +9,10 @@
 //! the `wgpu` buffers and storage textures, builds the twelve bind groups and
 //! records the resident body plus its ordered dispatch schedule.
 //!
-//! Bodies are rebuilt every frame from scratch (clear-then-refill), matching
-//! the extract stage: the resident resources are recreated and re-uploaded,
-//! which is the honest baseline before a later slice folds in persistent
-//! buffers with `queue`-side rewrites. A body whose live passes expand to no
+//! Bodies are currently rebuilt every frame from scratch (clear-then-refill),
+//! matching the extract stage: resident resources are recreated and
+//! re-uploaded. This is a known allocation/upload hot path and is not the
+//! intended steady-state performance target. A body whose live passes expand to no
 //! dispatch contributes no resident body, so an empty or dormant body never
 //! fabricates a solve and the dispatch node stays a genuine no-op for it.
 
@@ -21,6 +21,7 @@ use bevy_render::renderer::RenderDevice;
 
 use prism_render_architecture::water::gpu::pipeline::prepare;
 use prism_render_architecture::water::{WaterFabricPlan, WaterShadingPlan};
+use prism_render_architecture::render_fabric::{DomainObjectHandle, RenderObjectId};
 
 use super::bind_groups::{WaterBodyBindGroups, WaterBodyGpuBuffers};
 use super::body::ExtractedWater;
@@ -42,6 +43,8 @@ pub(crate) fn prepare_water_bodies(
     pipelines: Option<Res<WaterComputePipelines>>,
     device: Res<RenderDevice>,
     scene_fabric: Res<crate::gpu::fabric::SceneFabric>,
+    scene_rhi: Res<crate::gpu::rhi::SceneRhi>,
+    mut scene_history: ResMut<crate::gpu::fabric_history::SceneFabricHistory>,
     mut spray_history: ResMut<super::spray_history::SprayHistory>,
     spray_pipelines: Option<Res<super::spray_history::SprayPipelines>>,
 ) {
@@ -53,14 +56,12 @@ pub(crate) fn prepare_water_bodies(
     let Some(pipelines) = pipelines else {
         return;
     };
-
-    spray_history.begin_frame(&extracted.entities);
+    spray_history.begin_frame(&extracted.entities, &mut scene_history.lifecycle);
     for (index, body) in extracted.bodies.iter().enumerate() {
         let plan = prepare(&body.as_extract());
         if plan.dispatches.is_empty() {
             continue;
         }
-
         let upload = body.as_upload();
         let buffers = WaterBodyGpuBuffers::create(&device, &upload);
         let bind_groups = WaterBodyBindGroups::create(&device, &pipelines, &buffers);
@@ -73,6 +74,11 @@ pub(crate) fn prepare_water_bodies(
             .map_or(WaterShadingPlan::default(), |draw| draw.shading.plan);
         let water_fabric = WaterFabricPlan::for_shading(shading);
         let mut resident = WaterGpuBody::new(
+            RenderObjectId::Water(DomainObjectHandle::new(
+                extracted.entities[index].index().index(),
+                extracted.entities[index].generation().to_bits(),
+            )),
+            extracted.entities[index].index().index(),
             buffers,
             bind_groups,
             plan.dispatches,
@@ -87,6 +93,8 @@ pub(crate) fn prepare_water_bodies(
                 &device,
                 spray_pipelines,
                 &scene_fabric,
+                &scene_rhi,
+                &mut scene_history.lifecycle,
             );
         }
         bodies.bodies.push(resident);

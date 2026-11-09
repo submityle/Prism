@@ -94,7 +94,7 @@ use prism_render_architecture::water::gpu::surface_pass::plan_surface_plan;
 use prism_render_architecture::water::{ResponseProgram, WaterShadingPlan};
 
 use super::super::shading::{ViewVisibilityBuffer, MOTION_VECTOR_FORMAT, REACTIVE_MASK_FORMAT};
-use crate::lighting::LightBindGroup;
+use crate::scene_lighting::LightBindGroup;
 
 /// The three response programs plus the MaskBlend plan in a stable order; the index into
 /// [`ViewWaterSurfacePipelines::ids`] is this slot. `PBR` first keeps the

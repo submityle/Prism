@@ -1,6 +1,7 @@
 //! `Core3d` graph node that rasterizes the displaced water surface on screen.
 //!
-//! Terminal step of the water render chain. Upstream, [`super::dispatch`] ran
+//! Terminal step of the water render chain. Upstream, the shared SceneFabric
+//! coordinator ran
 //! the compute sweep that filled each body's four `@group(0)` storage arrays
 //! (base positions / surface UVs / displacement / normal-foam), and
 //! [`super::surface_pipeline`] specialized a raster pipeline per view and
@@ -30,7 +31,7 @@ use bevy_render::{
 use bevy_math::{UVec2, Vec3, Vec4};
 use prism_render_shading::ReceiverProjection;
 
-use crate::lighting::LightBindGroup;
+use crate::scene_lighting::LightBindGroup;
 use crate::shading::{
     GpuVsmResolveParams, PrismShadingSettings, PrismVirtualShadowSettings,
     PrismWorldSpaceGiSettings, ViewResponseComposition, ViewSsrTextures, ViewVisibilityBuffer,
@@ -314,11 +315,13 @@ pub(crate) fn draw_water_surface(
         (atlas.physical_pages(), atlas.physical_pages_per_edge())
     });
     let direction = light_direction.unwrap_or(Vec3::NEG_Y);
-    let projection = ReceiverProjection::from_light_direction(direction, Vec3::ZERO, 0.0);
+    let direction_math = prism_math::Vec3::from_array(direction.to_array());
+    let projection =
+        ReceiverProjection::from_light_direction(direction_math, prism_math::Vec3::ZERO, 0.0);
     let light_forward = {
-        let normalized = direction.normalize_or_zero();
-        if normalized == Vec3::ZERO {
-            Vec3::NEG_Y
+        let normalized = direction_math.normalize_or_zero();
+        if normalized == prism_math::Vec3::ZERO {
+            prism_math::Vec3::NEG_Y
         } else {
             normalized
         }
@@ -329,9 +332,9 @@ pub(crate) fn draw_water_surface(
         physical_pages_per_edge,
         pcf_radius,
         enable,
-        projection.light_right,
-        projection.light_up,
-        light_forward,
+        Vec3::from_array(projection.light_right.to_array()),
+        Vec3::from_array(projection.light_up.to_array()),
+        Vec3::from_array(light_forward.to_array()),
     );
     let vsm_params_buffer = device.create_buffer_with_data(&BufferInitDescriptor {
         label: Some("prism water surface vsm params"),

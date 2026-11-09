@@ -111,7 +111,7 @@ GPU header + dense execution binding
 - execution binding：`pkg/prism_render_material/src/execution.rs`；
 - authoring IR 与 closure lowering：`pkg/prism_render_material/src/ir.rs`。
 
-历史运行记录（非本轮复跑）：`cargo test -p prism_render_material --tests` 曾有单元测试 `878 passed; 0 failed`；`codegen_freshness` 11 项、`material_header_abi` 3 项、`pcm_parity` 7 项、`schema_parity` 9 项、`shading_plan` 33 项、`surface_abi_mirror` 2 项均通过。本轮另验证 `prism_render_scene --lib` 1909/1909 与 `prism_render_material::handle::tests` 6/6；未复跑上述 codegen/integration 套件。
+历史运行记录（非本轮复跑）：`cargo test -p prism_render_material --tests` 曾有单元测试 `878 passed; 0 failed`；`codegen_freshness` 11 项、`material_header_abi` 3 项、`pcm_parity` 7 项、`schema_parity` 9 项、`shading_plan` 33 项、`surface_abi_mirror` 2 项均通过。此前另有 `prism_render_scene --lib` 1909/1909 与 `prism_render_material::handle::tests` 6/6 记录；codegen/integration 后续已于 2026-10-22 随 material 全 package 复验，见 §9。
 
 ## 8. Git 历史锚点
 
@@ -123,14 +123,29 @@ GPU header + dense execution binding
 
 ## 9. 最终收口验收矩阵 / 未完成项（2026-10-21 文档审计）
 
+
+**2026-10-22 最新复验与状态修正**：architecture 改动已提交 `652404b94`。main 对当前架构源码实际复验 `render_fabric` **200 passed / 0 failed / 0 ignored**、`shader_package` **95 passed / 0 failed / 0 ignored**、acceptance **3 passed / 0 failed / 0 ignored**；日志与范围见 05 §15.2。本文较早的 185 项及 shader-package/acceptance“未复跑”描述仅代表此前截点，以本补记为准。acceptance 的 3 项验证 ledger/fanout/partial 标记，不是完整 32 gate 端到端通过。
+
+**局部 GPU 桥接证据修正**：既有日志已记录 `fabric_runtime` 定向筛选 **29 passed**（CPU/GPU 混合，不能全部算硬件用例），其中 authenticated `from_domain` bridge 在 Apple M2/Metal 完成真实上传、dispatch 和子范围隔离；RHI pipeline bridge 筛选 **15 passed**，包含 exact native render-pipeline identity/generation/lease 与原生绘制。这里只关闭相应局部桥接验证，不能关闭 Hair/Volume/Decal 的真实语义渲染、typed graphics 全链、统一 Scene/Fabric/TAA full-frame、第二 adapter 或性能验收。
+
 **2026-10-21 收口补记**：此前 `prism_render_scene --features legacy-bevy --lib` 的 `cargo check` 曾通过，确认当时的 Surface/Fabric 依赖可编译；一次后续尝试曾因 `prism_asset` 的 `Flight` 初始化缺少 `cancellation_waiters` 字段而停止，域帧定向测试未进入执行。该错误仅是历史记录：当前 `Flight` 定义已无此字段，后续编译反馈也已越过 asset 初始化；本次文档同步未运行 Cargo，不认定当前仍受该错误阻断。这些记录都不是 Surface ABI package freshness、真实 recorder 或 GPU parity 证据，未完成验收全部保留。
 
-本节区分源码、测试定义和实跑证据。`S`=源码事实，`D`=测试定义，`R`=本轮运行通过，`H`=已有运行记录，`G`=GPU 证据，`E`=全场景闭环。本轮 `prism_render_scene --lib` 为 1909/1909，material allocator 定向测试为 6/6；未运行完整 `prism_render_material` integration/codegen freshness 套件或真实 GPU 验收。
+**2026-10-22 package 复验**：`cargo test -p prism_render_material --jobs 1 --config profile.test.debug=0`（无 `--lib` 限制）退出码 0；unit **888/888**，integration **79/79**，doc 0 项。integration 分别为 freshness 19、header ABI 4、PCM parity 7、S5 ABI/cache invalidation 4、schema parity 10、ShadingPlan 33、Surface mirror 2；均为 0 failed / 0 ignored。freshness 包含重新生成 Rust layout、schema contract、WESL unpack 与 classification 后逐字节比较。日志 `/private/tmp/prism-render-material-package-20261022.log`。本 package/freshness 缺口已关闭，不代表真实 GPU 或全帧验收。
+
+**2026-10-22 局部证据补记**：main 实际复验 `prism_render_architecture --lib render_fabric` **200/200、terminal exit 0**（含新增 9 项对象资源 CPU 契约；旧 **176/176** 为历史，不重复相加）。main 实际运行并确认 exit 0 的 strict multipass 为 **9/9 = 8 项 Apple M2/Metal 硬件 + 1 项 CPU fixture**，本次已核对 `/private/tmp/prism-fabric-object-runtime-gpu-20261022.log`；旧 **8/8 = 7 hardware + 1 CPU fixture** 为历史。新增对象 fixture 覆盖 exact object/generation/history/role 寻址、完整上传/错误 role 拒绝与子分配隔离；不代表 `from_domain` 桥接 GPU、三域语义渲染、整个 shader-package/acceptance 或完整帧验收。
+
+**2026-10-22 Hair/Volume/Decal 生产接线边界修正**：Hair 与 Decal 的 catalog 仍使用 **256B persistent STORAGE buffer** 泛化模板，每域仅声明 1 个 compute pass 和 3 个 `StorageWrite`，尚不匹配 strand arrays 或 decal receiver/material ABI；仍需真实资源/pass/access、生产数据、pipeline/bind group、draw/dispatch 与下游消费者。Volume 的 catalog 同样是泛化模板，不能代表现有 volumetric fog：`pkg/prism_render_scene/src/shading/volumetrics` 已有按 view 缓存的真实 3D froxel textures、scatter/integrate/apply pipelines、bind groups、scene depth/color 输入及 copy-back。Volume 真正未完成的是把该生产路径纳入冻结 SceneFabric 的真实纹理布局、pass 依赖/hazard、typed recorder 和宿主 record/submit；scene-color copy-back 尚未作为 Fabric pass。不得用占位 buffer、probe 或伪造输出冒充集成；`from_domain` 的局部 GPU 上传/dispatch/subrange 证据不覆盖 volumetrics 语义或全帧闭环。
+
+**2026-10-23 Volume 状态更正**：上述关于 Volume 尚未进入 SceneFabric 的描述已被后续实现取代。生产 scatter/integrate/apply 与 scene-color copy-back 已使用真实纹理模板和 typed recorder 接入 frozen SceneFabric，且设备启动检查 96-byte `IMMEDIATES` 能力；Apple M2/Metal 上 dispatch/readback 与 lifecycle 两个 strict GPU 用例分别 **1/1** 通过。生命周期测试覆盖 viewport resize、missing visibility、zero viewport 与 disable 的 view/cache 行为；仍缺完整 schedule 下的 completion-gated resource retirement 与完整帧闭环。Hair/Decal 与其余全场景缺口保持不变。
+
+本节区分源码、测试定义和实跑证据。`S`=源码事实，`D`=测试定义，`R`=本轮运行通过，`H`=已有运行记录，`G`=GPU 证据，`E`=全场景闭环。scene lib 1909/1909、allocator 6/6 为此前独立运行记录；当前 material package 结果以上述复验为准。
 
 | 条款 | S 源码完成 | D 测试定义 | R | H / G | E 全场景闭环 |
 |---|---|---|---|---|---|
-| schema/codegen/layout/header/mirror | schema 真源、生成 Rust/WESL、header 与 dense binding 已存在 | freshness、mirror、slot/word、lobe-mask 和 ABI gate 已定义 | scene lib 1909/1909；allocator 6/6；codegen freshness 未运行 | 有 `prism_render_material` 历史 `878/0` 记录；无专门跨适配器 ABI GPU 证据 | 否；未证明完整 Scene/Fabric 消费 |
-| identity 分层与 OpenPBR boundary | `closure_mask`、`active_lobes`、execution binding 分层及导入边界存在 | fixed-point、activation、layout 和 stale-binding gate 已定义 | scene lib 1909/1909 | 先前 material/shading 单元与集成记录仍单独保留 | 否；未证明所有材质在完整帧中消费同一 ABI |
-| ABI 变更后的 package/cache/driver 影响 | 由 03 的 typed identity、ABI fingerprint 和 stale rejection 接线承载 | cache invalidation / pipeline worker gate 已定义 | 无 | 相关历史记录与单 adapter 水体 GPU 记录不等于全域 driver binary 验证 | 否 |
+| schema/codegen/layout/header/mirror | schema 真源、生成 Rust/WESL、header 与 dense binding 已存在 | freshness、mirror、slot/word、lobe-mask 和 ABI gate 已定义 | material unit 888/888、integration 79/79，含 freshness 19/19 | 无专门跨适配器 ABI GPU 证据 | 否；未证明完整 Scene/Fabric 消费 |
+| identity 分层与 OpenPBR boundary | `closure_mask`、`active_lobes`、execution binding 分层及导入边界存在 | fixed-point、activation、layout 和 stale-binding gate 已定义 | material 全 package 已通过，含 schema parity 10/10、ShadingPlan 33/33 | shading package 与 GPU 证据另计 | 否；未证明所有材质在完整帧中消费同一 ABI |
+| ABI 变更后的 package/cache/driver 影响 | 由 03 的 typed identity、ABI fingerprint 和 stale rejection 接线承载 | cache invalidation / pipeline worker gate 已定义 | material S5 ABI/cache invalidation 4/4 | 该 CPU gate 不等于全域 driver binary 验证 | 否 |
 
-仍未验证：完整 `prism_render_material` package/integration 与生成物 freshness；跨适配器 ABI/shader 消费；Surface ABI 在统一 Scene/Fabric 每帧提取、绑定、barrier 和真实 recorder 中的端到端使用；以及完整帧图像 parity、资源/性能数据。`prism_render_scene --lib` 通过不等于这些 package 级和全场景验收已完成。
+仍未验证：跨适配器 ABI/shader 消费；Surface ABI 在统一 Scene/Fabric 每帧提取、绑定、barrier 和真实 recorder 中的端到端使用；以及完整帧图像 parity、资源/性能数据。material 全 package 通过仅关闭分包 CPU/生成物验收，不等于全场景验收完成。
+
+**2026-11-09 状态同步**：Water 已移除独立 Core3d recorder，改由顶层 SceneFabric coordinator 统一提交；Water 定向测试 **230/230** 通过。该接线不构成 Surface ABI 在全场景帧中的完整消费证据；统一多域 payload、barrier、跨适配器和全帧 parity 仍未完成。

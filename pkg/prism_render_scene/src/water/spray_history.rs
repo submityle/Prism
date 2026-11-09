@@ -1,6 +1,7 @@
 //! Production particle service: water spawn -> bounded simulation -> lagged foam.
 //! All resources here belong to the Bevy scene device, never the separate RHI.
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use bevy_asset::Assets;
 use bevy_ecs::prelude::*;
@@ -9,20 +10,29 @@ use bevy_render::{render_resource::*, renderer::RenderDevice};
 use bevy_shader::Shader;
 use prism_render_architecture::{
     render_fabric::{
-        LagOneHistory, PARTICLE_FEATURE_ID, SPRAY_FEEDBACK_FEATURE_ID, SPRAY_FEEDBACK_SERVICE,
+        BufferUsages as FabricBufferUsages, FrameResourceBinding, PhysicalResource, ResourceLayout,
+        ResourceTemplate, PARTICLE_FEATURE_ID, PARTICLE_SPRAY_RESOURCE, SPRAY_FEEDBACK_FEATURE_ID,
+        SPRAY_FEEDBACK_SERVICE,
     },
     water::{
         breaking::{BreakingCriteria, BreakingSample},
         Vec3,
     },
 };
+use prism_render_graph::frame_graph::ResourceLifetime;
 
 use super::{
     abi::{GpuSprayParams, GpuSpraySource, GpuWaterFoamParams},
     bind_groups::WaterBodyGpuBuffers,
     body::WaterBody,
 };
-use crate::gpu::fabric::SceneFabric;
+use crate::gpu::{
+    fabric::SceneFabric,
+    fabric_history::{
+        FabricHistoryBinding, FabricHistoryInstanceId, FabricHistoryLifecycle, FabricHistoryOwner,
+    },
+    rhi::{SceneRhi, SceneRhiImportedBuffer},
+};
 
 const PACKET_CAPACITY: u32 = 256;
 
@@ -207,28 +217,147 @@ pub(crate) fn init_spray_pipelines(
 }
 
 struct SprayEntry {
+    instance_id: FabricHistoryInstanceId,
+    allocation_version: u32,
     grid: SprayFeedbackGrid,
     particles: [Buffer; 2],
     feedback: [Buffer; 2],
-    history: LagOneHistory,
+    feedback_rhi: [Arc<SceneRhiImportedBuffer>; 2],
+}
+
+struct RetiredFeedbackAllocation {
+    owner: FabricHistoryOwner,
+    first_live_frame: u64,
+    _buffers: [Buffer; 2],
+    _leases: [Arc<SceneRhiImportedBuffer>; 2],
 }
 
 #[derive(Resource, Default)]
 pub(crate) struct SprayHistory {
     pub(crate) frame: u64,
-    pub(crate) dispatched: Option<u64>,
     entries: BTreeMap<u64, SprayEntry>,
+    retired: Vec<RetiredFeedbackAllocation>,
+    active_entity_keys: Vec<u64>,
+    removed_entity_keys: Vec<u64>,
+    next_instance_id: u64,
 }
 
 impl SprayHistory {
-    pub(crate) fn begin_frame(&mut self, entities: &[Entity]) {
+    fn allocate_instance_id(&mut self) -> FabricHistoryInstanceId {
+        self.next_instance_id = self
+            .next_instance_id
+            .checked_add(1)
+            .expect("spray history instance id overflow");
+        FabricHistoryInstanceId::new(self.next_instance_id)
+    }
+
+    fn feedback_slots(frame: u64) -> (usize, usize) {
+        let producer = (frame as usize) & 1;
+        (producer, 1 - producer)
+    }
+
+    fn next_allocation_version(version: u32) -> u32 {
+        version
+            .checked_add(1)
+            .expect("spray feedback allocation version overflow")
+    }
+
+    fn feedback_template(buffer: &Buffer) -> ResourceTemplate {
+        ResourceTemplate {
+            key: PARTICLE_SPRAY_RESOURCE,
+            lifetime: ResourceLifetime::Persistent,
+            layout: ResourceLayout::Buffer {
+                bytes: buffer.size(),
+                usage: FabricBufferUsages::STORAGE,
+            },
+            alignment: 16,
+        }
+    }
+
+    fn feedback_binding(
+        owner: FabricHistoryOwner,
+        frame: u64,
+        version: u32,
+        buffer: &Buffer,
+        lease: &SceneRhiImportedBuffer,
+    ) -> FabricHistoryBinding {
+        let template = Self::feedback_template(buffer);
+        FabricHistoryBinding {
+            owner,
+            template,
+            binding: FrameResourceBinding {
+                key: PARTICLE_SPRAY_RESOURCE,
+                frame,
+                version,
+                physical: PhysicalResource::Buffer {
+                    id: lease.id(),
+                    offset: 0,
+                },
+                layout: template.layout,
+                alignment: template.alignment,
+            },
+        }
+    }
+
+    fn retire_entry(
+        &mut self,
+        entry: SprayEntry,
+        first_live_frame: u64,
+        lifecycle: &mut FabricHistoryLifecycle,
+    ) {
+        let owner = FabricHistoryOwner::Instance(entry.instance_id);
+        lifecycle
+            .enqueue_retirement(owner, PARTICLE_SPRAY_RESOURCE, first_live_frame)
+            .expect("spray feedback retirement must be accepted by Fabric history");
+        self.retired.push(RetiredFeedbackAllocation {
+            owner,
+            first_live_frame,
+            _buffers: entry.feedback,
+            _leases: entry.feedback_rhi,
+        });
+    }
+
+    fn reclaim_retired(&mut self, lifecycle: &FabricHistoryLifecycle) {
+        self.retired.retain(|allocation| {
+            lifecycle
+                .retired_before(allocation.owner, PARTICLE_SPRAY_RESOURCE)
+                .is_none_or(|retired_before| retired_before < allocation.first_live_frame)
+        });
+    }
+
+    pub(crate) fn begin_frame(
+        &mut self,
+        entities: &[Entity],
+        lifecycle: &mut FabricHistoryLifecycle,
+    ) {
         self.frame = self
             .frame
             .checked_add(1)
             .expect("spray history frame overflow");
-        self.dispatched = None;
-        self.entries
-            .retain(|key, _| entities.iter().any(|entity| entity.to_bits() == *key));
+        self.active_entity_keys.clear();
+        self.active_entity_keys
+            .extend(entities.iter().map(|entity| entity.to_bits()));
+        self.active_entity_keys.sort_unstable();
+        self.active_entity_keys.dedup();
+
+        // Keep the retirement scan O((live + resident) log live), rather than
+        // rescanning the extracted entity list for every persistent entry.
+        // Both scratch vectors retain capacity across frames.
+        self.removed_entity_keys.clear();
+        self.removed_entity_keys.extend(
+            self.entries
+                .keys()
+                .copied()
+                .filter(|key| self.active_entity_keys.binary_search(key).is_err()),
+        );
+        for index in 0..self.removed_entity_keys.len() {
+            let key = self.removed_entity_keys[index];
+            if let Some(entry) = self.entries.remove(&key) {
+                self.retire_entry(entry, self.frame, lifecycle);
+            }
+        }
+        self.removed_entity_keys.clear();
+        self.reclaim_retired(lifecycle);
     }
 
     pub(crate) fn prepare(
@@ -239,15 +368,23 @@ impl SprayHistory {
         device: &RenderDevice,
         pipelines: &SprayPipelines,
         fabric: &SceneFabric,
+        rhi: &SceneRhi,
+        lifecycle: &mut FabricHistoryLifecycle,
     ) -> Option<PreparedSpray> {
         let Some(grid) = body.spray_feedback else {
-            self.entries.remove(&entity.to_bits());
+            if let Some(entry) = self.entries.remove(&entity.to_bits()) {
+                self.retire_entry(entry, self.frame, lifecycle);
+            }
             return None;
         };
         fabric
             .0
             .admit(PARTICLE_FEATURE_ID)
             .expect("particle content outside frozen build roots");
+        fabric
+            .0
+            .admit(SPRAY_FEEDBACK_FEATURE_ID)
+            .expect("spray feedback content outside frozen build roots");
         assert!(
             grid.valid(),
             "invalid spray grid reached device preparation"
@@ -260,31 +397,62 @@ impl SprayHistory {
                 mapped_at_creation: false,
             })
         };
-        let entry = self
-            .entries
-            .entry(entity.to_bits())
-            .or_insert_with(|| SprayEntry {
-                grid,
-                particles: std::array::from_fn(|_| {
-                    make_buffer(
-                        "prism particle spray state",
-                        16 + u64::from(PACKET_CAPACITY) * 32,
-                    )
-                }),
-                feedback: std::array::from_fn(|_| {
-                    make_buffer("prism particle foam history", u64::from(grid.cells()) * 4)
-                }),
-                history: LagOneHistory::default(),
-            });
-        if entry.grid != grid {
-            entry.grid = grid;
-            entry.feedback = std::array::from_fn(|_| {
+        let entity_key = entity.to_bits();
+        if !self.entries.contains_key(&entity_key) {
+            let instance_id = self.allocate_instance_id();
+            let feedback = std::array::from_fn(|_| {
                 make_buffer("prism particle foam history", u64::from(grid.cells()) * 4)
             });
-            entry.history = LagOneHistory::default();
+            let feedback_rhi =
+                std::array::from_fn(|slot| Arc::new(rhi.import_buffer(&feedback[slot])));
+            self.entries.insert(
+                entity_key,
+                SprayEntry {
+                    instance_id,
+                    allocation_version: 1,
+                    grid,
+                    particles: std::array::from_fn(|_| {
+                        make_buffer(
+                            "prism particle spray state",
+                            16 + u64::from(PACKET_CAPACITY) * 32,
+                        )
+                    }),
+                    feedback,
+                    feedback_rhi,
+                },
+            );
         }
-        let write = LagOneHistory::write_slot(self.frame);
-        let read = 1 - write;
+        let resized = self
+            .entries
+            .get(&entity_key)
+            .is_some_and(|entry| entry.grid != grid);
+        if resized {
+            let new_feedback = std::array::from_fn(|_| {
+                make_buffer("prism particle foam history", u64::from(grid.cells()) * 4)
+            });
+            let new_feedback_rhi =
+                std::array::from_fn(|slot| Arc::new(rhi.import_buffer(&new_feedback[slot])));
+            let entry = self
+                .entries
+                .get_mut(&entity_key)
+                .expect("existing spray entry");
+            let old_feedback = core::mem::replace(&mut entry.feedback, new_feedback);
+            let old_feedback_rhi = core::mem::replace(&mut entry.feedback_rhi, new_feedback_rhi);
+            entry.grid = grid;
+            entry.allocation_version = Self::next_allocation_version(entry.allocation_version);
+            let owner = FabricHistoryOwner::Instance(entry.instance_id);
+            lifecycle
+                .enqueue_retirement(owner, PARTICLE_SPRAY_RESOURCE, self.frame)
+                .expect("resized spray feedback retirement must be accepted");
+            self.retired.push(RetiredFeedbackAllocation {
+                owner,
+                first_live_frame: self.frame,
+                _buffers: old_feedback,
+                _leases: old_feedback_rhi,
+            });
+        }
+        let entry = self.entries.get(&entity_key).expect("prepared spray entry");
+        let (write, read) = Self::feedback_slots(self.frame);
         let params = device.create_buffer_with_data(&BufferInitDescriptor {
             label: Some("prism particle spray domain"),
             contents: bytemuck::cast_slice(&[
@@ -316,31 +484,49 @@ impl SprayHistory {
                 params.as_entire_binding(),
             )),
         );
+        let owner = FabricHistoryOwner::Instance(entry.instance_id);
+        let producer_binding = Self::feedback_binding(
+            owner,
+            self.frame,
+            entry.allocation_version,
+            &entry.feedback[write],
+            &entry.feedback_rhi[write],
+        );
+        let previous_binding = self.frame.checked_sub(1).map(|previous_frame| {
+            Self::feedback_binding(
+                owner,
+                previous_frame,
+                entry.allocation_version,
+                &entry.feedback[read],
+                &entry.feedback_rhi[read],
+            )
+        });
+        let completed_history = previous_binding
+            .is_some_and(|binding| lifecycle.validate_import(owner, binding.binding).is_ok());
         Some(PreparedSpray {
             key: entity.to_bits(),
             bind_group,
             cells: grid.cells(),
             dimensions: grid.dimensions,
+            owner,
+            producer_binding,
+            previous_binding,
+            completed_history,
+            feedback_leases: [
+                Arc::clone(&entry.feedback_rhi[read]),
+                Arc::clone(&entry.feedback_rhi[write]),
+            ],
         })
     }
 
-    /// Invalid/missed publication means an explicit empty input, never stale data.
+    /// A missing exact publication selects an explicitly cleared zero input.
     pub(crate) fn reset_missing(&self, encoder: &mut CommandEncoder, prepared: &PreparedSpray) {
         let entry = &self.entries[&prepared.key];
-        if entry.history.read_slot(self.frame).is_none() {
-            let read = 1 - LagOneHistory::write_slot(self.frame);
+        if !prepared.completed_history {
+            let (_, read) = Self::feedback_slots(self.frame);
             encoder.clear_buffer(&entry.particles[read], 0, None);
             encoder.clear_buffer(&entry.feedback[read], 0, None);
         }
-    }
-
-    pub(crate) fn publish(&mut self, prepared: &PreparedSpray) {
-        assert!(self
-            .entries
-            .get_mut(&prepared.key)
-            .expect("prepared spray entity")
-            .history
-            .publish(self.frame));
     }
 }
 
@@ -349,6 +535,11 @@ pub(crate) struct PreparedSpray {
     pub(crate) bind_group: BindGroup,
     pub(crate) cells: u32,
     pub(crate) dimensions: [u32; 2],
+    pub(crate) owner: FabricHistoryOwner,
+    pub(crate) producer_binding: FabricHistoryBinding,
+    pub(crate) previous_binding: Option<FabricHistoryBinding>,
+    pub(crate) completed_history: bool,
+    pub(crate) feedback_leases: [Arc<SceneRhiImportedBuffer>; 2],
 }
 
 #[cfg(test)]
@@ -357,6 +548,35 @@ mod tests {
     use bevy_shader::{ShaderCache, ShaderCacheError, ShaderCacheSource, ValidateShader};
 
     use super::*;
+
+    #[test]
+    fn spray_owners_are_monotonic_and_not_reused_after_removal() {
+        let mut history = SprayHistory::default();
+        let first = history.allocate_instance_id();
+        let second = history.allocate_instance_id();
+        assert!(second.get() > first.get());
+        history.entries.clear();
+        let after_removal = history.allocate_instance_id();
+        assert!(after_removal.get() > second.get());
+        assert_ne!(
+            FabricHistoryOwner::Instance(first),
+            FabricHistoryOwner::Instance(after_removal)
+        );
+    }
+
+    #[test]
+    fn spray_feedback_slots_map_current_and_previous_frames() {
+        assert_eq!(SprayHistory::feedback_slots(0), (0, 1));
+        assert_eq!(SprayHistory::feedback_slots(1), (1, 0));
+        assert_eq!(SprayHistory::feedback_slots(2), (0, 1));
+        assert_eq!(SprayHistory::feedback_slots(37), (1, 0));
+    }
+
+    #[test]
+    fn spray_feedback_resize_advances_allocation_version() {
+        assert_eq!(SprayHistory::next_allocation_version(1), 2);
+        assert_eq!(SprayHistory::next_allocation_version(41), 42);
+    }
 
     fn keep_wgsl(
         _: &(),

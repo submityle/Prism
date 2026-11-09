@@ -5,7 +5,7 @@
 //! [`bind_groups`](super::bind_groups) knows how to build one body's resident
 //! buffers and twelve bind groups. This module is the render-world container
 //! that ties a body's bind groups to the ordered golden dispatch schedule the
-//! [`dispatch`](super::dispatch) node records.
+//! shared SceneFabric coordinator records.
 //!
 //! The resource is deliberately a plain `Vec` of bodies: the extract stage
 //! (which would snapshot the main-world water bodies into these render
@@ -17,11 +17,13 @@ use bevy_ecs::resource::Resource;
 
 use prism_render_architecture::water::gpu::pipeline::PlannedDispatch;
 use prism_render_architecture::water::WaterFabricPlan;
+use prism_render_architecture::render_fabric::RenderObjectId;
 
 use super::bind_groups::{WaterBodyBindGroups, WaterBodyGpuBuffers};
 use super::surface_node::SurfaceDraw;
 
-/// One resident water body the dispatch node can record a frame's solve for.
+/// One resident water body the SceneFabric coordinator can record a frame's
+/// solve for.
 ///
 /// Owns the resident buffers (so their `wgpu` handles outlive the bind groups
 /// that reference them), the twelve bind groups the sixteen kernels dispatch
@@ -29,6 +31,10 @@ use super::surface_node::SurfaceDraw;
 /// `prepare` stage produced for this body's solver bucket and per-kernel
 /// workgroup counts.
 pub(crate) struct WaterGpuBody {
+    /// Explicit object identity for object-scoped Fabric resources.
+    pub(crate) object_id: RenderObjectId,
+    /// Stable history stream identity paired with the object generation.
+    pub(crate) history_key: u32,
     pub(crate) spray: Option<super::spray_history::PreparedSpray>,
     /// The resident buffer set backing every bind group of this body.
     ///
@@ -59,6 +65,8 @@ impl WaterGpuBody {
     /// so the extract stage constructs bodies through one documented entry.
     #[must_use]
     pub(crate) fn new(
+        object_id: RenderObjectId,
+        history_key: u32,
         buffers: WaterBodyGpuBuffers,
         bind_groups: WaterBodyBindGroups,
         dispatches: Vec<PlannedDispatch>,
@@ -66,6 +74,8 @@ impl WaterGpuBody {
         fabric: WaterFabricPlan,
     ) -> Self {
         Self {
+            object_id,
+            history_key,
             spray: None,
             buffers,
             bind_groups,
@@ -78,9 +88,8 @@ impl WaterGpuBody {
 
 /// The render-world set of all resident `GPU` water bodies for this frame.
 ///
-/// Populated by the extract stage and consumed by the
-/// [`dispatch_water`](super::dispatch::dispatch_water) node. Defaults to empty,
-/// which the node treats as "no water to solve this frame".
+/// Populated by the extract stage and consumed by the Fabric recorder. Defaults
+/// to empty, which the recorder treats as "no water to solve this frame".
 #[derive(Resource, Default)]
 pub(crate) struct WaterGpuBodies {
     /// Every resident body scheduled this frame, in a stable order.

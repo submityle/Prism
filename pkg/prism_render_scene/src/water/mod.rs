@@ -26,8 +26,8 @@
 //!   bind-group layouts, built once at `RenderStartup`.
 //! * [`bind_groups`] - one body's resident device buffers, storage / sampled
 //!   textures and twelve bind groups.
-//! * [`resources`] and [`dispatch`] - the resident render-world body set and
-//!   the `Core3d` graph node that records the dispatches in solver order.
+//! * [`resources`] - the resident render-world body set consumed by the shared
+//!   SceneFabric coordinator.
 //! * [`body`], [`extract`] and [`prepare`] - the main-world author chain: the
 //!   [`WaterBody`](body::WaterBody) component, its per-frame render-world
 //!   snapshot, and the systems that mirror bodies into the render world and
@@ -39,7 +39,6 @@ mod abi;
 mod authoring;
 mod bind_groups;
 mod body;
-mod dispatch;
 mod extract;
 mod fft_upload;
 #[cfg(test)]
@@ -52,7 +51,7 @@ mod prepare;
 mod resources;
 #[cfg(test)]
 mod shader_tests;
-mod spray_history;
+pub(crate) mod spray_history;
 mod surface_caustics;
 mod surface_draw;
 mod surface_froxel;
@@ -91,3 +90,10 @@ pub use authoring::{
 };
 pub use body::WaterBody;
 pub use spray_history::{SprayFeedbackGrid, WaterSpraySource};
+
+// Narrow crate-local exports used by the Render Fabric water adapter. These
+// keep the adapter on the existing water-owned resources without exposing the
+// implementation modules as public API.
+pub(crate) use bind_groups::WaterBodyBindGroups;
+pub(crate) use pipeline::{wesl_group, WaterComputePipelines};
+pub(crate) use resources::{WaterGpuBodies, WaterGpuBody};

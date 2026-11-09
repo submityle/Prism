@@ -1,7 +1,7 @@
 //! The water-surface raster draw's deterministic, `GPU`-free plan.
 //!
-//! Mirroring the compute half ([`dispatch`](super::dispatch), whose ordering
-//! and sizing all live in the float-free arch plan), the raster draw is split
+//! Mirroring the compute half (whose ordering and sizing all live in the
+//! float-free arch plan), the raster draw is split
 //! into a pure planner here and a dumb device executor (the draw system that
 //! records into the raster draw node. This module owns the planner: it resolves one
 //! resident [`WaterBody`](super::body::WaterBody) into the complete set of facts
@@ -12,8 +12,7 @@
 //! Keeping the decision here (rather than inside the draw system, which needs a
 //! device the sandbox lacks) is what makes every branch — simulation-only
 //! bodies, an un-swept surface, a degenerate grid — unit-testable on `CPU`
-//! without a `GPU`, exactly like [`dispatch`](super::dispatch)'s kernel→group
-//! mapping is.
+//! without a `GPU`.
 
 use prism_render_architecture::water::gpu::SurfaceGrid;
 

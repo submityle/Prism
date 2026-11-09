@@ -32,12 +32,12 @@
 
 #[cfg(test)]
 mod tests {
-    use bevy_math::ops;
+    use prism_math::ops;
     use prism_render_shading::gi::occlusion::specular_occlusion as golden;
 
     /// Byte-for-byte re-statement of the shader's `water_spec_occlusion` helper
     /// (same clamps and `exp2`/`pow` algebra), evaluated with the engine's
-    /// libm-deterministic [`bevy_math::ops`] so it reproduces the golden
+    /// shared [`prism_math::ops`] so it reproduces the golden
     /// bit-for-bit under identical `f32` arithmetic.
     fn water_spec_occlusion(n_dot_v: f32, ao: f32, roughness: f32) -> f32 {
         let nov = n_dot_v.clamp(0.0, 1.0);
