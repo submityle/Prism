@@ -489,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn adapter_accepts_metallic_and_rejects_unrepresentable_production_lobes() {
+    fn adapter_accepts_supported_metallic_and_clearcoat_parameters() {
         assert!(ReferencePtMaterialAdapter::from_surface(SurfaceSample {
             metallic: 1.0,
             clearcoat_roughness: 0.2,
@@ -1055,13 +1055,10 @@ mod tests {
     }
 
     #[test]
-    fn cpu_reference_parity_covers_every_mapped_material_parameter() {
-        // This is the parity gate for the complete adapter-supported material
-        // slice.  The fixture is deterministic, but it is not a fallback
-        // material: every row changes at least one authored parameter that is
-        // copied into Bsdf::ClearcoatDiffuse, and every pixel evaluates the
-        // production clearcoat candidate against the independent reference
-        // BSDF with the same directions and unit illuminance.
+    fn cpu_reference_parity_covers_every_clearcoat_diffuse_parameter() {
+        // This fixture intentionally covers only the dedicated clearcoat
+        // candidate. The complete OpenPBR mapping is gated separately by the
+        // field-copy, lobe-sensitivity, and path-sampling tests above.
         let materials = [
             SurfaceSample {
                 base_color: [0.11, 0.37, 0.83],
