@@ -623,7 +623,10 @@ mod tests {
     use prism_render_driver::{DeviceDescriptor, Extent3d, RequestAdapterOptions};
     use prism_render_driver_null::{NullDevice, NullInstance};
 
-    const RESOURCES_PER_TARGET: usize = 16;
+    // One target owns: color (texture + view), three position planes (six),
+    // normal/albedo/surface-id planes (six), the identity buffer (one), two
+    // TAA producer planes (four), and depth (two).
+    const RESOURCES_PER_TARGET: usize = 21;
 
     #[test]
     fn surface_view_extent_uses_stable_ceil_and_safe_scale_fallback() {
