@@ -31,7 +31,7 @@ pub use diagnostic::{AuthoringError, Diagnostic, DiagnosticCode, Severity, Sourc
 pub use evaluator::evaluate_connection;
 pub use export::export_materialx;
 pub use import::{
-    adapt_openpbr_surface, import_openpbr_surface, AdapterReport, OpenPbrSurface, RuntimeSurface,
+    adapt_openpbr_surface, AdapterReport, RuntimeSurface,
 };
 pub use ir::{Connection, Document, Input, Node, NodeDef, NodeGraph, Output, TypedValue};
 pub use parse::parse_materialx;

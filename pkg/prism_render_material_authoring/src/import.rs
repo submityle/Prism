@@ -29,112 +29,6 @@ pub struct AdapterReport {
     pub diagnostics: Vec<Diagnostic>,
 }
 
-/// Compatibility subset of the imported OpenPBR values.
-///
-/// Prefer [`adapt_openpbr_surface`] for runtime use because it returns the
-/// complete [`GpuSurfaceParameters`] block plus loss diagnostics.
-#[derive(Clone, Debug, PartialEq)]
-pub struct OpenPbrSurface {
-    /// Source node category (`open_pbr_surface` or `standard_surface`).
-    pub source_category: String,
-    /// OpenPBR base color, including alpha/coverage.
-    pub base_color: [f32; 4],
-    /// Base metalness.
-    pub base_metalness: f32,
-    /// OpenPBR base-layer weight.
-    pub base_weight: f32,
-    /// Dielectric specular roughness.
-    pub specular_roughness: f32,
-    /// Dielectric IOR.
-    pub specular_ior: f32,
-    /// Emission color.
-    pub emission_color: [f32; 4],
-    /// Emission luminance.
-    pub emission_luminance: f32,
-    /// Coat weight.
-    pub coat_weight: f32,
-    /// Coat roughness.
-    pub coat_roughness: f32,
-    /// Transmission weight.
-    pub transmission_weight: f32,
-    /// Volume thickness.
-    pub thickness: f32,
-    /// Geometry opacity.
-    pub geometry_opacity: f32,
-    /// Whether the surface is thin-walled.
-    pub thin_walled: bool,
-    /// Authored fields outside this compatibility view's mapping.
-    pub unsupported_fields: Vec<String>,
-}
-
-impl Default for OpenPbrSurface {
-    fn default() -> Self {
-        Self {
-            source_category: String::new(),
-            base_color: [0.8, 0.8, 0.8, 1.0],
-            base_metalness: 0.0,
-            base_weight: 1.0,
-            specular_roughness: 0.3,
-            specular_ior: 1.5,
-            emission_color: [1.0; 4],
-            emission_luminance: 0.0,
-            coat_weight: 0.0,
-            coat_roughness: 0.0,
-            transmission_weight: 0.0,
-            thickness: 0.0,
-            geometry_opacity: 1.0,
-            thin_walled: false,
-            unsupported_fields: Vec::new(),
-        }
-    }
-}
-
-impl From<&RuntimeSurface> for OpenPbrSurface {
-    fn from(runtime: &RuntimeSurface) -> Self {
-        let p = &runtime.parameters;
-        let mut unsupported_fields = runtime.report.unsupported_fields.clone();
-        for field in &runtime.report.applied_fields {
-            if !matches!(
-                field.as_str(),
-                "base_color"
-                    | "base_metalness"
-                    | "base_weight"
-                    | "specular_roughness"
-                    | "specular_ior"
-                    | "emission_color"
-                    | "emission_luminance"
-                    | "coat_weight"
-                    | "coat_roughness"
-                    | "transmission_weight"
-                    | "thickness"
-                    | "geometry_opacity"
-                    | "geometry_thin_walled"
-            ) {
-                unsupported_fields.push(field.clone());
-            }
-        }
-        unsupported_fields.sort();
-        unsupported_fields.dedup();
-        Self {
-            source_category: runtime.source_category.clone(),
-            base_color: p.base_color,
-            base_metalness: p.base_metalness,
-            base_weight: p.base_weight,
-            specular_roughness: p.specular_roughness,
-            specular_ior: p.specular_ior,
-            emission_color: p.emission_color,
-            emission_luminance: p.emission_luminance,
-            coat_weight: p.coat_weight,
-            coat_roughness: p.coat_roughness,
-            transmission_weight: p.transmission_weight,
-            thickness: p.thickness,
-            geometry_opacity: p.geometry_opacity,
-            thin_walled: p.thin_walled != 0.0,
-            unsupported_fields,
-        }
-    }
-}
-
 /// Adapt one OpenPBR or MaterialX Standard Surface node to Prism's canonical
 /// runtime parameter block.
 ///
@@ -182,6 +76,7 @@ pub fn adapt_openpbr_surface(
     }
 
     let aliases = field_aliases(&node.category);
+    let evaluation_index = crate::evaluator::EvaluationIndex::new(document);
     let mut parameters = GpuSurfaceParameters::default();
     let mut report = AdapterReport::default();
     let mut supplied_fields = std::collections::BTreeSet::new();
@@ -191,7 +86,7 @@ pub fn adapt_openpbr_surface(
             continue;
         };
         report.supported_fields.push(field.to_owned());
-        if let Some(value) = resolve_input(document, graph, input)? {
+        if let Some(value) = resolve_input(&evaluation_index, document, graph, input)? {
             if let (Some(input_type), Some(source_type)) =
                 (input.type_name.as_deref(), value_type(&value))
                 && source_type != input_type
@@ -237,17 +132,6 @@ pub fn adapt_openpbr_surface(
         parameters,
         report,
     })
-}
-
-/// Import the original small compatibility view. Runtime consumers should use
-/// [`adapt_openpbr_surface`] to receive all supported parameters and losses.
-pub fn import_openpbr_surface(
-    document: &Document,
-    nodegraph: &str,
-    node_name: &str,
-) -> Result<OpenPbrSurface, AuthoringError> {
-    adapt_openpbr_surface(document, nodegraph, node_name)
-        .map(|runtime| OpenPbrSurface::from(&runtime))
 }
 
 fn field_aliases(category: &str) -> BTreeMap<&'static str, &'static str> {
@@ -320,11 +204,12 @@ fn field_aliases(category: &str) -> BTreeMap<&'static str, &'static str> {
 }
 
 fn resolve_input<'a>(
+    index: &crate::evaluator::EvaluationIndex<'_>,
     document: &'a Document,
     graph: &'a crate::NodeGraph,
     input: &'a crate::Input,
 ) -> Result<Option<TypedValue>, AuthoringError> {
-    crate::evaluator::evaluate_input(document, graph, input)
+    crate::evaluator::evaluate_input_indexed(index, document, graph, input)
 }
 
 fn value_type(value: &TypedValue) -> Option<&str> {

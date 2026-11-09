@@ -1,7 +1,7 @@
 #![allow(missing_docs, reason = "integration tests are self-describing")]
 
 use prism_render_material_authoring::{
-    adapt_openpbr_surface, export_materialx, import_openpbr_surface, parse_materialx, Connection,
+    adapt_openpbr_surface, export_materialx, parse_materialx, Connection,
     DiagnosticCode, Severity,
 };
 
@@ -30,11 +30,11 @@ fn parses_structure_and_imports_open_pbr_literals_and_constant_connections() {
     assert_eq!(document.nodedefs[0].category, "open_pbr_surface");
     assert_eq!(document.nodegraphs[0].nodes.len(), 2);
 
-    let surface = import_openpbr_surface(&document, "Graph", "surface").expect("surface import");
-    assert_eq!(surface.base_color, [0.2, 0.4, 0.8, 1.0]);
-    assert_eq!(surface.specular_ior, 1.45);
-    assert_eq!(surface.coat_weight, 0.3);
-    assert!(surface.unsupported_fields.is_empty());
+    let surface = adapt_openpbr_surface(&document, "Graph", "surface").expect("surface import");
+    assert_eq!(surface.parameters.base_color, [0.2, 0.4, 0.8, 1.0]);
+    assert_eq!(surface.parameters.specular_ior, 1.45);
+    assert_eq!(surface.parameters.coat_weight, 0.3);
+    assert!(surface.report.unsupported_fields.is_empty());
 }
 
 #[test]
@@ -175,8 +175,8 @@ fn unsupported_surface_input_is_reported_without_being_silently_applied() {
         r#"<materialx><nodegraph name="g"><standard_surface name="s"><input name="thinfilm_thickness" type="float" value="200"/></standard_surface></nodegraph></materialx>"#,
     )
     .expect("structural parser accepts a supported surface node");
-    let surface = import_openpbr_surface(&document, "g", "s").expect("surface import");
-    assert_eq!(surface.unsupported_fields, ["thinfilm_thickness"]);
+    let surface = adapt_openpbr_surface(&document, "g", "s").expect("surface import");
+    assert_eq!(surface.report.unsupported_fields, ["thinfilm_thickness"]);
 }
 
 #[test]
@@ -195,9 +195,9 @@ fn cross_graph_node_connection_parses_imports_and_round_trips() {
 </materialx>"#;
 
     let document = parse_materialx(source).expect("cross-graph connection is valid");
-    let surface = import_openpbr_surface(&document, "SurfaceGraph", "surface")
+    let surface = adapt_openpbr_surface(&document, "SurfaceGraph", "surface")
         .expect("constant connected from another graph is importable");
-    assert_eq!(surface.base_color, [0.1, 0.3, 0.7, 1.0]);
+    assert_eq!(surface.parameters.base_color, [0.1, 0.3, 0.7, 1.0]);
 
     let first_export = export_materialx(&document);
     assert!(first_export.contains("nodegraph=\"Constants\" nodename=\"base\""));
@@ -205,8 +205,9 @@ fn cross_graph_node_connection_parses_imports_and_round_trips() {
     let second_export = export_materialx(&reparsed);
     assert_eq!(first_export, second_export);
     assert_eq!(
-        import_openpbr_surface(&reparsed, "SurfaceGraph", "surface")
+        adapt_openpbr_surface(&reparsed, "SurfaceGraph", "surface")
             .expect("reimport")
+            .parameters
             .base_color,
         [0.1, 0.3, 0.7, 1.0]
     );
