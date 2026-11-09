@@ -8,8 +8,8 @@
 //!
 //! These are trait *declarations*: the method bodies live in backend crates
 //! (wgpu, Vulkan, …), which may use `unsafe` and therefore live outside this
-//! `unsafe`-free crate. Nothing here is a placeholder; the trait is the
-//! contract.
+//! `unsafe`-free crate. This module contains the contract; implementations
+//! live in the concrete backend crates.
 
 use crate::binding::{BindGroupDescriptor, BindGroupLayoutDescriptor};
 use crate::buffer::BufferDescriptor;
@@ -178,7 +178,7 @@ pub trait RenderDevice {
     /// Loss is edge-triggered: a backend records the reason when the driver
     /// reports it and this drains it. Backends that cannot observe loss keep the
     /// default (`None`) — a null/headless backend legitimately never loses a
-    /// device, so the default is honest rather than a stub.
+    /// device, so the default is an honest no-loss signal.
     fn take_device_lost(&self) -> Option<DeviceLostReason> {
         None
     }

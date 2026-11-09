@@ -88,7 +88,7 @@ impl RetirementDevice {
 }
 
 // The fixture counts graph allocations. Other resource methods still delegate
-// to the actual null backend, rather than manufacturing unrelated placeholder IDs.
+// to the actual null backend, rather than manufacturing unrelated resource IDs.
 macro_rules! forward_resources {
     ($($create:ident($descriptor:ty) -> $id:ty, $destroy:ident;)*) => {
         $(

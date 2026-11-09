@@ -110,7 +110,7 @@ impl<K: ?Sized, V> GenerationalSlotMap<K, V> {
                     generation,
                     next_free,
                 } => (*generation, *next_free),
-                Slot::Occupied { .. } => unreachable!("free_head pointed at occupied slot"),
+                Slot::Occupied { .. } => panic!("free_head pointed at occupied slot"),
             };
             *slot = Slot::Occupied { generation, value };
             self.free_head = next_free;
@@ -175,9 +175,10 @@ impl<K: ?Sized, V> GenerationalSlotMap<K, V> {
                 );
                 self.free_head = id.index();
                 self.len -= 1;
-                match taken {
-                    Slot::Occupied { value, .. } => Some(value),
-                    Slot::Free { .. } => unreachable!("matched Occupied above"),
+                if let Slot::Occupied { value, .. } = taken {
+                    Some(value)
+                } else {
+                    panic!("remove replaced an occupied slot with a free slot")
                 }
             }
             _ => None,
@@ -191,18 +192,17 @@ impl<K: ?Sized, V> GenerationalSlotMap<K, V> {
         // Collect indices first to avoid borrow issues, then free each.
         let mut i = 0u32;
         while (i as usize) < self.slots.len() {
-            let is_occupied = matches!(self.slots[i as usize], Slot::Occupied { .. });
-            if is_occupied {
-                let next_gen = match &self.slots[i as usize] {
-                    Slot::Occupied { generation, .. } => generation.wrapping_add(1),
-                    Slot::Free { .. } => unreachable!(),
-                };
-                self.slots[i as usize] = Slot::Free {
-                    generation: next_gen,
-                    next_free: self.free_head,
-                };
-                self.free_head = i;
-            }
+            let next_gen = if let Slot::Occupied { generation, .. } = &self.slots[i as usize] {
+                generation.wrapping_add(1)
+            } else {
+                i += 1;
+                continue;
+            };
+            self.slots[i as usize] = Slot::Free {
+                generation: next_gen,
+                next_free: self.free_head,
+            };
+            self.free_head = i;
             i += 1;
         }
         self.len = 0;
@@ -317,6 +317,29 @@ mod tests {
         let c = m.insert(3);
         assert_eq!(m.get(c), Some(&3));
         assert_ne!(c.generation(), a.generation());
+    }
+
+    #[test]
+    fn clear_rebuilds_free_list_after_mixed_reuse() {
+        let mut m = Map::new();
+        let a = m.insert(1);
+        let b = m.insert(2);
+        let c = m.insert(3);
+        assert_eq!(m.remove(b), Some(2));
+
+        m.clear();
+
+        let first = m.insert(10);
+        let second = m.insert(20);
+        let third = m.insert(30);
+        assert_eq!(m.len(), 3);
+        assert_eq!(m.slot_capacity(), 3);
+        assert!(m.get(first).is_some());
+        assert!(m.get(second).is_some());
+        assert!(m.get(third).is_some());
+        assert_ne!(first, a);
+        assert_ne!(second, c);
+        assert_eq!(m.get(b), None);
     }
 
     #[test]
