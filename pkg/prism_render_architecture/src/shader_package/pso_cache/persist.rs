@@ -50,6 +50,8 @@ use crate::shader_package::ShaderPackageId;
 
 /// Four-byte magic identifying a Prism PSO cache blob (`b"PPSO"`).
 const MAGIC: [u8; 4] = *b"PPSO";
+/// Four-byte magic identifying a device-level native driver cache.
+const DRIVER_MAGIC: [u8; 4] = *b"PDRV";
 
 /// Wire format version. Bumped on any incompatible layout change so an older
 /// engine refuses a newer blob (and vice versa) instead of misparsing it.
@@ -92,6 +94,82 @@ pub struct PersistedPipeline {
 pub struct PersistedPsoCache {
     fingerprint: DeviceFingerprint,
     entries: Vec<PersistedPipeline>,
+}
+
+/// One device-level native driver cache image.
+///
+/// Unlike [`PersistedPsoCache`], this does not pretend that one device cache
+/// blob belongs to one [`PsoCacheKey`]. APIs such as Vulkan pipeline cache and
+/// wgpu's `PipelineCache` accumulate many pipelines behind one opaque byte
+/// sequence, so the durable identity is the producing device/driver/ABI only.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PersistedDriverCache {
+    fingerprint: DeviceFingerprint,
+    blob: Vec<u8>,
+}
+
+impl PersistedDriverCache {
+    /// Creates a device-level cache image from native driver bytes.
+    #[must_use]
+    pub fn new(fingerprint: DeviceFingerprint, blob: Vec<u8>) -> Self {
+        Self { fingerprint, blob }
+    }
+
+    /// The device fingerprint that produced this native cache.
+    #[must_use]
+    pub fn fingerprint(&self) -> &DeviceFingerprint {
+        &self.fingerprint
+    }
+
+    /// The opaque native driver bytes, unchanged from import/export.
+    #[must_use]
+    pub fn blob(&self) -> &[u8] {
+        &self.blob
+    }
+
+    /// Serializes one native cache image with an integrity checksum.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&DRIVER_MAGIC);
+        out.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+        encode_fingerprint(&self.fingerprint, &mut out);
+        out.extend_from_slice(&(self.blob.len() as u64).to_le_bytes());
+        out.extend_from_slice(&self.blob);
+        let checksum = fnv1a64(&out);
+        out.extend_from_slice(&checksum.to_le_bytes());
+        out
+    }
+
+    /// Decodes a native cache image without checking the current device.
+    pub fn decode(bytes: &[u8]) -> Result<Self, PersistError> {
+        let mut reader = checked_reader(bytes)?;
+        if reader.read_array4()? != DRIVER_MAGIC {
+            return Err(PersistError::BadMagic);
+        }
+        let version = reader.read_u32()?;
+        if version != FORMAT_VERSION {
+            return Err(PersistError::UnsupportedVersion(version));
+        }
+        let fingerprint = decode_fingerprint(&mut reader)?;
+        let blob_len =
+            usize::try_from(reader.read_u64()?).map_err(|_| PersistError::UnexpectedEof)?;
+        let blob = reader.read_slice(blob_len)?.to_vec();
+        if !reader.is_empty() {
+            return Err(PersistError::TrailingBytes);
+        }
+        Ok(Self { fingerprint, blob })
+    }
+
+    /// Decodes and rejects native bytes from a stale device/driver/ABI.
+    pub fn load_for(bytes: &[u8], current: &DeviceFingerprint) -> Result<Self, PersistLoadError> {
+        let cache = Self::decode(bytes).map_err(PersistLoadError::Decode)?;
+        cache
+            .fingerprint
+            .check_against(current)
+            .map_err(PersistLoadError::Fingerprint)?;
+        Ok(cache)
+    }
 }
 
 /// Why decoding a persisted PSO cache blob failed.
@@ -360,6 +438,23 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
     hash
 }
 
+/// Verifies and strips the trailing checksum shared by both persisted images.
+fn checked_reader(bytes: &[u8]) -> Result<Reader<'_>, PersistError> {
+    if bytes.len() < 8 {
+        return Err(PersistError::UnexpectedEof);
+    }
+    let (payload, stored_checksum) = bytes.split_at(bytes.len() - 8);
+    let stored = u64::from_le_bytes(
+        stored_checksum
+            .try_into()
+            .expect("split_at leaves exactly 8 trailing bytes"),
+    );
+    if fnv1a64(payload) != stored {
+        return Err(PersistError::ChecksumMismatch);
+    }
+    Ok(Reader::new(payload))
+}
+
 /// Minimal little-endian cursor over a byte slice; every read is bounds-checked
 /// and yields [`PersistError::UnexpectedEof`] past the end.
 struct Reader<'a> {
@@ -610,6 +705,42 @@ mod tests {
         let decoded = PersistedPsoCache::decode(&cache.encode()).unwrap();
         assert!(decoded.is_empty());
         assert_eq!(decoded.fingerprint(), &fp());
+    }
+
+    #[test]
+    fn device_cache_roundtrips_one_opaque_blob_without_a_fake_pso_key() {
+        let cache = PersistedDriverCache::new(fp(), vec![0xAA, 0xBB, 0xCC]);
+        let decoded = PersistedDriverCache::decode(&cache.encode()).unwrap();
+        assert_eq!(decoded.fingerprint(), &fp());
+        assert_eq!(decoded.blob(), &[0xAA, 0xBB, 0xCC]);
+    }
+
+    #[test]
+    fn device_cache_rejects_stale_abi_and_device() {
+        let bytes = PersistedDriverCache::new(fp(), vec![1, 2, 3]).encode();
+        let mut abi = fp();
+        abi.abi_hash = AbiHash([8; 32]);
+        assert_eq!(
+            PersistedDriverCache::load_for(&bytes, &abi),
+            Err(PersistLoadError::Fingerprint(FingerprintMismatch::Abi))
+        );
+        let mut device = fp();
+        device.device_id = 99;
+        assert_eq!(
+            PersistedDriverCache::load_for(&bytes, &device),
+            Err(PersistLoadError::Fingerprint(FingerprintMismatch::Device))
+        );
+    }
+
+    #[test]
+    fn device_cache_rejects_corruption_before_import() {
+        let mut bytes = PersistedDriverCache::new(fp(), vec![1, 2, 3]).encode();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        assert_eq!(
+            PersistedDriverCache::decode(&bytes),
+            Err(PersistError::ChecksumMismatch)
+        );
     }
 
     #[test]

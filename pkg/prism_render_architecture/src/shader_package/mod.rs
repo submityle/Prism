@@ -41,9 +41,10 @@ pub use permutation::{
 };
 pub use pso_cache::{
     AdmitOutcome, DeviceFingerprint, DrawDecision, FingerprintMismatch, GraphicsBackend,
-    LruPsoCache, PackageWarmSpec, PersistError, PersistLoadError, PersistedPipeline,
-    PersistedPsoCache, PipelineReadiness, PipelineStateHash, PsoCacheKey, WarmCounters,
-    WarmEnumerationError, WarmPriority, WarmRequest, WarmRuntime, WarmSetPlan, WarmSetPlanner,
+    LruPsoCache, PackageWarmSpec, PersistError, PersistLoadError, PersistedDriverCache,
+    PersistedPipeline, PersistedPsoCache, PipelineReadiness, PipelineStateHash, PsoCacheKey,
+    WarmCounters, WarmEnumerationError, WarmPriority, WarmRequest, WarmRuntime, WarmSetPlan,
+    WarmSetPlanner,
 };
 pub use registry::{RegisterError, RegistryEntry, ShaderPackageRegistry};
 pub use state::TransitionError;

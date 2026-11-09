@@ -18,6 +18,89 @@
 //! iteration order.
 
 use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
+
+use crate::capabilities::Backend;
+
+/// Identity carried by a driver-owned pipeline-cache blob.
+///
+/// The RHI deliberately does not interpret the bytes. It does, however, bind
+/// them to the backend/device/driver and the shader ABI that produced them so
+/// a replacement device cannot accidentally consume an old native cache.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct PipelineBinaryCacheIdentity {
+    /// Graphics backend that owns the native cache format.
+    pub backend: Backend,
+    /// Vendor identifier reported by the adapter.
+    pub vendor_id: u32,
+    /// Device identifier reported by the adapter.
+    pub device_id: u32,
+    /// Stable backend-generated driver version token.
+    pub driver_version: u64,
+    /// Hash of the render/shader ABI used to compile the cached pipelines.
+    pub abi_hash: [u8; 32],
+}
+
+impl PipelineBinaryCacheIdentity {
+    /// Builds a cache identity from backend/device and ABI components.
+    #[must_use]
+    pub const fn new(
+        backend: Backend,
+        vendor_id: u32,
+        device_id: u32,
+        driver_version: u64,
+        abi_hash: [u8; 32],
+    ) -> Self {
+        Self {
+            backend,
+            vendor_id,
+            device_id,
+            driver_version,
+            abi_hash,
+        }
+    }
+
+    /// Checks whether this identity may be used by `current`.
+    ///
+    /// Hardware/backend/driver differences are reported as device replacement;
+    /// an otherwise identical device with a different shader ABI is stale but
+    /// not a device replacement. Keeping this ordering in the RHI prevents
+    /// individual backends from inventing incompatible rejection semantics.
+    pub fn validate_against(&self, current: &Self) -> Result<(), PipelineBinaryCacheError> {
+        if self.backend != current.backend
+            || self.vendor_id != current.vendor_id
+            || self.device_id != current.device_id
+            || self.driver_version != current.driver_version
+        {
+            return Err(PipelineBinaryCacheError::DeviceReplaced);
+        }
+        if self.abi_hash != current.abi_hash {
+            return Err(PipelineBinaryCacheError::AbiMismatch);
+        }
+        Ok(())
+    }
+}
+
+/// A native pipeline-cache byte sequence plus the identity that gates it.
+///
+/// This is an in-memory boundary object, not a serialization format. The
+/// architecture layer owns the durable envelope/checksum; a backend only ever
+/// receives the opaque `bytes` after the envelope has been validated.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PipelineBinaryCacheBlob {
+    /// Device/driver/ABI identity of the producer.
+    pub identity: PipelineBinaryCacheIdentity,
+    /// Opaque bytes returned by the backend's native cache export.
+    pub bytes: Vec<u8>,
+}
+
+impl PipelineBinaryCacheBlob {
+    /// Creates a blob from native bytes and their producing identity.
+    #[must_use]
+    pub fn new(identity: PipelineBinaryCacheIdentity, bytes: Vec<u8>) -> Self {
+        Self { identity, bytes }
+    }
+}
 
 /// Why a backend could not import or export an opaque driver-owned pipeline
 /// binary. The cache seam is optional because not every graphics API exposes
@@ -29,8 +112,16 @@ pub enum PipelineBinaryCacheError {
     Unsupported,
     /// The supplied binary is not accepted by the backend.
     InvalidBinary,
+    /// The persisted blob's ABI does not match the current shader ABI.
+    AbiMismatch,
+    /// The persisted blob belongs to a different backend/device/driver.
+    DeviceReplaced,
     /// The device was lost while servicing the cache operation.
     DeviceLost,
+    /// A cache was already imported or used by pipeline creation.
+    AlreadyInitialized,
+    /// The backend has no exportable cache data yet.
+    NoData,
 }
 
 /// An entry in the cache: the cached value plus how many live references hold
@@ -176,6 +267,41 @@ impl<K: Ord + Clone, V: Copy> ContentCache<K, V> {
 impl<K: Ord + Clone, V: Copy> Default for ContentCache<K, V> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod pipeline_binary_identity_tests {
+    use super::*;
+
+    fn identity() -> PipelineBinaryCacheIdentity {
+        PipelineBinaryCacheIdentity::new(Backend::Vulkan, 1, 2, 3, [4; 32])
+    }
+
+    #[test]
+    fn identical_identity_is_accepted() {
+        assert_eq!(identity().validate_against(&identity()), Ok(()));
+    }
+
+    #[test]
+    fn abi_change_is_stale_but_not_device_replacement() {
+        let mut current = identity();
+        current.abi_hash = [5; 32];
+        assert_eq!(
+            identity().validate_against(&current),
+            Err(PipelineBinaryCacheError::AbiMismatch)
+        );
+    }
+
+    #[test]
+    fn device_change_is_rejected_before_abi_change() {
+        let mut current = identity();
+        current.device_id = 9;
+        current.abi_hash = [5; 32];
+        assert_eq!(
+            identity().validate_against(&current),
+            Err(PipelineBinaryCacheError::DeviceReplaced)
+        );
     }
 }
 

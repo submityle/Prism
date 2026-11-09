@@ -158,6 +158,16 @@ impl WgpuAdapter {
     pub fn wgpu_adapter(&self) -> &wgpu::Adapter {
         &self.adapter
     }
+
+    /// Returns whether the physical adapter exposes wgpu immediate data.
+    ///
+    /// The frozen Prism RHI intentionally does not model backend-specific
+    /// shader ABI features such as `IMMEDIATES`; callers that compile a shader
+    /// using that ABI must gate the acceptance path at the backend boundary.
+    #[must_use]
+    pub fn supports_immediates(&self) -> bool {
+        self.adapter.features().contains(wgpu::Features::IMMEDIATES)
+    }
 }
 
 impl rhi::Adapter for WgpuAdapter {
@@ -328,13 +338,23 @@ impl WgpuInstance {
         adapter: &wgpu::Adapter,
         descriptor: &'a rhi::DeviceDescriptor,
     ) -> wgpu::DeviceDescriptor<'a> {
+        let mut required_features =
+            convert::features_to_wgpu(descriptor.required_features) & adapter.features();
+        // Native Prism shaders use immediate data for compact per-dispatch
+        // matrices. Enable it opportunistically for the ordinary RHI device
+        // path; explicit feature-constrained bring-up remains unchanged.
+        if adapter.features().contains(wgpu::Features::IMMEDIATES) {
+            required_features |= wgpu::Features::IMMEDIATES;
+        }
+        if adapter.features().contains(wgpu::Features::PIPELINE_CACHE) {
+            required_features |= wgpu::Features::PIPELINE_CACHE;
+        }
         wgpu::DeviceDescriptor {
             label: descriptor
                 .label
                 .as_deref()
                 .or(Some("prism_render_driver_wgpu device")),
-            required_features: convert::features_to_wgpu(descriptor.required_features)
-                & adapter.features(),
+            required_features,
             required_limits: convert::limits_to_wgpu(descriptor.required_limits),
             ..Default::default()
         }
@@ -360,6 +380,9 @@ impl WgpuInstance {
         if supported.contains(wgpu::Features::IMMEDIATES) {
             required_features |= wgpu::Features::IMMEDIATES;
         }
+        if supported.contains(wgpu::Features::PIPELINE_CACHE) {
+            required_features |= wgpu::Features::PIPELINE_CACHE;
+        }
 
         self.bring_up(adapter, required_features, adapter.limits(), None)
     }
@@ -378,7 +401,10 @@ impl WgpuInstance {
         features: rhi::Features,
         limits: rhi::Limits,
     ) -> Result<(WgpuDevice, WgpuQueue), DeviceCreationError> {
-        let required_features = convert::features_to_wgpu(features) & adapter.features();
+        let mut required_features = convert::features_to_wgpu(features) & adapter.features();
+        if adapter.features().contains(wgpu::Features::PIPELINE_CACHE) {
+            required_features |= wgpu::Features::PIPELINE_CACHE;
+        }
         self.bring_up(
             adapter,
             required_features,

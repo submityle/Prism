@@ -208,6 +208,11 @@ pub(crate) struct DeviceInner {
     render_pipelines: Map<RenderPipelineMarker, wgpu::RenderPipeline>,
     /// Live compute pipelines.
     compute_pipelines: Map<ComputePipelineMarker, wgpu::ComputePipeline>,
+    /// The optional native, device-level pipeline cache. It must be created
+    /// before pipelines are built if imported bytes are to affect them.
+    pipeline_cache: Mutex<Option<wgpu::PipelineCache>>,
+    /// Identity attached to the currently imported cache.
+    pipeline_cache_identity: Mutex<Option<rhi::PipelineBinaryCacheIdentity>>,
     /// Shared by the owned callback and explicit host notifications. Draining
     /// the first reason never revives this device generation's readbacks.
     loss: Arc<DeviceLossState>,
@@ -262,6 +267,26 @@ fn legacy<T>(result: Result<T, BackendError>) -> T {
     })
 }
 
+/// Reduces the adapter's textual driver identity to the stable token used by
+/// the backend-neutral cache contract. This is deliberately not a hash of the
+/// cache bytes: changing the driver must invalidate old native data before it
+/// reaches `wgpu`.
+fn driver_version_token(info: &wgpu::AdapterInfo) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = OFFSET;
+    for byte in info
+        .driver
+        .bytes()
+        .chain(core::iter::once(0))
+        .chain(info.driver_info.bytes())
+    {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
+}
+
 impl DeviceInner {
     /// Builds the shared state from a ready wgpu device and its capabilities.
     fn new(adapter: wgpu::Adapter, device: wgpu::Device, caps: rhi::DeviceCapabilities) -> Self {
@@ -279,8 +304,15 @@ impl DeviceInner {
             pipeline_layouts: Mutex::new(rhi::GenerationalSlotMap::new()),
             render_pipelines: Mutex::new(rhi::GenerationalSlotMap::new()),
             compute_pipelines: Mutex::new(rhi::GenerationalSlotMap::new()),
+            pipeline_cache: Mutex::new(None),
+            pipeline_cache_identity: Mutex::new(None),
             loss: Arc::new(DeviceLossState::default()),
         }
+    }
+
+    /// Clones the native cache handle for use while creating a pipeline.
+    fn pipeline_cache(&self) -> Option<wgpu::PipelineCache> {
+        lock(&self.pipeline_cache).clone()
     }
 
     /// Installs the wgpu device-lost callback that records why the device went
@@ -333,6 +365,14 @@ impl DeviceInner {
             .expect("stale TextureId in upload")
             .texture
             .clone()
+    }
+
+    /// Readback admission must not use the command-replay resolver, whose
+    /// contract deliberately panics on stale ids.
+    pub(crate) fn try_resolve_texture(&self, id: rhi::TextureId) -> Option<wgpu::Texture> {
+        lock(&self.textures)
+            .get(convert::convert_id(id))
+            .map(|stored| stored.texture.clone())
     }
 
     /// Resolves a texture-view id to a cloned wgpu handle.
@@ -547,6 +587,137 @@ impl WgpuDevice {
     #[must_use]
     pub(crate) fn inner(&self) -> Arc<DeviceInner> {
         Arc::clone(&self.inner)
+    }
+
+    /// Computes the backend-neutral identity for a shader ABI.
+    fn pipeline_cache_identity(&self, abi_hash: [u8; 32]) -> rhi::PipelineBinaryCacheIdentity {
+        let info = self.inner.adapter.get_info();
+        rhi::PipelineBinaryCacheIdentity::new(
+            convert::backend_from_wgpu(info.backend),
+            info.vendor,
+            info.device,
+            driver_version_token(&info),
+            abi_hash,
+        )
+    }
+
+    /// Rejects an imported identity before any opaque bytes reach wgpu.
+    fn validate_pipeline_cache_identity(
+        &self,
+        expected: rhi::PipelineBinaryCacheIdentity,
+        blob: rhi::PipelineBinaryCacheIdentity,
+    ) -> Result<(), rhi::PipelineBinaryCacheError> {
+        let current = self.pipeline_cache_identity(expected.abi_hash);
+        expected.validate_against(&current)?;
+        blob.validate_against(&current)
+    }
+
+    /// Imports the native cache before any pipeline has been created.
+    #[allow(unsafe_code)]
+    fn import_pipeline_cache(
+        &self,
+        expected: &rhi::PipelineBinaryCacheIdentity,
+        blob: &rhi::PipelineBinaryCacheBlob,
+    ) -> Result<(), rhi::PipelineBinaryCacheError> {
+        if self.inner.is_lost() {
+            return Err(rhi::PipelineBinaryCacheError::DeviceLost);
+        }
+        self.validate_pipeline_cache_identity(*expected, blob.identity)?;
+        if blob.bytes.is_empty() {
+            return Err(rhi::PipelineBinaryCacheError::InvalidBinary);
+        }
+        if !self
+            .inner
+            .device
+            .features()
+            .contains(wgpu::Features::PIPELINE_CACHE)
+        {
+            return Err(rhi::PipelineBinaryCacheError::Unsupported);
+        }
+        if lock(&self.inner.pipeline_cache_identity).is_some()
+            || lock(&self.inner.render_pipelines).len() != 0
+            || lock(&self.inner.compute_pipelines).len() != 0
+        {
+            return Err(rhi::PipelineBinaryCacheError::AlreadyInitialized);
+        }
+
+        // `fallback: false` keeps invalid native data observable through wgpu's
+        // validation path. The bytes are never interpreted or rewritten here.
+        let cache = unsafe {
+            self.inner
+                .device
+                .create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
+                    label: Some("prism-imported-pipeline-cache"),
+                    data: Some(&blob.bytes),
+                    fallback: false,
+                })
+        };
+        *lock(&self.inner.pipeline_cache) = Some(cache);
+        *lock(&self.inner.pipeline_cache_identity) = Some(blob.identity);
+        Ok(())
+    }
+
+    /// Initializes an empty native cache before pipeline creation.
+    #[allow(unsafe_code)]
+    fn initialize_pipeline_cache(
+        &self,
+        expected: &rhi::PipelineBinaryCacheIdentity,
+    ) -> Result<(), rhi::PipelineBinaryCacheError> {
+        if self.inner.is_lost() {
+            return Err(rhi::PipelineBinaryCacheError::DeviceLost);
+        }
+        self.validate_pipeline_cache_identity(*expected, *expected)?;
+        if !self
+            .inner
+            .device
+            .features()
+            .contains(wgpu::Features::PIPELINE_CACHE)
+        {
+            return Err(rhi::PipelineBinaryCacheError::Unsupported);
+        }
+        if lock(&self.inner.pipeline_cache_identity).is_some()
+            || lock(&self.inner.render_pipelines).len() != 0
+            || lock(&self.inner.compute_pipelines).len() != 0
+        {
+            return Err(rhi::PipelineBinaryCacheError::AlreadyInitialized);
+        }
+        let cache = unsafe {
+            self.inner
+                .device
+                .create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
+                    label: Some("prism-pipeline-cache"),
+                    data: None,
+                    fallback: false,
+                })
+        };
+        *lock(&self.inner.pipeline_cache) = Some(cache);
+        *lock(&self.inner.pipeline_cache_identity) = Some(*expected);
+        Ok(())
+    }
+
+    /// Exports the native cache bytes accumulated by this device.
+    fn export_pipeline_cache(
+        &self,
+        abi_hash: [u8; 32],
+    ) -> Result<rhi::PipelineBinaryCacheBlob, rhi::PipelineBinaryCacheError> {
+        if self.inner.is_lost() {
+            return Err(rhi::PipelineBinaryCacheError::DeviceLost);
+        }
+        let identity = self.pipeline_cache_identity(abi_hash);
+        let Some(cache_identity) = *lock(&self.inner.pipeline_cache_identity) else {
+            return Err(rhi::PipelineBinaryCacheError::NoData);
+        };
+        cache_identity.validate_against(&identity)?;
+        let Some(cache) = lock(&self.inner.pipeline_cache).clone() else {
+            return Err(rhi::PipelineBinaryCacheError::NoData);
+        };
+        let Some(bytes) = cache.get_data() else {
+            return Err(rhi::PipelineBinaryCacheError::Unsupported);
+        };
+        if bytes.is_empty() {
+            return Err(rhi::PipelineBinaryCacheError::NoData);
+        }
+        Ok(rhi::PipelineBinaryCacheBlob::new(cache_identity, bytes))
     }
 
     /// Returns a cloneable, thread-safe notification function for this device
@@ -1038,6 +1209,7 @@ impl WgpuDevice {
                 targets: &color_targets,
             });
 
+        let pipeline_cache = self.inner.pipeline_cache();
         let pipeline = self
             .inner
             .device
@@ -1058,7 +1230,7 @@ impl WgpuDevice {
                 multisample: convert::multisample_state(descriptor.multisample),
                 fragment: fragment_state,
                 multiview_mask: None,
-                cache: None,
+                cache: pipeline_cache.as_ref(),
             });
         let id = lock(&self.inner.render_pipelines).insert(pipeline);
         Ok(convert::convert_id(id))
@@ -1068,6 +1240,35 @@ impl WgpuDevice {
 impl RenderDevice for WgpuDevice {
     fn capabilities(&self) -> &rhi::DeviceCapabilities {
         &self.inner.caps
+    }
+
+    fn pipeline_binary_cache_identity(
+        &self,
+        abi_hash: [u8; 32],
+    ) -> Option<rhi::PipelineBinaryCacheIdentity> {
+        Some(self.pipeline_cache_identity(abi_hash))
+    }
+
+    fn import_pipeline_binary_cache(
+        &self,
+        expected: &rhi::PipelineBinaryCacheIdentity,
+        blob: &rhi::PipelineBinaryCacheBlob,
+    ) -> Result<(), rhi::PipelineBinaryCacheError> {
+        self.import_pipeline_cache(expected, blob)
+    }
+
+    fn initialize_pipeline_binary_cache(
+        &self,
+        expected: &rhi::PipelineBinaryCacheIdentity,
+    ) -> Result<(), rhi::PipelineBinaryCacheError> {
+        self.initialize_pipeline_cache(expected)
+    }
+
+    fn export_pipeline_binary_cache(
+        &self,
+        abi_hash: [u8; 32],
+    ) -> Result<rhi::PipelineBinaryCacheBlob, rhi::PipelineBinaryCacheError> {
+        self.export_pipeline_cache(abi_hash)
     }
 
     fn take_device_lost(&self) -> Option<DeviceLostReason> {
@@ -1288,6 +1489,7 @@ impl RenderDevice for WgpuDevice {
                 .expect("stale PipelineLayoutId")
                 .clone()
         });
+        let pipeline_cache = self.inner.pipeline_cache();
         let pipeline =
             self.inner
                 .device
@@ -1297,7 +1499,7 @@ impl RenderDevice for WgpuDevice {
                     module: &module,
                     entry_point: Some(descriptor.entry_point.as_ref()),
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    cache: None,
+                    cache: pipeline_cache.as_ref(),
                 });
         let id = lock(&self.inner.compute_pipelines).insert(pipeline);
         convert::convert_id(id)
@@ -1756,7 +1958,10 @@ mod tests {
         }
         queue.wgpu_queue().submit([encoder.finish()]);
         let output_id = device.register_buffer(&output);
-        assert_eq!(queue.read_buffer(output_id, 4), 314159_u32.to_le_bytes());
+        assert_eq!(
+            queue.read_buffer(output_id, 4),
+            Ok(314159_u32.to_le_bytes().to_vec())
+        );
         device.release_buffer(output_id);
     }
 
@@ -1797,7 +2002,7 @@ mod tests {
         // Buffer::destroy, not merely retention of the public handle's metadata.
         queue.wgpu_queue().write_buffer(&native, 0, &[3, 1, 4, 1]);
         let again = device.register_buffer(&native);
-        assert_eq!(queue.read_buffer(again, 4), [3, 1, 4, 1]);
+        assert_eq!(queue.read_buffer(again, 4), Ok(vec![3, 1, 4, 1]));
         device.release_buffer(again);
     }
 

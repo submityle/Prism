@@ -13,7 +13,9 @@
 
 use crate::binding::{BindGroupDescriptor, BindGroupLayoutDescriptor};
 use crate::buffer::BufferDescriptor;
-use crate::cache::PipelineBinaryCacheError;
+use crate::cache::{
+    PipelineBinaryCacheBlob, PipelineBinaryCacheError, PipelineBinaryCacheIdentity,
+};
 use crate::capabilities::DeviceCapabilities;
 use crate::command::CommandBuffer;
 use crate::loss::DeviceLostReason;
@@ -27,9 +29,9 @@ use crate::resource::{
 use crate::sampler::SamplerDescriptor;
 use crate::shader::ShaderModuleDescriptor;
 use crate::texture::{Extent3d, TextureDescriptor, TextureViewDescriptor};
-use alloc::vec::Vec;
-use alloc::boxed::Box;
 use crate::{BufferReadback, BufferReadbackError, BufferReadbackRange};
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 /// The byte layout of a linear image buffer used for texture uploads.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -92,6 +94,55 @@ pub trait RenderDevice {
     fn create_pipeline_layout(&self, descriptor: &PipelineLayoutDescriptor) -> PipelineLayoutId;
     /// Creates a render pipeline.
     fn create_render_pipeline(&self, descriptor: &RenderPipelineDescriptor) -> RenderPipelineId;
+
+    /// Returns the current device identity for a shader/render `ABI` hash.
+    ///
+    /// The returned identity is the only identity a caller may attach to a
+    /// durable [`PipelineBinaryCacheBlob`]. A backend may return `None` when it
+    /// has no native pipeline-cache facility.
+    fn pipeline_binary_cache_identity(
+        &self,
+        abi_hash: [u8; 32],
+    ) -> Option<PipelineBinaryCacheIdentity> {
+        let _ = abi_hash;
+        None
+    }
+
+    /// Starts an empty native cache for `expected`, allowing later pipeline
+    /// creation to populate bytes that can be exported at shutdown.
+    fn initialize_pipeline_binary_cache(
+        &self,
+        expected: &PipelineBinaryCacheIdentity,
+    ) -> Result<(), PipelineBinaryCacheError> {
+        let _ = expected;
+        Err(PipelineBinaryCacheError::Unsupported)
+    }
+
+    /// Imports a device-level native pipeline-cache blob.
+    ///
+    /// Import must happen before creating pipelines that should benefit from
+    /// the cache. The backend owns the byte format; the RHI only requires the
+    /// identity/ABI gate and explicit failure semantics.
+    fn import_pipeline_binary_cache(
+        &self,
+        expected: &PipelineBinaryCacheIdentity,
+        blob: &PipelineBinaryCacheBlob,
+    ) -> Result<(), PipelineBinaryCacheError> {
+        let _ = (expected, blob);
+        Err(PipelineBinaryCacheError::Unsupported)
+    }
+
+    /// Exports the native cache accumulated by this device.
+    ///
+    /// An empty/unsupported native cache is reported as an error; backends must
+    /// never synthesize bytes from a descriptor, id, or hash.
+    fn export_pipeline_binary_cache(
+        &self,
+        abi_hash: [u8; 32],
+    ) -> Result<PipelineBinaryCacheBlob, PipelineBinaryCacheError> {
+        let _ = abi_hash;
+        Err(PipelineBinaryCacheError::Unsupported)
+    }
 
     /// Imports an opaque driver-owned render-pipeline binary.
     ///

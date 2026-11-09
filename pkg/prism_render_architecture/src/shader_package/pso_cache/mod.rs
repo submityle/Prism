@@ -36,7 +36,9 @@ mod warm_set;
 
 pub use eviction::{AdmitOutcome, LruPsoCache};
 pub use fingerprint::{DeviceFingerprint, FingerprintMismatch, GraphicsBackend};
-pub use persist::{PersistError, PersistLoadError, PersistedPipeline, PersistedPsoCache};
+pub use persist::{
+    PersistError, PersistLoadError, PersistedDriverCache, PersistedPipeline, PersistedPsoCache,
+};
 pub use warm_enumerate::{PackageWarmSpec, WarmEnumerationError};
 pub use warm_runtime::{DrawDecision, PipelineReadiness, WarmCounters, WarmRuntime};
 pub use warm_set::{WarmPriority, WarmRequest, WarmSetPlan, WarmSetPlanner};

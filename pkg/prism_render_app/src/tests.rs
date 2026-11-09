@@ -60,8 +60,13 @@ use prism_render_architecture::shader_package::{
 };
 use prism_render_architecture::view_family::ViewKind;
 use prism_render_material::{
-    material_pipeline_state, MaterialBlendMode, MaterialDepthTest, MaterialExecutionTables,
-    MaterialRenderClass, MaterialRenderPhase, MaterialRenderTarget, RenderDomain,
+    fallback_material_record, material_pipeline_state, BuiltinProgram, ChannelMask, CompiledEntry,
+    GpuSurfaceParameters, MaterialBlendMode, MaterialDepthTest, MaterialExecutionTables,
+    MaterialRegistry, MaterialRenderClass, MaterialRenderPhase, MaterialRenderTarget, ProgramRef,
+    RenderDomain, ShadingPlan,
+};
+use prism_render_shading::{
+    evaluate_principled_direct, surface_sample_from_parameters, DirectLightSample, ShadingFrame,
 };
 
 fn dense(index: u64) -> PermutationIndex {
@@ -69,6 +74,213 @@ fn dense(index: u64) -> PermutationIndex {
         .unwrap()
         .check_index(index)
         .unwrap()
+}
+
+/// CPU oracle for the production composite's builtin-Lit path.
+///
+/// This deliberately mirrors the shader's light construction and does not
+/// include ambient/GI: the composite receives those as a separate response
+/// channel. Keeping the oracle on the same Principled contract prevents a
+/// Lambert-vs-Principled comparison from masking GPU/CPU parity regressions.
+fn evaluate_principled_gpu_oracle(
+    position: [f32; 3],
+    normal: [f32; 3],
+    albedo: [f32; 3],
+    directionals: &[LightingDirectionalInput],
+    punctuals: &[LightingPunctualInput],
+) -> [f32; 3] {
+    fn dot(left: [f32; 3], right: [f32; 3]) -> f32 {
+        left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
+    }
+    fn cross(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
+        [
+            left[1] * right[2] - left[2] * right[1],
+            left[2] * right[0] - left[0] * right[2],
+            left[0] * right[1] - left[1] * right[0],
+        ]
+    }
+    fn normalize(value: [f32; 3], fallback: [f32; 3]) -> [f32; 3] {
+        let length_squared = dot(value, value);
+        if length_squared > 1.0e-12 {
+            let inverse_length = length_squared.sqrt().recip();
+            return [
+                value[0] * inverse_length,
+                value[1] * inverse_length,
+                value[2] * inverse_length,
+            ];
+        }
+        fallback
+    }
+    fn sub(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
+        [left[0] - right[0], left[1] - right[1], left[2] - right[2]]
+    }
+    fn scale(value: [f32; 3], scalar: f32) -> [f32; 3] {
+        [value[0] * scalar, value[1] * scalar, value[2] * scalar]
+    }
+    fn add(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
+        [left[0] + right[0], left[1] + right[1], left[2] + right[2]]
+    }
+
+    let normal = normalize(normal, [0.0, 1.0, 0.0]);
+    let reference = if normal[1].abs() > 0.9 {
+        [1.0, 0.0, 0.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    let frame = ShadingFrame {
+        normal,
+        view: normalize([-position[0], -position[1], -position[2]], normal),
+        tangent: normalize(cross(reference, normal), [1.0, 0.0, 0.0]),
+        bitangent: normalize(cross(normal, cross(reference, normal)), [0.0, 0.0, 1.0]),
+    };
+    let parameters = GpuSurfaceParameters {
+        base_color: [albedo[0], albedo[1], albedo[2], 1.0],
+        ..GpuSurfaceParameters::default()
+    };
+    let surface = surface_sample_from_parameters(&parameters);
+    let mut radiance = [0.0; 3];
+
+    for light in directionals {
+        radiance = add(
+            radiance,
+            evaluate_principled_direct(
+                surface,
+                frame,
+                DirectLightSample {
+                    direction: normalize(light.direction_to_light, frame.normal),
+                    illuminance: light.illuminance,
+                    visibility: light.visibility.clamp(0.0, 1.0),
+                },
+            ),
+        );
+    }
+    for light in punctuals {
+        let to_light = sub(light.position, position);
+        let distance_squared = dot(to_light, to_light);
+        if !distance_squared.is_finite() || distance_squared <= 1.0e-8 {
+            continue;
+        }
+        let distance = distance_squared.sqrt();
+        let direction = scale(to_light, distance.recip());
+        let mut attenuation = 1.0 / distance_squared.max(1.0e-4);
+        if light.range.is_finite() && light.range > 0.0 {
+            let ratio = (distance_squared / (light.range * light.range)).min(1.0);
+            let window = (1.0 - ratio * ratio).max(0.0);
+            attenuation *= window * window;
+        }
+        if light.spot_scale != 0.0 {
+            let cone = (dot(light.direction, scale(direction, -1.0)) * light.spot_scale
+                + light.spot_offset)
+                .clamp(0.0, 1.0);
+            attenuation *= cone * cone;
+        }
+        radiance = add(
+            radiance,
+            evaluate_principled_direct(
+                surface,
+                frame,
+                DirectLightSample {
+                    direction,
+                    illuminance: scale(light.intensity, attenuation),
+                    // The production composite applies visibility to
+                    // directionals; punctual visibility is encoded by the
+                    // uploaded attenuation contract and is therefore 1 here.
+                    visibility: 1.0,
+                },
+            ),
+        );
+    }
+    radiance
+}
+
+/// Builds the smallest real material/execution snapshot that the production
+/// identity and composite passes accept.  The permanent fallback row is
+/// intentionally unbound, so a lighting fixture must use a published row with
+/// a verified builtin-Lit execution tuple rather than pretending slot zero is
+/// shadeable.
+fn lighting_test_material_registry() -> MaterialRegistry {
+    use prism_render_architecture::{
+        abi::{AbiHash, AbiVersion},
+        shader_package::{
+            ManifestExpectation, ShaderPackageId, ShaderPackageManifest, ShaderPackageRegistry,
+            ShaderPackageVariantManifest,
+        },
+    };
+
+    let permutations = PermutationSpace::new([1]);
+    let manifest = ShaderPackageManifest {
+        id: ShaderPackageId::new("lighting-composite-test"),
+        source_revision: "1".into(),
+        entry_point: "main".into(),
+        abi_version: AbiVersion::from_parts(1, 0),
+        abi_hash: AbiHash::from_bytes(
+            prism_render_material::response_source::RESPONSE_FUNCTION_ABI.as_bytes(),
+        ),
+        variants: ShaderPackageVariantManifest::from_digests(
+            &permutations,
+            [ArtifactDigest([1; 32])],
+        )
+        .expect("lighting fixture variant manifest is valid"),
+    };
+    let compiled = CompiledEntry::from_response_wgsl(
+        manifest.clone(),
+        vec!["var response: RegisteredResponse; return response;".into()],
+    )
+    .expect("lighting fixture response source is valid");
+    let mut packages = ShaderPackageRegistry::new();
+    packages
+        .register_verified(compiled.artifact().clone())
+        .expect("lighting fixture artifact registers");
+    packages
+        .validate(
+            &manifest.id,
+            &ManifestExpectation::new(manifest.abi_version, manifest.abi_hash),
+        )
+        .expect("lighting fixture artifact validates");
+
+    let mut tables = MaterialExecutionTables::new();
+    let package = tables
+        .register_package(&compiled, &packages)
+        .expect("lighting fixture package registers");
+    let program = tables
+        .register_program(
+            ProgramRef::Builtin(BuiltinProgram::Lit),
+            &compiled,
+            package,
+            ModuleId(0),
+            permutations,
+        )
+        .expect("lighting fixture builtin program registers");
+    let plan = tables
+        .register_plan(
+            ShadingPlan::single_builtin(BuiltinProgram::Lit),
+            program,
+            None,
+            ExecutionFamily::FusedBuiltin,
+            ChannelMask::default(),
+        )
+        .expect("lighting fixture builtin plan registers");
+    let binding = tables
+        .bind_raw(plan.get(), program.get(), package.get(), 0)
+        .expect("lighting fixture binding validates");
+
+    let mut registry = MaterialRegistry::new(2);
+    let handle = registry
+        .allocate()
+        .expect("lighting fixture allocates material slot");
+    assert_eq!(handle.index, 1, "slot zero remains the fallback row");
+    let mut record = fallback_material_record(handle, 1);
+    record.response_plan = ShadingPlan::single_builtin(BuiltinProgram::Lit);
+    registry
+        .publish(record)
+        .expect("lighting fixture material publishes");
+    registry
+        .install_execution_tables(&tables)
+        .expect("lighting fixture tables install");
+    registry
+        .set_execution_binding(handle, binding)
+        .expect("lighting fixture execution binding installs");
+    registry
 }
 
 #[test]
@@ -2052,6 +2264,16 @@ pub(super) fn write_lighting_test_gbuffer_pixel(
     upload(target.albedo_texture(), &albedo_bytes);
     surface.albedo = encoded_albedo.map(decode_srgb8);
     upload(target.surface_id_texture(), &surface_id.to_le_bytes());
+    // Composite validates the complete SurfaceData attachment before it
+    // shades a covered pixel.  A fixture that only writes position/normal/
+    // albedo/id therefore looks like an uncovered sample and silently
+    // produces transparent black.  Keep the canonical UV/tangent/footprint
+    // values simple while still satisfying the production contract.
+    let surface_data = [0x0000_u16, 0x0000, 0x0000, 0x3c00]
+        .into_iter()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    upload(target.surface_data_texture(), &surface_data);
     surface
 }
 
@@ -2073,14 +2295,12 @@ pub(super) fn dispatch_lighting_test_composite<I>(
     // snapshots even when this focused test only exercises direct/GI math.
     // Build and retain real snapshots for the entire submission instead of
     // dispatching an incomplete test-only pipeline binding set.
-    let mut registry = prism_render_material::MaterialRegistry::new(1);
-    registry
-        .install_execution_tables(&prism_render_material::MaterialExecutionTables::new())
-        .expect("empty canonical execution tables are valid for fallback material");
+    let mut registry = lighting_test_material_registry();
     let device = runtime.device_handle();
     let mut material_buffers =
-        MaterialParameterBuffers::new_owned(device.clone(), 1, 1, 1, BufferUsages::NONE);
-    material_buffers.sync_registry(runtime.device(), runtime.queue(), &registry, [0]);
+        MaterialParameterBuffers::new_owned(device.clone(), 2, 1, 1, BufferUsages::NONE);
+    let dirty = registry.take_dirty();
+    material_buffers.sync_registry(runtime.device(), runtime.queue(), &registry, dirty);
     let mut execution_buffers = crate::material::NativeExecutionTableBuffers::new();
     execution_buffers
         .sync_registry(device, runtime.queue(), &registry)
@@ -2113,6 +2333,27 @@ pub(super) fn dispatch_lighting_test_composite<I>(
     encoder.push_compute_pass(
         Some("prism-test-lighting-composite".into()),
         vec![
+            // The composite consumes the post-raster material identity tuple,
+            // not the raw surface-id texel alone.  Reconstruct it after the
+            // fixture writes its GBuffer sample, exactly as the production
+            // frame graph does between raster and composite.
+            ComputeCommand::SetPipeline(pass.surface_identity_pipeline),
+            ComputeCommand::SetBindGroup {
+                index: 0,
+                bind_group: pass
+                    .surface_identity_bind_group
+                    .expect("target-aware lighting pass owns identity bindings"),
+                dynamic_offsets: Vec::new(),
+            },
+            ComputeCommand::Dispatch {
+                x: extent
+                    .width
+                    .div_ceil(crate::lighting_gpu::COMPOSITE_WORKGROUP_X),
+                y: extent
+                    .height
+                    .div_ceil(crate::lighting_gpu::COMPOSITE_WORKGROUP_Y),
+                z: 1,
+            },
             ComputeCommand::SetPipeline(pass.composite_pipeline),
             ComputeCommand::SetBindGroup {
                 index: 0,
@@ -2172,19 +2413,17 @@ where
     I::Device: Send + Sync + 'static,
     I::Queue: prism_render_driver::FrameSync,
 {
-    let mut registry = prism_render_material::MaterialRegistry::new(1);
-    registry
-        .install_execution_tables(&MaterialExecutionTables::new())
-        .expect("empty canonical execution tables are valid for fallback material");
+    let mut registry = lighting_test_material_registry();
     let device = runtime.device_handle();
     let mut material_buffers = MaterialParameterBuffers::new_owned(
         device.clone(),
-        1,
+        2,
         1,
         1,
         prism_render_driver::BufferUsages::NONE,
     );
-    material_buffers.sync_registry(runtime.device(), runtime.queue(), &registry, [0]);
+    let dirty = registry.take_dirty();
+    material_buffers.sync_registry(runtime.device(), runtime.queue(), &registry, dirty);
     let mut execution_buffers = crate::material::NativeExecutionTableBuffers::new();
     execution_buffers
         .sync_registry(device, runtime.queue(), &registry)
@@ -3829,7 +4068,10 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
         {
             let inputs = app.world_mut().resource_mut::<LightingSceneInputs>();
             inputs.surfaces = surfaces.clone();
-            inputs.surface_material_indices = (0..surfaces.len() as u32).collect();
+            // The composite fixture uses the first published material row;
+            // map that row to GI surface zero so identity reconstruction and
+            // the per-surface GI oracle share one canonical index.
+            inputs.surface_material_indices = (1..=surfaces.len() as u32).collect();
             inputs.gi_candidates = gi_candidates_per_surface;
         }
         let mut lights = app.world_mut().resource_mut::<crate::LightingLightScene>();
@@ -3998,14 +4240,17 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
         assert_eq!(gi_values[tail], 0.0, "GI tail is deterministically clear");
     }
     // Direct light is evaluated from per-pixel GBuffer data by the composite.
-    // Use id zero here only to select GI row zero; direct lighting is
-    // independent of that identity and uses position, normal, and albedo.
+    // Material row one maps to GI row zero; direct lighting is independent of
+    // that identity and uses position, normal, and albedo.
     let gbuffer_surface =
-        write_lighting_test_gbuffer_pixel(runtime.runtime().queue(), &target, 0, 0, surfaces[0], 0);
-    let mut direct_surface = gbuffer_surface;
-    direct_surface.ambient = [0.0; 3];
-    let expected_direct =
-        evaluate_deterministic_direct(direct_surface, &directionals, &punctuals, &[]);
+        write_lighting_test_gbuffer_pixel(runtime.runtime().queue(), &target, 0, 0, surfaces[0], 1);
+    let expected_direct = evaluate_principled_gpu_oracle(
+        gbuffer_surface.position,
+        gbuffer_surface.normal,
+        gbuffer_surface.albedo,
+        &directionals,
+        &punctuals,
+    );
     dispatch_lighting_test_composite(lighting, &plan.plan, &target, runtime.runtime());
     let hdr_pixels = runtime
         .runtime()
@@ -4014,12 +4259,29 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
         .expect("direct-light HDR readback must complete");
     assert_eq!(hdr_pixels.len(), (SIZE * SIZE) as usize);
     for channel in 0..3 {
-        let expected = expected_direct[channel] + expected_gi[0][channel];
+        // The production target is rgba16float. Compare against the value
+        // representable by that target rather than against the unquantized
+        // f32 oracle; at HDR values around 10.0 one half-float ULP is already
+        // larger than the old 2e-3 tolerance.
+        let expected_unquantized = expected_direct[channel] + expected_gi[0][channel];
+        let expected_bits = prism_render_architecture::particle::half_float_f16::f32_to_f16_bits(
+            expected_unquantized,
+        );
+        let expected =
+            prism_render_architecture::particle::half_float_f16::f16_bits_to_f32(expected_bits);
+        let exponent = (expected_bits >> 10) & 0x1f;
+        let half_ulp = if exponent == 0 {
+            2.0_f32.powi(-24)
+        } else {
+            2.0_f32.powi(exponent as i32 - 25)
+        };
         assert!(
-            (hdr_pixels[0][channel] - expected).abs() <= 2.0e-3,
-            "per-pixel HDR channel {channel}: GPU {} != CPU {}",
+            (hdr_pixels[0][channel] - expected).abs() <= half_ulp + 1.0e-6,
+            "per-pixel HDR channel {channel}: GPU {} != CPU {}; direct={direct:?}; gi={gi:?}",
             hdr_pixels[0][channel],
-            expected
+            expected,
+            direct = expected_direct,
+            gi = expected_gi[0]
         );
     }
     assert_eq!(hdr_pixels[0][3], 1.0);
@@ -4032,8 +4294,8 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
             .world
             .resource::<RenderFrameStats>()
             .lighting_gpu_passes_recorded,
-        5,
-        "manual GI/composite plus the camera identity/composite passes are recorded"
+        10,
+        "the two submitted frames record the production identity/composite pair plus the manual parity pair"
     );
 }
 
@@ -4148,7 +4410,7 @@ fn physical_gpu_area_direct_light_matches_cpu_oracle_for_rect_disk_and_capsule()
     assert_eq!(pass.candidate_surface_count, 0);
     let target = RenderTarget::new(runtime.device(), extent);
     let gbuffer_surface =
-        write_lighting_test_gbuffer_pixel(runtime.queue(), &target, 0, 0, surface, 0xf123_4567);
+        write_lighting_test_gbuffer_pixel(runtime.queue(), &target, 0, 0, surface, 1);
     let expected = evaluate_deterministic_direct(gbuffer_surface, &[], &[], &areas);
     dispatch_lighting_test_composite(&lighting, &plan, &target, &runtime);
     let hdr = runtime

@@ -13,7 +13,7 @@ use rhi::{
     Adapter, Backend, BufferDescriptor, BufferUsages, DeviceDescriptor, DeviceType, Extent3d,
     ImageDataLayout, Instance, PresentMode, RenderDevice, RenderQueue, RequestAdapterOptions,
     Surface, SurfaceConfig, SurfaceError, TextureDescriptor, TextureFormat, TextureUsages,
-    TextureWrite,
+    TextureWrite, PipelineBinaryCacheBlob, PipelineBinaryCacheError, PipelineBinaryCacheIdentity,
 };
 
 use crate::{NullDevice, NullInstance, NullQueue};
@@ -73,6 +73,39 @@ fn configured_instance_preserves_the_baseline_and_device_request_contract() {
         ..descriptor
     };
     assert!(instance.create_device(&adapter, &oversized).is_err());
+}
+
+#[test]
+fn null_backend_never_fabricates_pipeline_binary_data() {
+    let instance = NullInstance::new();
+    let adapter = instance
+        .request_adapter(&RequestAdapterOptions::default())
+        .unwrap();
+    let (device, _) = instance
+        .create_device(&adapter, &DeviceDescriptor::default())
+        .unwrap();
+    let identity = PipelineBinaryCacheIdentity::new(Backend::Noop, 0, 0, 1, [7; 32]);
+
+    assert_eq!(
+        device.pipeline_binary_cache_identity([7; 32]),
+        None,
+        "null has no native cache identity"
+    );
+    assert_eq!(
+        device.initialize_pipeline_binary_cache(&identity),
+        Err(PipelineBinaryCacheError::Unsupported)
+    );
+    assert_eq!(
+        device.import_pipeline_binary_cache(
+            &identity,
+            &PipelineBinaryCacheBlob::new(identity, vec![1, 2, 3]),
+        ),
+        Err(PipelineBinaryCacheError::Unsupported)
+    );
+    assert_eq!(
+        device.export_pipeline_binary_cache([7; 32]),
+        Err(PipelineBinaryCacheError::Unsupported)
+    );
 }
 
 impl raw_window_handle::HasWindowHandle for FakeWindow {
