@@ -110,8 +110,15 @@ impl Plugin for PrismMaterialPlugin {
                         .in_set(RenderSystems::PrepareResources)
                         .before(prepare_material_virtual_texture),
                     prepare_material_virtual_texture.in_set(RenderSystems::PrepareResources),
-                    stage_material_uploads.in_set(RenderSystems::PrepareResources),
-                    prepare_material_texture_arrays.in_set(RenderSystems::PrepareResources),
+                    // A completed VT publication republishes every affected material row
+                    // and marks it dirty. Consume those rows in the same render frame so
+                    // the active VT slice and the material row become GPU-visible together.
+                    stage_material_uploads
+                        .after(prepare_material_virtual_texture)
+                        .in_set(RenderSystems::PrepareResources),
+                    prepare_material_texture_arrays
+                        .after(prepare_material_virtual_texture)
+                        .in_set(RenderSystems::PrepareResources),
                     write_material_buffers.in_set(RenderSystems::PrepareResourcesFlush),
                     prepare_material_bind_group
                         .after(write_material_buffers)
@@ -129,6 +136,31 @@ impl Plugin for PrismMaterialPlugin {
                 crate::completion::track_submission.in_set(RenderGraphSystems::Finish),
                 reclaim_completed_materials.in_set(RenderGraphSystems::Finish),
             ),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn material_uploads_follow_virtual_texture_publication() {
+        let source = include_str!("plugin.rs");
+        let publication = source
+            .find("prepare_material_virtual_texture.in_set(RenderSystems::PrepareResources)")
+            .expect("VT publication must remain in PrepareResources");
+        let upload = source
+            .find("stage_material_uploads\n                        .after(prepare_material_virtual_texture)")
+            .expect("material staging must explicitly follow VT publication");
+        let arrays = source
+            .find("prepare_material_texture_arrays\n                        .after(prepare_material_virtual_texture)")
+            .expect("texture arrays must explicitly follow VT publication");
+        assert!(
+            publication < upload,
+            "the same-frame VT publication edge must precede material staging"
+        );
+        assert!(
+            publication < arrays,
+            "the same-frame VT publication edge must precede texture-array composition"
         );
     }
 }

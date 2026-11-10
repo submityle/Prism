@@ -29,12 +29,12 @@
 //! scene allocator so consumers can treat texture slots and scene handles with
 //! the same staleness rules.
 
+use super::standard_adapter::TextureSemantic;
 use bevy_asset::AssetId;
 use bevy_image::Image;
 use bevy_platform::collections::HashMap;
 use core::fmt;
 use prism_render_architecture::gpu_scene::GpuCompletionValue;
-use prism_render_material::TextureSemantic;
 
 /// Reserved slot holding an opaque white (`1, 1, 1, 1`) texel. Fallback for
 /// base color, metallic-roughness, occlusion, and emissive maps.
@@ -319,12 +319,6 @@ impl BindlessTextureHeap {
             completion,
         });
         true
-    }
-
-    /// Compatibility name for callers that describe retirement as a deferred
-    /// release.
-    pub fn release_after(&mut self, image: AssetId<Image>, completion: GpuCompletionValue) -> bool {
-        self.retire(image, completion)
     }
 
     /// Retires the live allocation identified by `(index, generation)`.

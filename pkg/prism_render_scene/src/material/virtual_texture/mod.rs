@@ -24,6 +24,7 @@ pub use demand::{
     aggregate_material_vt_demands, MaterialVtDemandError, MaterialVtDemandMaterial,
     MaterialVtDemandRegistry, MaterialVtVisibilitySample,
 };
+pub(crate) use demand::{bootstrap_material_vt_demands, merge_material_vt_demands};
 pub(crate) use feedback::{
     collect_material_vt_feedback, map_submitted_material_vt_feedback,
     request_material_vt_feedback_readback, MaterialVtFeedbackReadback,
@@ -136,6 +137,42 @@ mod tests {
         assert_eq!(upload.rows(), 6);
         assert_eq!(upload.bytes.len(), 256 * 6);
         assert_eq!(staging.page_table_words(), &[7, 0, 0, 2]);
+    }
+
+    #[test]
+    fn portable_source_page_normalizes_format_and_page_geometry() {
+        let descriptor =
+            MaterialVtSourceDescriptor::new(7, 4, 4, 1, 4, 3, MaterialVtFormat::Rgba8Srgb)
+                .expect("valid non-portable source descriptor");
+        let source = MaterialVtSourceSnapshot::new(descriptor, vec![128; (16 + 4 + 1) * 4])
+            .expect("valid source payload");
+        let config =
+            MaterialVirtualTextureAtlasConfig::new(128, 1, 2, 4, MaterialVtFormat::Rgba8Unorm)
+                .expect("valid normalized portable atlas");
+        let geometry = config.geometry().expect("portable atlas geometry");
+        let mut staging = MaterialVirtualTextureStaging::new(
+            config,
+            &snapshot(),
+            MaterialVirtualTextureGpuConfig::new(
+                true,
+                1,
+                128,
+                geometry.tile_extent_px(),
+                2,
+                1,
+                1,
+                0,
+            ),
+        )
+        .expect("valid portable staging");
+        staging
+            .push_portable_source_page(config, &source, key(0), 2)
+            .expect("source-backed normalization succeeds");
+        let upload = &staging.atlas_uploads()[0];
+        assert_eq!(upload.key, key(0));
+        assert_eq!(upload.extent_px, geometry.tile_extent_px());
+        assert_eq!(upload.bytes_per_row, geometry.bytes_per_row());
+        assert_eq!(upload.bytes.len(), geometry.tile_staging_bytes() as usize);
     }
 
     #[test]
@@ -359,5 +396,111 @@ mod tests {
         assert!(active.snapshot().is_empty());
         assert_eq!(active.config().enabled, 0);
         assert_eq!(active.config().entry_count, 0);
+    }
+
+    #[test]
+    fn lifecycle_rejects_stale_republication_and_rollbacks_then_accepts_new_epoch_removal() {
+        let config =
+            MaterialVirtualTextureAtlasConfig::new(4, 0, 2, 4, MaterialVtFormat::Rgba8Unorm)
+                .unwrap();
+        let initial = snapshot();
+        let staging = MaterialVirtualTextureStaging::new(
+            config,
+            &initial,
+            MaterialVirtualTextureGpuConfig::new(true, 1, 4, 4, 2, 1, 0, 2),
+        )
+        .unwrap();
+        let mut lifecycle = MaterialVirtualTextureLifecycle::new();
+        let serial = lifecycle
+            .enqueue(
+                staging,
+                initial,
+                MaterialVirtualTextureUploadRanges {
+                    resource_slot: 1,
+                    page_table: 0..16,
+                    config: 0..32,
+                    atlas: Vec::new(),
+                },
+            )
+            .unwrap();
+        let submission = lifecycle
+            .mark_submitted(serial, GpuCompletionValue(1))
+            .unwrap();
+        let ready = lifecycle
+            .complete(submission, GpuCompletionValue(1))
+            .unwrap();
+        lifecycle
+            .publish(ready.clone(), GpuCompletionValue(1))
+            .unwrap();
+        assert_eq!(
+            lifecycle.publish(ready, GpuCompletionValue(1)),
+            Err(MaterialVirtualTextureLifecycleError::InvalidPublication)
+        );
+
+        for (epoch, generation) in [(2, 99), (3, 1)] {
+            let stale = MaterialVirtualTexturePageTableSnapshot::try_from_records(
+                epoch,
+                generation,
+                [MaterialVirtualTexturePageRecord {
+                    key: key(0),
+                    slot: 2,
+                    generation,
+                    epoch,
+                    ready: true,
+                }],
+            )
+            .unwrap();
+            let staging = MaterialVirtualTextureStaging::new(
+                config,
+                &stale,
+                MaterialVirtualTextureGpuConfig::new(true, 1, 4, 4, 2, 1, 0, 2),
+            )
+            .unwrap();
+            assert_eq!(
+                lifecycle.enqueue(
+                    staging,
+                    stale,
+                    MaterialVirtualTextureUploadRanges {
+                        resource_slot: 0,
+                        page_table: 0..16,
+                        config: 0..32,
+                        atlas: Vec::new(),
+                    },
+                ),
+                Err(MaterialVirtualTextureLifecycleError::SnapshotRollback)
+            );
+        }
+
+        let removed = MaterialVirtualTexturePageTableSnapshot::try_from_records(4, 1, [])
+            .expect("a newer empty snapshot revokes the previous publication");
+        let staging = MaterialVirtualTextureStaging::new(
+            config,
+            &removed,
+            MaterialVirtualTextureGpuConfig::new(false, 0, 4, 4, 2, 1, 0, 0),
+        )
+        .unwrap();
+        let serial = lifecycle
+            .enqueue(
+                staging,
+                removed,
+                MaterialVirtualTextureUploadRanges {
+                    resource_slot: 0,
+                    page_table: 0..0,
+                    config: 0..32,
+                    atlas: Vec::new(),
+                },
+            )
+            .unwrap();
+        let submission = lifecycle
+            .mark_submitted(serial, GpuCompletionValue(2))
+            .unwrap();
+        let ready = lifecycle
+            .complete(submission, GpuCompletionValue(2))
+            .unwrap();
+        lifecycle.publish(ready, GpuCompletionValue(2)).unwrap();
+        let active = lifecycle.active().unwrap();
+        assert_eq!(active.snapshot().epoch(), 4);
+        assert_eq!(active.snapshot().generation(), 1);
+        assert!(active.snapshot().is_empty());
     }
 }

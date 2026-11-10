@@ -414,23 +414,70 @@ impl MaterialVtSourceQuery {
 #[derive(Resource, Debug, Default)]
 pub struct MaterialVtMaterialSourceQueries {
     entries: HashMap<AssetId<StandardMaterial>, MaterialVtSourceQuery>,
+    material_images: HashMap<AssetId<StandardMaterial>, Vec<AssetId<Image>>>,
+    image_references: HashMap<AssetId<Image>, u32>,
 }
 
 impl MaterialVtMaterialSourceQueries {
     /// Replaces the latest source query for one material asset.
-    pub fn update(&mut self, material: AssetId<StandardMaterial>, query: MaterialVtSourceQuery) {
+    pub fn update(
+        &mut self,
+        material: AssetId<StandardMaterial>,
+        query: MaterialVtSourceQuery,
+        images: impl IntoIterator<Item = AssetId<Image>>,
+    ) {
+        if let Some(previous) = self.material_images.remove(&material) {
+            for image in previous {
+                if let Some(count) = self.image_references.get_mut(&image) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        self.image_references.remove(&image);
+                    }
+                }
+            }
+        }
+        let images: Vec<_> = images.into_iter().collect();
+        for image in &images {
+            *self.image_references.entry(*image).or_default() += 1;
+        }
+        self.material_images.insert(material, images);
         self.entries.insert(material, query);
     }
 
     /// Removes the query when the material leaves the render registry.
     pub fn remove(&mut self, material: AssetId<StandardMaterial>) {
         self.entries.remove(&material);
+        if let Some(images) = self.material_images.remove(&material) {
+            for image in images {
+                if let Some(count) = self.image_references.get_mut(&image) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        self.image_references.remove(&image);
+                    }
+                }
+            }
+        }
     }
 
     /// Returns the latest source query for a material.
     #[must_use]
     pub fn get(&self, material: AssetId<StandardMaterial>) -> Option<MaterialVtSourceQuery> {
         self.entries.get(&material).copied()
+    }
+
+    /// Returns whether an image is referenced by at least one currently
+    /// published material. The producer uses this gate before reserving page
+    /// capacity, so unrelated images cannot evict visible material pages.
+    #[must_use]
+    pub fn references_image(&self, image: AssetId<Image>) -> bool {
+        self.image_references.contains_key(&image)
+    }
+
+    /// Returns the distinct image assets referenced by the current material
+    /// set. Callers sort this small set before deriving deterministic GPU
+    /// state; the underlying map intentionally has no traversal order.
+    pub fn referenced_images(&self) -> impl Iterator<Item = AssetId<Image>> + '_ {
+        self.image_references.keys().copied()
     }
 
     /// Number of material queries currently retained.
@@ -481,13 +528,15 @@ impl MaterialVtSourceChangeQueue {
 ///
 /// A CPU snapshot becoming available is not sufficient to advertise VT in a
 /// material row. The producer first uploads a bundle to the inactive slice,
-/// waits for its real queue completion proof, flips that slice active, and
-/// only then replaces this revision set. Material lowering requires an exact
+/// waits for its real queue completion proof, and commits referencing rows,
+/// this revision set and the active-slice flip within one exclusive system.
+/// Material lowering requires an exact
 /// identity match; any source modification therefore forces direct fallback
 /// until the matching publication completes.
-#[derive(Resource, Debug, Default)]
+#[derive(Resource, Clone, Debug, Default)]
 pub(crate) struct MaterialVtActivePublication {
     revisions: HashMap<AssetId<Image>, u64>,
+    portable_slots: HashMap<AssetId<Image>, super::texture_heap::BindlessSlot>,
 }
 
 impl MaterialVtActivePublication {
@@ -498,24 +547,49 @@ impl MaterialVtActivePublication {
         self.revisions.get(&identity.asset_id()).copied() == Some(identity.revision())
     }
 
-    /// Atomically replaces the source-revision set after the GPU bundle's
-    /// active-slice flip and returns every image whose publication changed.
-    /// Those images must have their referencing material rows republished.
+    /// Replaces the source-revision set and returns images whose rows must be
+    /// republished. Production applies this to a private prospective copy;
+    /// the set becomes public only in the row/active-slice commit.
     pub(crate) fn replace(
         &mut self,
         identities: impl IntoIterator<Item = MaterialVtSourceIdentity>,
+    ) -> Vec<AssetId<Image>> {
+        self.replace_with_portable_slots(identities, [])
+    }
+
+    pub(crate) fn contains_portable(
+        &self,
+        identity: MaterialVtSourceIdentity,
+        slot: super::texture_heap::BindlessSlot,
+    ) -> bool {
+        self.contains(identity) && self.portable_slots.get(&identity.asset_id()) == Some(&slot)
+    }
+
+    /// Portable addressing is physical: a source revision alone cannot prove
+    /// that a reused heap slot contains this image in the completed GPU slice.
+    pub(crate) fn replace_with_portable_slots(
+        &mut self,
+        identities: impl IntoIterator<Item = MaterialVtSourceIdentity>,
+        slots: impl IntoIterator<Item = (AssetId<Image>, super::texture_heap::BindlessSlot)>,
     ) -> Vec<AssetId<Image>> {
         let next: HashMap<_, _> = identities
             .into_iter()
             .map(|identity| (identity.asset_id(), identity.revision()))
             .collect();
+        let next_slots: HashMap<_, _> = slots
+            .into_iter()
+            .filter(|(image, _)| next.contains_key(image))
+            .collect();
         let mut changed: HashSet<AssetId<Image>> = HashSet::default();
         for image in self.revisions.keys().chain(next.keys()) {
-            if self.revisions.get(image) != next.get(image) {
+            if self.revisions.get(image) != next.get(image)
+                || self.portable_slots.get(image) != next_slots.get(image)
+            {
                 changed.insert(*image);
             }
         }
         self.revisions = next;
+        self.portable_slots = next_slots;
         changed.into_iter().collect()
     }
 }
@@ -695,10 +769,9 @@ impl MaterialVtSourceRegistry {
     /// Returns whether the source belongs to the exact default producer set.
     ///
     /// Material rows must not advertise VT merely because a CPU snapshot is
-    /// available: the producer may reject its format/page geometry or the
-    /// complete source set may exceed the fixed atlas budget. Keeping this
-    /// predicate here makes the resolver and producer use the same eligibility
-    /// contract.
+    /// available: the producer may reject its format/page geometry. Residency
+    /// capacity is evaluated from the producer's actual page table, not from
+    /// the complete virtual page count of every source in this registry.
     #[must_use]
     pub(crate) fn eligible_for_default_producer(&self, asset_id: AssetId<Image>) -> bool {
         let Some(entry) = self.entries.get(&asset_id) else {
@@ -707,28 +780,9 @@ impl MaterialVtSourceRegistry {
         let MaterialVtSourceState::Available(target) = &entry.state else {
             return false;
         };
-        if target.descriptor().page_size() != DEFAULT_MATERIAL_VT_PAGE_SIZE
-            || target.descriptor().format() != MaterialVtFormat::Rgba8Unorm
-        {
-            return false;
-        }
-
-        let total_pages = self
-            .entries
-            .values()
-            .filter_map(|entry| match &entry.state {
-                MaterialVtSourceState::Available(snapshot)
-                    if snapshot.descriptor().page_size() == DEFAULT_MATERIAL_VT_PAGE_SIZE
-                        && snapshot.descriptor().format() == MaterialVtFormat::Rgba8Unorm =>
-                {
-                    Some(snapshot.page_count())
-                }
-                _ => None,
-            })
-            .try_fold(0_u64, |total, pages| total.checked_add(pages));
-        total_pages.is_some_and(|pages| {
-            pages <= u64::from(crate::material::vt_producer::DEFAULT_MATERIAL_VT_PAGE_CAPACITY)
-        })
+        target.descriptor().page_size() == DEFAULT_MATERIAL_VT_PAGE_SIZE
+            && target.descriptor().format() == MaterialVtFormat::Rgba8Unorm
+            && target.descriptor().layers() == 1
     }
 
     /// Queries image source state without claiming residency or mutating the
@@ -1081,6 +1135,51 @@ mod tests {
     }
 
     #[test]
+    fn portable_publication_requires_exact_slot_generation_and_reports_reuse() {
+        use super::super::texture_heap::BindlessSlot;
+
+        let image = image_id(0xF3);
+        let identity = MaterialVtSourceIdentity::new(image, 1);
+        let slot = BindlessSlot {
+            index: 3,
+            generation: 1,
+        };
+        let reused = BindlessSlot {
+            generation: 2,
+            ..slot
+        };
+        let moved = BindlessSlot { index: 4, ..slot };
+        let mut publication = MaterialVtActivePublication::default();
+        assert_eq!(
+            publication.replace_with_portable_slots([identity], [(image, slot)]),
+            [image]
+        );
+        assert!(publication.contains_portable(identity, slot));
+        assert!(!publication.contains_portable(identity, reused));
+        assert!(!publication.contains_portable(identity, moved));
+        assert!(!publication.contains_portable(MaterialVtSourceIdentity::new(image, 2), slot));
+        assert!(publication
+            .replace_with_portable_slots([identity], [(image, slot)])
+            .is_empty());
+        assert_eq!(
+            publication.replace_with_portable_slots([identity], [(image, reused)]),
+            [image]
+        );
+        assert!(!publication.contains_portable(identity, slot));
+        assert!(publication.contains_portable(identity, reused));
+        // A revision-only publication is not proof of a physical portable tile.
+        assert_eq!(publication.replace([identity]), [image]);
+        assert!(publication.contains(identity));
+        assert!(!publication.contains_portable(identity, reused));
+        assert_eq!(
+            publication.replace_with_portable_slots([], [(image, slot)]),
+            [image]
+        );
+        assert!(!publication.contains(identity));
+        assert!(publication.portable_slots.is_empty());
+    }
+
+    #[test]
     fn modification_replaces_dimensions_and_payload_without_stale_bytes() {
         let id = image_id(2);
         let mut registry = MaterialVtSourceRegistry::default();
@@ -1244,7 +1343,7 @@ mod tests {
     }
 
     #[test]
-    fn default_producer_eligibility_matches_format_geometry_and_budget() {
+    fn default_producer_eligibility_matches_source_abi_not_registry_page_budget() {
         fn snapshot(
             texture_id: u32,
             page_size: u32,
@@ -1302,7 +1401,52 @@ mod tests {
                 ),
             );
         }
-        assert!(!registry.eligible_for_default_producer(compatible));
+        // The registry may contain more virtual pages than the physical atlas
+        // can hold. The producer admits only the demanded/resident subset.
+        assert!(registry.eligible_for_default_producer(compatible));
         assert!(!registry.eligible_for_default_producer(wrong_format));
+    }
+
+    #[test]
+    fn material_source_queries_keep_reference_index_in_sync() {
+        let material_a: AssetId<StandardMaterial> = Handle::from(Uuid::from_u128(0xE1)).id();
+        let material_b: AssetId<StandardMaterial> = Handle::from(Uuid::from_u128(0xE2)).id();
+        let image_a = image_id(0xF1);
+        let image_b = image_id(0xF2);
+        let image_c = image_id(0xF3);
+        let mut queries = MaterialVtMaterialSourceQueries::default();
+
+        queries.update(
+            material_a,
+            MaterialVtSourceQuery {
+                referenced: 2,
+                available: 2,
+                unavailable: 0,
+                missing: 0,
+            },
+            [image_a, image_b],
+        );
+        queries.update(
+            material_b,
+            MaterialVtSourceQuery {
+                referenced: 1,
+                available: 1,
+                unavailable: 0,
+                missing: 0,
+            },
+            [image_b],
+        );
+        assert!(queries.references_image(image_a));
+        assert!(queries.references_image(image_b));
+        assert!(!queries.references_image(image_c));
+
+        queries.update(material_a, MaterialVtSourceQuery::default(), [image_c]);
+        assert!(!queries.references_image(image_a));
+        assert!(queries.references_image(image_b));
+        assert!(queries.references_image(image_c));
+
+        queries.remove(material_b);
+        assert!(!queries.references_image(image_b));
+        assert!(queries.references_image(image_c));
     }
 }

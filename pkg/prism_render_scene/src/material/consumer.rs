@@ -37,11 +37,12 @@ impl MaterialReader<'_> {
     }
 
     pub fn buffers(&self) -> Option<MaterialBufferBindings<'_>> {
-        let (headers, parameters, textures) = self.buffers.buffers()?;
+        let (headers, parameters, textures, surface_contexts) = self.buffers.buffers()?;
         Some(MaterialBufferBindings {
             headers,
             parameters,
             textures,
+            surface_contexts,
         })
     }
 }
@@ -50,4 +51,5 @@ pub struct MaterialBufferBindings<'a> {
     pub headers: &'a Buffer,
     pub parameters: &'a Buffer,
     pub textures: &'a Buffer,
+    pub surface_contexts: &'a Buffer,
 }

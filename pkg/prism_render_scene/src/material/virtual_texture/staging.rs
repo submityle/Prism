@@ -15,6 +15,7 @@ use prism_render_material::{
     build_material_vt_atlas_tile, MaterialVtAtlasTile, MaterialVtSourceSnapshot,
 };
 
+use crate::material::portable_atlas::build_portable_texture_tile;
 use crate::shading::texel_cache::gpu::page_table::MaterialVirtualTexturePageTableSnapshot;
 
 use super::{
@@ -178,6 +179,39 @@ impl MaterialVirtualTextureStaging {
         self.push_tile(atlas_config, &tile)
     }
 
+    /// Adds one source-backed page after normalizing it to the portable
+    /// non-bindless RGBA8 atlas contract.
+    pub fn push_portable_source_page(
+        &mut self,
+        atlas_config: MaterialVirtualTextureAtlasConfig,
+        source: &MaterialVtSourceSnapshot,
+        key: TexturePageKey,
+        slot: u32,
+    ) -> Result<(), MaterialVirtualTextureStagingError> {
+        let tile = build_portable_texture_tile(source, slot, atlas_config.capacity()).map_err(
+            |error| match error {
+                super::super::portable_atlas::PortableTextureError::Atlas(error) => {
+                    MaterialVirtualTextureStagingError::Atlas(error)
+                }
+                super::super::portable_atlas::PortableTextureError::Tile(error) => {
+                    MaterialVirtualTextureStagingError::Source(error)
+                }
+                super::super::portable_atlas::PortableTextureError::Source(error) => {
+                    MaterialVirtualTextureStagingError::SourcePageFromSnapshot(error)
+                }
+                super::super::portable_atlas::PortableTextureError::UnsupportedLayers(_)
+                | super::super::portable_atlas::PortableTextureError::TooLarge { .. }
+                | super::super::portable_atlas::PortableTextureError::SlotOutOfRange { .. } => {
+                    MaterialVirtualTextureStagingError::PortableSource
+                }
+            },
+        )?;
+        if tile.key != key {
+            return Err(MaterialVirtualTextureStagingError::PortableSource);
+        }
+        self.push_tile(atlas_config, &tile)
+    }
+
     /// Flat page-table words to be written to the dedicated storage buffer.
     #[must_use]
     pub fn page_table_words(&self) -> &[u32] {
@@ -216,6 +250,10 @@ pub enum MaterialVirtualTextureStagingError {
     SourcePage,
     /// The source-to-atlas conversion failed.
     Source(prism_render_material::MaterialVtAtlasUploadError),
+    /// The normalized portable source snapshot could not be read.
+    SourcePageFromSnapshot(prism_render_material::MaterialVtError),
+    /// The source cannot satisfy the portable fallback contract.
+    PortableSource,
 }
 
 /// Exact queue-write ranges returned by one upload.

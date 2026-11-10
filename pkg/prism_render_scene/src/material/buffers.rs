@@ -1,5 +1,6 @@
 use super::parameter_heap::ParameterHeap;
 use super::runtime::RenderMaterialRegistry;
+use super::standard_adapter::MaterialSurfaceContext;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use bevy_ecs::{prelude::*, world::FromWorld};
@@ -17,6 +18,46 @@ pub(crate) struct MaterialHeaderRow(pub GpuMaterialHeader);
 pub(crate) struct MaterialTextureRow(pub GpuMaterialTexture);
 bevy_render::impl_atomic_pod!(MaterialHeaderRow, MaterialHeaderRowBlob);
 bevy_render::impl_atomic_pod!(MaterialTextureRow, MaterialTextureRowBlob);
+
+/// Scene-local material surface context. The explicit 16-byte padding before
+/// the three `vec4`-sized blocks mirrors storage-buffer alignment in WESL.
+#[repr(C)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    bytemuck::Pod,
+    bytemuck::Zeroable,
+)]
+pub(crate) struct MaterialSurfaceContextRow {
+    pub generation: u32,
+    pub uv_channel_mask: u32,
+    pub padding: [u32; 2],
+    pub uv_matrix_x: [f32; 4],
+    pub uv_matrix_y: [f32; 4],
+    pub uv_translation: [f32; 4],
+}
+
+impl MaterialSurfaceContextRow {
+    fn new(generation: u32, context: MaterialSurfaceContext) -> Self {
+        Self {
+            generation,
+            uv_channel_mask: context.uv_channel_mask,
+            padding: [0; 2],
+            uv_matrix_x: [context.uv_matrix_x[0], context.uv_matrix_x[1], 0.0, 0.0],
+            uv_matrix_y: [context.uv_matrix_y[0], context.uv_matrix_y[1], 0.0, 0.0],
+            uv_translation: [
+                context.uv_translation[0],
+                context.uv_translation[1],
+                0.0,
+                0.0,
+            ],
+        }
+    }
+}
+bevy_render::impl_atomic_pod!(MaterialSurfaceContextRow, MaterialSurfaceContextRowBlob);
 
 /// GPU-visible material tables (unified Material ABI v8).
 ///
@@ -40,6 +81,7 @@ pub(crate) struct MaterialGpuBuffers {
     pub headers: AtomicSparseBufferVec<MaterialHeaderRow>,
     pub parameters: AtomicSparseBufferVec<u32>,
     pub textures: AtomicSparseBufferVec<MaterialTextureRow>,
+    pub surface_contexts: AtomicSparseBufferVec<MaterialSurfaceContextRow>,
     /// Address-space allocator over the `parameters` word heap.
     heap: ParameterHeap,
     /// Address-space allocator over the `textures` row heap (ABI v5, §8.2).
@@ -67,6 +109,10 @@ impl FromWorld for MaterialGpuBuffers {
                 BufferUsages::STORAGE,
                 Arc::from("prism material textures"),
             ),
+            surface_contexts: AtomicSparseBufferVec::new(
+                BufferUsages::STORAGE,
+                Arc::from("prism material surface contexts"),
+            ),
             heap: ParameterHeap::new(),
             texture_heap: ParameterHeap::new(),
             allocs: Vec::new(),
@@ -76,11 +122,12 @@ impl FromWorld for MaterialGpuBuffers {
 }
 
 impl MaterialGpuBuffers {
-    pub fn buffers(&self) -> Option<(&Buffer, &Buffer, &Buffer)> {
+    pub fn buffers(&self) -> Option<(&Buffer, &Buffer, &Buffer, &Buffer)> {
         Some((
             self.headers.buffer()?,
             self.parameters.buffer()?,
             self.textures.buffer()?,
+            self.surface_contexts.buffer()?,
         ))
     }
 
@@ -142,8 +189,13 @@ impl MaterialGpuBuffers {
         let epoch = runtime.registry.snapshot().epoch;
         let mut parameter_bytes: u64 = 0;
         let mut texture_bytes: u64 = 0;
+        let context_bytes = dirty.len() as u64 * size_of::<MaterialSurfaceContextRow>() as u64;
         for &index in &dirty {
             let generation = runtime.registry.generation_at(index).unwrap_or(0);
+            self.surface_contexts.grow_and_set(
+                index,
+                MaterialSurfaceContextRow::new(generation, runtime.surface_context_at(index)),
+            );
             // Every path first reclaims the index's previous heap runs: a
             // re-published material may have grown/shrunk its lobe or texture
             // set, and a retired one must return its words/rows to the free list.
@@ -189,7 +241,7 @@ impl MaterialGpuBuffers {
         let header_bytes = dirty.len() as u64 * size_of::<GpuMaterialHeader>() as u64;
         (
             dirty.len() as u32,
-            header_bytes + parameter_bytes + texture_bytes,
+            header_bytes + parameter_bytes + texture_bytes + context_bytes,
         )
     }
 }

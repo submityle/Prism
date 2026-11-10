@@ -5,6 +5,7 @@ mod parameter_heap;
 mod plugin;
 pub mod portable_atlas;
 pub(crate) mod runtime;
+pub(crate) mod standard_adapter;
 pub(crate) mod systems;
 pub mod texture_heap;
 mod texture_upload;

@@ -23,7 +23,7 @@ use prism_render_architecture::gpu_scene::InstanceRecord;
 use prism_render_architecture::texture_streaming::TextureSemantic as StreamingTextureSemantic;
 use prism_render_material::{
     BuiltinProgram, GpuMaterialTexture, MaterialVtFormat, MaterialVtSourceSnapshot, ProgramRef,
-    ShadingPlan, TextureSemantic as MaterialTextureSemantic, NO_VIRTUAL_TEXTURE,
+    ShadingPlan, NO_VIRTUAL_TEXTURE,
 };
 use prism_render_visibility::{
     barycentric_derivatives, interpolate_vec2, ClipVertex, GpuViewRecord, Viewport,
@@ -44,9 +44,11 @@ use crate::{
 };
 
 use super::{
-    aggregate_material_vt_demands, MaterialVtDemandMaterial, MaterialVtDemandRegistry,
+    aggregate_material_vt_demands, bootstrap_material_vt_demands, merge_material_vt_demands,
+    MaterialVirtualTextureGpuBundle, MaterialVtDemandMaterial, MaterialVtDemandRegistry,
     MaterialVtVisibilitySample,
 };
+use crate::material::standard_adapter::TextureSemantic as MaterialTextureSemantic;
 
 const VISIBILITY_TEXEL_BYTES: u64 = 16;
 const COPY_ROW_ALIGNMENT: u64 = 256;
@@ -238,26 +240,53 @@ pub(crate) fn collect_material_vt_feedback(
     geometries: Res<RenderShadingGeometryRegistry>,
     materials: Res<RenderMaterialRegistry>,
     sources: Res<MaterialVtSourceRegistry>,
+    material_sources: Res<super::super::vt_source::MaterialVtMaterialSourceQueries>,
+    bundle: Res<MaterialVirtualTextureGpuBundle>,
     views: Query<&ExtractedView>,
 ) {
     let mut inner = readback.inner.lock().unwrap();
+    let bootstrap_frame = match inner.state.as_ref() {
+        Some(ReadbackState::CopyQueued(pending)) => pending.frame,
+        Some(ReadbackState::Mapping(in_flight)) => in_flight.pending.frame,
+        None => inner.next_frame.max(1),
+    };
+    let atlas = bundle.atlas_config();
+    let mut referenced_images: Vec<_> = material_sources.referenced_images().collect();
+    referenced_images.sort_unstable();
+    let bootstrap = bootstrap_material_vt_demands(
+        referenced_images
+            .iter()
+            .filter_map(|asset_id| sources.entry(*asset_id))
+            .filter_map(|entry| entry.state().snapshot()),
+        atlas.page_size(),
+        atlas.format(),
+        bundle
+            .sizes()
+            .page_table_entry_capacity
+            .min(atlas.capacity()),
+        MATERIAL_VT_PAGE_BYTE_COST,
+        bootstrap_frame,
+    )
+    .unwrap_or_default();
     if !settings.enable_visibility_buffer {
         inner.state = None;
-        demands.clear();
+        let _ = demands.replace(bootstrap);
         shade_demands.clear();
         return;
     }
     let Some(ReadbackState::Mapping(in_flight)) = inner.state.take() else {
+        let _ = demands.replace(bootstrap);
         return;
     };
     match in_flight.receiver.try_recv() {
         Ok(Ok(())) => {}
         Err(mpsc::TryRecvError::Empty) => {
             inner.state = Some(ReadbackState::Mapping(in_flight));
+            let _ = demands.replace(bootstrap);
             return;
         }
         Ok(Err(_)) | Err(mpsc::TryRecvError::Disconnected) => {
-            demands.clear();
+            let _ = demands.replace(bootstrap);
             shade_demands.clear();
             return;
         }
@@ -289,11 +318,8 @@ pub(crate) fn collect_material_vt_feedback(
     drop(mapped);
     pending.buffer.unmap();
 
-    if demands.replace(page_demands).is_err() {
-        // A semantic conflict is an invalid producer frame, not permission to
-        // keep or synthesize a partial demand set.
-        demands.clear();
-    }
+    let merged = merge_material_vt_demands(bootstrap.clone(), page_demands).unwrap_or(bootstrap);
+    let _ = demands.replace(merged);
     shade_demands.replace_records(shade_page_requests);
 }
 
@@ -363,7 +389,7 @@ fn decode_view_feedback(
             if ids[0] == u32::MAX || metadata[0] == u32::MAX {
                 continue;
             }
-            let Some((generation, Some(instance))) = scene.mirror().record_at(ids[0]) else {
+            let Some((generation, Some(instance))) = scene.mirror().row_at(ids[0]) else {
                 continue;
             };
             if generation != ids[1] {
@@ -435,7 +461,16 @@ fn decode_view_feedback(
                 });
             }
 
+            let surface_context = materials.surface_context_at(material.handle.index);
             for texture in &material.textures {
+                let Some(material_semantic) = material_texture_semantic(texture.semantic) else {
+                    continue;
+                };
+                if surface_context.uses_uv1(material_semantic) {
+                    // The current geometry ABI has no UV1 stream, matching the
+                    // resolve-side fail-closed rule.
+                    continue;
+                }
                 let Some(semantic) = texture_semantic(texture.semantic) else {
                     continue;
                 };
@@ -453,8 +488,14 @@ fn decode_view_feedback(
                     layer: 0,
                     page_byte_cost: MATERIAL_VT_PAGE_BYTE_COST,
                 };
+                let transformed_sample = MaterialVtVisibilitySample {
+                    uv: surface_context.transform_uv(sample.uv),
+                    uv_ddx: surface_context.transform_gradient(sample.uv_ddx),
+                    uv_ddy: surface_context.transform_gradient(sample.uv_ddy),
+                    ..sample
+                };
                 if let Ok(demands) =
-                    aggregate_material_vt_demands(&input, [sample], |_| None, frame)
+                    aggregate_material_vt_demands(&input, [transformed_sample], |_| None, frame)
                 {
                     output.extend(demands);
                 }
@@ -511,6 +552,43 @@ fn texture_semantic(value: u32) -> Option<StreamingTextureSemantic> {
         }
         value if value == MaterialTextureSemantic::IlluminationMask as u32 => {
             StreamingTextureSemantic::Mask
+        }
+        _ => return None,
+    })
+}
+
+fn material_texture_semantic(value: u32) -> Option<MaterialTextureSemantic> {
+    Some(match value {
+        value if value == MaterialTextureSemantic::BaseColor as u32 => {
+            MaterialTextureSemantic::BaseColor
+        }
+        value if value == MaterialTextureSemantic::Emissive as u32 => {
+            MaterialTextureSemantic::Emissive
+        }
+        value if value == MaterialTextureSemantic::MetallicRoughness as u32 => {
+            MaterialTextureSemantic::MetallicRoughness
+        }
+        value if value == MaterialTextureSemantic::Normal as u32 => MaterialTextureSemantic::Normal,
+        value if value == MaterialTextureSemantic::Occlusion as u32 => {
+            MaterialTextureSemantic::Occlusion
+        }
+        value if value == MaterialTextureSemantic::ClearCoat as u32 => {
+            MaterialTextureSemantic::ClearCoat
+        }
+        value if value == MaterialTextureSemantic::ClearCoatRoughness as u32 => {
+            MaterialTextureSemantic::ClearCoatRoughness
+        }
+        value if value == MaterialTextureSemantic::ClearCoatNormal as u32 => {
+            MaterialTextureSemantic::ClearCoatNormal
+        }
+        value if value == MaterialTextureSemantic::FaceShadowSdf as u32 => {
+            MaterialTextureSemantic::FaceShadowSdf
+        }
+        value if value == MaterialTextureSemantic::MeasuredBrdf as u32 => {
+            MaterialTextureSemantic::MeasuredBrdf
+        }
+        value if value == MaterialTextureSemantic::IlluminationMask as u32 => {
+            MaterialTextureSemantic::IlluminationMask
         }
         _ => return None,
     })

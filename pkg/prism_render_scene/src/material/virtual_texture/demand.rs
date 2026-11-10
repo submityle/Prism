@@ -7,16 +7,17 @@
 //! its UV footprint; this module performs the same LOD/page expansion as the
 //! material sampler and returns deterministic streaming demands.
 //!
-//! No page is invented when an upstream value is absent.  An empty sample
-//! iterator produces an empty result, and malformed source/sample identities
-//! are rejected explicitly.
+//! No page is invented without an immutable source snapshot. Visibility
+//! samples produce fine-grained demand, while a bounded source-backed
+//! bootstrap keeps the coarsest page of deterministically admitted sources
+//! requestable before any material row can advertise VT residency.
 
 use std::collections::BTreeMap;
 
 use bevy_ecs::prelude::Resource;
 
 use prism_render_architecture::texture_streaming::{PageDemand, TexturePageKey, TextureSemantic};
-use prism_render_material::MaterialVtSourceSnapshot;
+use prism_render_material::{MaterialVtFormat, MaterialVtSourceSnapshot};
 use prism_render_visibility::texture_lod;
 
 /// Material-side identity and source data for one virtualized texture channel.
@@ -97,6 +98,111 @@ pub enum MaterialVtDemandError {
 struct DemandCandidate {
     semantic: TextureSemantic,
     screen_importance: u16,
+}
+
+/// Builds the bounded source-backed demand floor used before visibility can
+/// observe a published virtual-texture material row.
+///
+/// Every compatible single-layer source contributes exactly its coarsest
+/// `(0, 0)` page. Candidates are sorted by [`TexturePageKey`] before the hard
+/// page capacity is applied, so registry traversal order cannot change which
+/// sources enter residency. These are requests only: publication remains a
+/// consequence of the streamer's actually uploaded resident page table.
+pub(crate) fn bootstrap_material_vt_demands<'a>(
+    sources: impl IntoIterator<Item = &'a MaterialVtSourceSnapshot>,
+    atlas_page_size: u32,
+    atlas_format: MaterialVtFormat,
+    page_capacity: u32,
+    page_byte_cost: u64,
+    frame: u64,
+) -> Result<Vec<PageDemand>, MaterialVtDemandError> {
+    if page_byte_cost == 0 {
+        return Err(MaterialVtDemandError::ZeroPageByteCost);
+    }
+
+    let mut candidates = BTreeMap::new();
+    for source in sources {
+        let descriptor = source.descriptor();
+        if descriptor.layers() != 1
+            || descriptor.page_size() != atlas_page_size
+            || descriptor.format() != atlas_format
+        {
+            continue;
+        }
+        let key = TexturePageKey {
+            texture: descriptor.texture_id(),
+            mip: descriptor.mip_count().saturating_sub(1),
+            layer: 0,
+            x: 0,
+            y: 0,
+        };
+        source
+            .page_metadata(key)
+            .map_err(|_| MaterialVtDemandError::InvalidPage)?;
+        candidates.entry(key).or_insert(PageDemand {
+            key,
+            semantic: TextureSemantic::Mask,
+            desired_mip: key.mip,
+            resident_mip: None,
+            screen_importance: 1,
+            byte_cost: page_byte_cost,
+            frame,
+        });
+    }
+
+    Ok(candidates
+        .into_values()
+        .take(page_capacity as usize)
+        .collect())
+}
+
+/// Combines the source bootstrap with one visibility frame.
+///
+/// Visibility demand is merged using the normal semantic validation and then
+/// replaces a bootstrap request for the same key. This avoids treating the
+/// bootstrap's neutral `Mask` semantic as a conflict with the material's real
+/// channel semantic.
+pub(crate) fn merge_material_vt_demands(
+    bootstrap: impl IntoIterator<Item = PageDemand>,
+    visibility: impl IntoIterator<Item = PageDemand>,
+) -> Result<Vec<PageDemand>, MaterialVtDemandError> {
+    let mut merged = merge_compatible_demands(visibility)?;
+    for demand in bootstrap {
+        merged.entry(demand.key).or_insert(demand);
+    }
+    Ok(merged.into_values().collect())
+}
+
+fn merge_compatible_demands(
+    demands: impl IntoIterator<Item = PageDemand>,
+) -> Result<BTreeMap<TexturePageKey, PageDemand>, MaterialVtDemandError> {
+    let mut merged = BTreeMap::<TexturePageKey, PageDemand>::new();
+    for demand in demands {
+        match merged.entry(demand.key) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(demand);
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                let current = entry.get_mut();
+                if current.semantic != demand.semantic {
+                    return Err(MaterialVtDemandError::ConflictingSemantic {
+                        key: demand.key,
+                        first: current.semantic,
+                        second: demand.semantic,
+                    });
+                }
+                current.desired_mip = current.desired_mip.min(demand.desired_mip);
+                current.resident_mip = match (current.resident_mip, demand.resident_mip) {
+                    (None, _) | (_, None) => None,
+                    (Some(first), Some(second)) => Some(first.min(second)),
+                };
+                current.screen_importance = current.screen_importance.max(demand.screen_importance);
+                current.byte_cost = current.byte_cost.max(demand.byte_cost);
+                current.frame = current.frame.max(demand.frame);
+            }
+        }
+    }
+    Ok(merged)
 }
 
 /// Aggregates visibility samples into deterministic material-VT page demand.
@@ -219,33 +325,7 @@ impl MaterialVtDemandRegistry {
         &mut self,
         demands: impl IntoIterator<Item = PageDemand>,
     ) -> Result<(), MaterialVtDemandError> {
-        let mut merged = BTreeMap::<TexturePageKey, PageDemand>::new();
-        for demand in demands {
-            match merged.entry(demand.key) {
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert(demand);
-                }
-                std::collections::btree_map::Entry::Occupied(mut entry) => {
-                    let current = entry.get_mut();
-                    if current.semantic != demand.semantic {
-                        return Err(MaterialVtDemandError::ConflictingSemantic {
-                            key: demand.key,
-                            first: current.semantic,
-                            second: demand.semantic,
-                        });
-                    }
-                    current.desired_mip = current.desired_mip.min(demand.desired_mip);
-                    current.resident_mip = match (current.resident_mip, demand.resident_mip) {
-                        (None, _) | (_, None) => None,
-                        (Some(first), Some(second)) => Some(first.min(second)),
-                    };
-                    current.screen_importance =
-                        current.screen_importance.max(demand.screen_importance);
-                    current.byte_cost = current.byte_cost.max(demand.byte_cost);
-                    current.frame = current.frame.max(demand.frame);
-                }
-            }
-        }
+        let merged = merge_compatible_demands(demands)?;
         self.demands = merged.into_values().collect();
         self.revision = self.revision.saturating_add(1);
         self.has_feedback = true;
@@ -289,13 +369,31 @@ mod tests {
     };
 
     fn source() -> MaterialVtSourceSnapshot {
-        let descriptor =
-            MaterialVtSourceDescriptor::new(7, 256, 256, 1, 128, 9, MaterialVtFormat::Rgba8Unorm)
-                .expect("valid descriptor");
+        source_with(7, 256, 256, 1, 128, MaterialVtFormat::Rgba8Unorm)
+    }
+
+    fn source_with(
+        texture_id: u32,
+        width: u32,
+        height: u32,
+        layers: u16,
+        page_size: u32,
+        format: MaterialVtFormat,
+    ) -> MaterialVtSourceSnapshot {
+        let mip_count = width.max(height).ilog2() as u8 + 1;
+        let descriptor = MaterialVtSourceDescriptor::new(
+            texture_id, width, height, layers, page_size, mip_count, format,
+        )
+        .expect("valid descriptor");
         let mut bytes = Vec::new();
-        for mip in 0..9_u32 {
-            let width = (256_u32 >> mip).max(1);
-            bytes.extend(std::iter::repeat_n(0_u8, (width * width * 4) as usize));
+        for mip in 0..u32::from(mip_count) {
+            let mip_width = (width >> mip).max(1);
+            let mip_height = (height >> mip).max(1);
+            let byte_len = u64::from(mip_width)
+                * u64::from(mip_height)
+                * u64::from(layers)
+                * u64::from(format.bytes_per_texel());
+            bytes.extend(std::iter::repeat_n(0_u8, byte_len as usize));
         }
         MaterialVtSourceSnapshot::new(descriptor, bytes).expect("valid source")
     }
@@ -383,6 +481,130 @@ mod tests {
         assert!(result
             .iter()
             .all(|demand| { demand.resident_mip == Some(demand.key.mip.saturating_add(1)) }));
+    }
+
+    #[test]
+    fn bootstrap_is_order_independent_and_selects_one_coarsest_page_per_source() {
+        let first = source_with(9, 512, 256, 1, 128, MaterialVtFormat::Rgba8Unorm);
+        let second = source_with(3, 64, 64, 1, 128, MaterialVtFormat::Rgba8Unorm);
+        let forward = bootstrap_material_vt_demands(
+            [&first, &second],
+            128,
+            MaterialVtFormat::Rgba8Unorm,
+            8,
+            70_000,
+            5,
+        )
+        .unwrap();
+        let reverse = bootstrap_material_vt_demands(
+            [&second, &first],
+            128,
+            MaterialVtFormat::Rgba8Unorm,
+            8,
+            70_000,
+            5,
+        )
+        .unwrap();
+
+        assert_eq!(forward, reverse);
+        assert_eq!(forward.len(), 2);
+        assert_eq!(forward[0].key.texture, 3);
+        assert_eq!(forward[0].key.mip, second.descriptor().mip_count() - 1);
+        assert_eq!(forward[1].key.texture, 9);
+        assert_eq!(forward[1].key.mip, first.descriptor().mip_count() - 1);
+        assert!(forward.iter().all(|demand| {
+            demand.key.layer == 0
+                && demand.key.x == 0
+                && demand.key.y == 0
+                && demand.semantic == TextureSemantic::Mask
+                && demand.screen_importance == 1
+                && demand.resident_mip.is_none()
+        }));
+    }
+
+    #[test]
+    fn bootstrap_admission_is_key_sorted_and_filters_incompatible_sources() {
+        let admitted_a = source_with(8, 128, 128, 1, 128, MaterialVtFormat::Rgba8Unorm);
+        let admitted_b = source_with(2, 128, 128, 1, 128, MaterialVtFormat::Rgba8Unorm);
+        let wrong_page = source_with(1, 128, 128, 1, 64, MaterialVtFormat::Rgba8Unorm);
+        let wrong_format = source_with(3, 128, 128, 1, 128, MaterialVtFormat::R8Unorm);
+        let layered = source_with(4, 128, 128, 2, 128, MaterialVtFormat::Rgba8Unorm);
+        let demands = bootstrap_material_vt_demands(
+            [
+                &admitted_a,
+                &wrong_page,
+                &wrong_format,
+                &layered,
+                &admitted_b,
+            ],
+            128,
+            MaterialVtFormat::Rgba8Unorm,
+            1,
+            70_000,
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(demands.len(), 1);
+        assert_eq!(demands[0].key.texture, 2);
+        admitted_b
+            .page_metadata(demands[0].key)
+            .expect("every admitted demand is backed by its source");
+    }
+
+    #[test]
+    fn visibility_overrides_bootstrap_for_the_same_page() {
+        let source = source_with(7, 1, 1, 1, 128, MaterialVtFormat::Rgba8Unorm);
+        let bootstrap = bootstrap_material_vt_demands(
+            [&source],
+            128,
+            MaterialVtFormat::Rgba8Unorm,
+            1,
+            70_000,
+            2,
+        )
+        .unwrap();
+        let visible = PageDemand {
+            semantic: TextureSemantic::Color,
+            screen_importance: 900,
+            frame: 3,
+            ..bootstrap[0]
+        };
+
+        let merged = merge_material_vt_demands(bootstrap, [visible]).unwrap();
+        assert_eq!(merged, vec![visible]);
+    }
+
+    #[test]
+    fn bootstrap_tracks_current_source_set_without_stale_keys() {
+        let removed = source_with(5, 128, 128, 1, 128, MaterialVtFormat::Rgba8Unorm);
+        let current = source_with(6, 256, 256, 1, 128, MaterialVtFormat::Rgba8Unorm);
+        let before = bootstrap_material_vt_demands(
+            [&removed],
+            128,
+            MaterialVtFormat::Rgba8Unorm,
+            4,
+            70_000,
+            1,
+        )
+        .unwrap();
+        let after = bootstrap_material_vt_demands(
+            [&current],
+            128,
+            MaterialVtFormat::Rgba8Unorm,
+            4,
+            70_000,
+            2,
+        )
+        .unwrap();
+
+        assert_eq!(before[0].key.texture, 5);
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].key.texture, 6);
+        assert!(after.iter().all(|demand| demand.key.texture != 5));
+        current
+            .page_metadata(after[0].key)
+            .expect("replacement demand is source-backed");
     }
 
     #[test]

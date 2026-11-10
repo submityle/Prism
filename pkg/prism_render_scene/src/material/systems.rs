@@ -4,15 +4,17 @@ use super::{
     runtime::{PrismMaterialDiagnostics, RenderMaterialRegistry},
     texture_upload::MaterialTextureArrays,
     vt_source::{
-        MaterialVtActivePublication, MaterialVtMaterialSourceQueries, MaterialVtSourceChangeQueue,
-        MaterialVtSourceError, MaterialVtSourceQuery, MaterialVtSourceRegistry,
+        material_texture_ids, MaterialVtActivePublication, MaterialVtMaterialSourceQueries,
+        MaterialVtSourceChangeQueue, MaterialVtSourceError, MaterialVtSourceQuery,
+        MaterialVtSourceRegistry,
     },
 };
 use crate::completion::GpuCompletionTracker;
-use bevy_asset::{AssetEvent, Assets};
+use bevy_asset::{AssetEvent, AssetId, Assets};
 use bevy_ecs::{message::MessageReader, prelude::*};
 use bevy_image::Image;
 use bevy_pbr::StandardMaterial;
+use bevy_platform::collections::HashSet;
 use bevy_render::{
     render_resource::{
         AtomicPod, AtomicSparseBufferVec, PipelineCache, SparseBufferUpdateBindGroups,
@@ -82,6 +84,87 @@ pub(crate) fn query_standard_material_vt_sources(
     sources.query_material(material)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn publish_standard_material(
+    id: AssetId<StandardMaterial>,
+    material: &StandardMaterial,
+    sources: &MaterialVtSourceRegistry,
+    active_vt: &MaterialVtActivePublication,
+    source_queries: &mut MaterialVtMaterialSourceQueries,
+    completion: &GpuCompletionTracker,
+    runtime: &mut RenderMaterialRegistry,
+    diagnostics: &mut PrismMaterialDiagnostics,
+) -> bool {
+    // Keep source lookup adjacent to material publication. The query is
+    // observational until the producer consumes the immutable snapshot and
+    // publishes residency.
+    let exists = runtime.material_handle(id).is_some();
+    let source_query = query_standard_material_vt_sources(material, sources);
+    if runtime
+        .publish_asset_with_sources(
+            id,
+            material,
+            completion.next_submission_value(),
+            Some(sources),
+            Some(active_vt),
+        )
+        .is_err()
+    {
+        diagnostics.errors += 1;
+        return false;
+    }
+
+    source_queries.update(id, source_query, material_texture_ids(material));
+    if exists {
+        diagnostics.updated += 1;
+    } else {
+        diagnostics.created += 1;
+    }
+    true
+}
+
+fn process_pending_material_retirements(
+    materials: &Assets<StandardMaterial>,
+    completion: &GpuCompletionTracker,
+    runtime: &mut RenderMaterialRegistry,
+    source_queries: &mut MaterialVtMaterialSourceQueries,
+    diagnostics: &mut PrismMaterialDiagnostics,
+    attempted: &mut HashSet<(AssetId<StandardMaterial>, u64)>,
+) {
+    let pending_count = runtime.pending_retire_count();
+    for _ in 0..pending_count {
+        let Some((id, token)) = runtime.pop_pending_retire() else {
+            break;
+        };
+        if !runtime.pending_retire_token_is_current(id, token) {
+            continue;
+        }
+        // The event stream is only a change hint.  A material that was
+        // removed and re-added before this extraction pass must remain live;
+        // invalidate this retirement and let the publish queue reconcile the
+        // final Assets state instead.
+        if materials.get(id).is_some() {
+            runtime.queue_publish(id);
+            continue;
+        }
+        if !attempted.insert((id, token)) {
+            runtime.retry_pending_retire(id, token);
+            continue;
+        }
+        match runtime.retire_asset(id, completion.next_submission_value()) {
+            Ok(Some(_)) => diagnostics.retired += 1,
+            Ok(None) => {}
+            Err(_) => {
+                diagnostics.errors += 1;
+                runtime.retry_pending_retire(id, token);
+                continue;
+            }
+        }
+        source_queries.remove(id);
+        runtime.finish_pending_retire(id, token);
+    }
+}
+
 pub(crate) fn extract_standard_materials(
     mut events: Extract<MessageReader<AssetEvent<StandardMaterial>>>,
     materials: Extract<Res<Assets<StandardMaterial>>>,
@@ -98,79 +181,105 @@ pub(crate) fn extract_standard_materials(
     diagnostics.updated = 0;
     diagnostics.retired = 0;
     diagnostics.errors = 0;
-    let mut published = Vec::new();
+    let mut changed_materials: HashSet<AssetId<StandardMaterial>> = HashSet::default();
     for event in events.read() {
-        match *event {
-            AssetEvent::Added { id } | AssetEvent::Modified { id } => {
-                let Some(material) = materials.get(id) else {
-                    continue;
-                };
-                // Keep source lookup adjacent to material publication. The
-                // query is observational until the producer consumes the
-                // immutable snapshot and publishes residency.
-                let exists = runtime.material_handle(id).is_some();
-                let source_query = query_standard_material_vt_sources(material, &sources);
-                if runtime
-                    .publish_asset_with_sources(
-                        id,
-                        material,
-                        completion.next_submission_value(),
-                        Some(&sources),
-                        Some(&active_vt),
-                    )
-                    .is_ok()
-                {
-                    published.push(id);
-                    source_queries.update(id, source_query);
-                    if exists {
-                        diagnostics.updated += 1;
-                    } else {
-                        diagnostics.created += 1;
-                    }
-                } else {
-                    diagnostics.errors += 1;
-                }
-            }
-            AssetEvent::Unused { id } | AssetEvent::Removed { id } => {
-                source_queries.remove(id);
-                match runtime.retire_asset(id, completion.next_submission_value()) {
-                    Ok(Some(_)) => {
-                        diagnostics.retired += 1;
-                    }
-                    Ok(None) => {}
-                    Err(_) => diagnostics.errors += 1,
-                }
-            }
-            AssetEvent::LoadedWithDependencies { .. } => {}
+        let id = match *event {
+            AssetEvent::Added { id }
+            | AssetEvent::Modified { id }
+            | AssetEvent::LoadedWithDependencies { id }
+            | AssetEvent::Unused { id }
+            | AssetEvent::Removed { id } => id,
+        };
+        changed_materials.insert(id);
+    }
+
+    if !runtime.initial_asset_scan_started() {
+        // Queue a deterministic first-frame reconciliation. Failed rows stay in
+        // the persistent queue; successful rows are removed and are not republished.
+        // The bootstrap set is then maintained from lifecycle events, avoiding a
+        // full asset enumeration on every retry frame.
+        let mut asset_ids: Vec<_> = materials.iter().map(|(id, _)| id).collect();
+        asset_ids.sort_by_key(|id| id.to_string());
+        runtime.begin_initial_asset_scan(asset_ids);
+    }
+
+    // Asset events are not the source of truth: several lifecycle events for
+    // one ID can be delivered in one extraction pass, and an event can race
+    // the final mutation of Assets. Reconcile each affected ID exactly once
+    // against the final asset presence before touching either queue.
+    let mut changed_materials: Vec<_> = changed_materials.into_iter().collect();
+    changed_materials.sort_by_key(|id| id.to_string());
+    for id in changed_materials {
+        if materials.get(id).is_some() {
+            runtime.queue_publish(id);
+        } else {
+            runtime.queue_retire(id);
         }
     }
+
+    let mut affected_materials: HashSet<AssetId<StandardMaterial>> = HashSet::default();
     for image in changed_images.take() {
-        let material_ids: Vec<_> = runtime.materials_referencing_image(image).collect();
-        for id in material_ids {
-            if published.contains(&id) {
-                continue;
-            }
-            let Some(material) = materials.get(id) else {
-                continue;
-            };
-            let source_query = query_standard_material_vt_sources(material, &sources);
-            if runtime
-                .publish_asset_with_sources(
-                    id,
-                    material,
-                    completion.next_submission_value(),
-                    Some(&sources),
-                    Some(&active_vt),
-                )
-                .is_ok()
-            {
-                source_queries.update(id, source_query);
-                diagnostics.updated += 1;
-            } else {
-                diagnostics.errors += 1;
-            }
+        affected_materials.extend(runtime.materials_referencing_image(image));
+    }
+    let mut affected_materials: Vec<_> = affected_materials.into_iter().collect();
+    affected_materials.sort_by_key(|id| id.to_string());
+    for id in affected_materials {
+        if !runtime.is_pending_retire(id) {
+            runtime.queue_publish(id);
         }
     }
+
+    let mut attempted_retirements = HashSet::default();
+    process_pending_material_retirements(
+        &materials,
+        &completion,
+        &mut runtime,
+        &mut source_queries,
+        &mut diagnostics,
+        &mut attempted_retirements,
+    );
+
+    let pending_count = runtime.pending_publish_count();
+    for _ in 0..pending_count {
+        let Some((id, token)) = runtime.pop_pending_publish() else {
+            break;
+        };
+        if !runtime.pending_publish_token_is_current(id, token) {
+            continue;
+        }
+        let Some(material) = materials.get(id) else {
+            runtime.queue_retire(id);
+            continue;
+        };
+        if publish_standard_material(
+            id,
+            material,
+            &sources,
+            &active_vt,
+            &mut source_queries,
+            &completion,
+            &mut runtime,
+            &mut diagnostics,
+        ) {
+            runtime.finish_pending_publish(id, token);
+        } else {
+            runtime.retry_pending_publish(id, token);
+        }
+    }
+
+    runtime.finish_initial_asset_scan_if_ready();
+
+    // Reconcile retirements once more after publication. A pending publish can
+    // discover that its final asset state is absent and supersede itself with a
+    // retirement in the same extraction pass.
+    process_pending_material_retirements(
+        &materials,
+        &completion,
+        &mut runtime,
+        &mut source_queries,
+        &mut diagnostics,
+        &mut attempted_retirements,
+    );
     let snapshot = runtime.registry.snapshot();
     diagnostics.active = snapshot.active_materials;
     diagnostics.epoch = snapshot.epoch;
@@ -190,10 +299,9 @@ pub(crate) fn invalidate_scene_materials(
         return;
     }
     for mut instance in &mut instances {
-        if instance.material == prism_render_material::FALLBACK_MATERIAL_HANDLE
-            && instance
-                .material_asset
-                .is_some_and(|asset| runtime.dirty_assets.contains(&asset))
+        if instance
+            .material_asset
+            .is_some_and(|asset| runtime.dirty_assets.contains(&asset))
         {
             instance.set_changed();
         }
@@ -203,13 +311,16 @@ pub(crate) fn invalidate_scene_materials(
 #[cfg(test)]
 mod tests {
     use bevy_asset::{uuid::Uuid, AssetId, Assets, Handle, RenderAssetUsages};
-    use bevy_ecs::world::World;
+    use bevy_ecs::{message::Messages, schedule::Schedule, world::World};
     use bevy_image::Image;
     use bevy_pbr::StandardMaterial;
-    use bevy_render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+    use bevy_render::{
+        render_resource::{Extent3d, TextureDimension, TextureFormat},
+        MainWorld,
+    };
     use prism_render_material::{
-        BuiltinProgram, GpuMaterialTexture, ProgramRef, ShadingPlan, FALLBACK_MATERIAL_HANDLE,
-        NO_VIRTUAL_TEXTURE,
+        BuiltinProgram, GpuMaterialTexture, MaterialRegistry, ProgramRef, ShadingPlan,
+        FALLBACK_MATERIAL_HANDLE, NO_VIRTUAL_TEXTURE,
     };
 
     use super::*;
@@ -256,6 +367,375 @@ mod tests {
         image.texture_descriptor.mip_level_count = 3;
         image.data = Some(vec![value; (4 * 4 * 4) + (2 * 2 * 4) + 4]);
         image
+    }
+
+    fn material_extraction_world(
+        materials: Assets<StandardMaterial>,
+        events: Messages<AssetEvent<StandardMaterial>>,
+    ) -> World {
+        let mut main_world = MainWorld::default();
+        main_world.insert_resource(materials);
+        main_world.insert_resource(events);
+
+        let mut world = World::new();
+        world.insert_resource(main_world);
+        world.insert_resource(MaterialVtSourceRegistry::default());
+        world.insert_resource(MaterialVtActivePublication::default());
+        world.insert_resource(MaterialVtMaterialSourceQueries::default());
+        world.insert_resource(GpuCompletionTracker::default());
+        world.insert_resource(RenderMaterialRegistry::default());
+        world.insert_resource(PrismMaterialDiagnostics::default());
+        world.insert_resource(MaterialVtSourceChangeQueue::default());
+        world
+    }
+
+    #[test]
+    fn extraction_bootstraps_existing_materials_without_asset_events_exactly_once() {
+        let mut materials = Assets::<StandardMaterial>::default();
+        let material = materials.add(StandardMaterial::default());
+        let material_id = material.id();
+        let mut world = material_extraction_world(
+            materials,
+            Messages::<AssetEvent<StandardMaterial>>::default(),
+        );
+        let mut schedule = Schedule::default();
+        schedule.add_systems(extract_standard_materials);
+
+        schedule.run(&mut world);
+
+        let runtime = world.resource::<RenderMaterialRegistry>();
+        assert!(runtime.initial_asset_scan_complete());
+        assert!(runtime.material_handle(material_id).is_some());
+        assert_eq!(runtime.revisions.get(&material_id), Some(&1));
+        let diagnostics = world.resource::<PrismMaterialDiagnostics>();
+        assert_eq!(diagnostics.created, 1);
+        assert_eq!(diagnostics.updated, 0);
+        assert_eq!(diagnostics.errors, 0);
+
+        schedule.run(&mut world);
+
+        let runtime = world.resource::<RenderMaterialRegistry>();
+        assert_eq!(
+            runtime.revisions.get(&material_id),
+            Some(&1),
+            "the steady-state extractor must not enumerate and republish every asset"
+        );
+        let diagnostics = world.resource::<PrismMaterialDiagnostics>();
+        assert_eq!(diagnostics.created, 0);
+        assert_eq!(diagnostics.updated, 0);
+        assert_eq!(diagnostics.errors, 0);
+    }
+
+    #[test]
+    fn loaded_with_dependencies_publishes_material_after_initial_scan() {
+        let mut world = material_extraction_world(
+            Assets::<StandardMaterial>::default(),
+            Messages::<AssetEvent<StandardMaterial>>::default(),
+        );
+        let mut schedule = Schedule::default();
+        schedule.add_systems(extract_standard_materials);
+        schedule.run(&mut world);
+        assert!(world
+            .resource::<RenderMaterialRegistry>()
+            .initial_asset_scan_complete());
+
+        let material_id = {
+            let mut main_world = world.resource_mut::<MainWorld>();
+            let material_id = main_world
+                .resource_mut::<Assets<StandardMaterial>>()
+                .add(StandardMaterial::default())
+                .id();
+            main_world
+                .resource_mut::<Messages<AssetEvent<StandardMaterial>>>()
+                .write(AssetEvent::LoadedWithDependencies { id: material_id });
+            material_id
+        };
+
+        schedule.run(&mut world);
+
+        let runtime = world.resource::<RenderMaterialRegistry>();
+        assert!(runtime.material_handle(material_id).is_some());
+        assert_eq!(runtime.revisions.get(&material_id), Some(&1));
+        let diagnostics = world.resource::<PrismMaterialDiagnostics>();
+        assert_eq!(diagnostics.created, 1);
+        assert_eq!(diagnostics.updated, 0);
+        assert_eq!(diagnostics.errors, 0);
+    }
+
+    #[test]
+    fn failed_bootstrap_retries_only_unpublished_materials_and_remains_incomplete() {
+        let mut materials = Assets::<StandardMaterial>::default();
+        let first = materials.add(StandardMaterial::default()).id();
+        let second = materials.add(StandardMaterial::default()).id();
+        let mut world = material_extraction_world(
+            materials,
+            Messages::<AssetEvent<StandardMaterial>>::default(),
+        );
+        // Force one deterministic capacity failure while allowing the other
+        // material to publish. The stable asset-ID scan selects the first ID.
+        world.resource_mut::<RenderMaterialRegistry>().registry = MaterialRegistry::new(1);
+        let mut schedule = Schedule::default();
+        schedule.add_systems(extract_standard_materials);
+
+        schedule.run(&mut world);
+
+        let (published_id, published_revision, epoch) = {
+            let runtime = world.resource::<RenderMaterialRegistry>();
+            let published = runtime
+                .revisions
+                .iter()
+                .next()
+                .map(|(id, revision)| (*id, *revision))
+                .expect("one material fits in the registry");
+            assert!(published.0 == first || published.0 == second);
+            assert_eq!(runtime.revisions.len(), 1);
+            assert!(!runtime.initial_asset_scan_complete());
+            (published.0, published.1, runtime.registry.snapshot().epoch)
+        };
+        assert_eq!(published_revision, 1);
+        assert_eq!(world.resource::<PrismMaterialDiagnostics>().errors, 1);
+
+        schedule.run(&mut world);
+
+        let runtime = world.resource::<RenderMaterialRegistry>();
+        assert_eq!(runtime.revisions.get(&published_id), Some(&1));
+        assert_eq!(runtime.registry.snapshot().epoch, epoch);
+        assert!(
+            !runtime.initial_asset_scan_complete(),
+            "an asset that still cannot obtain a registry slot must keep bootstrap incomplete"
+        );
+        assert_eq!(runtime.revisions.len(), 1);
+        assert_eq!(runtime.pending_publish_count(), 1);
+        assert_eq!(
+            world.resource::<PrismMaterialDiagnostics>().errors,
+            1,
+            "the still-unpublished material must be retried"
+        );
+    }
+
+    #[test]
+    fn extraction_coalesces_same_frame_lifecycle_events_to_the_final_action() {
+        let mut materials = Assets::<StandardMaterial>::default();
+        let handle = materials.add(StandardMaterial::default());
+        let material_id = handle.id();
+        let mut world = material_extraction_world(
+            materials,
+            Messages::<AssetEvent<StandardMaterial>>::default(),
+        );
+        {
+            let mut main_world = world.resource_mut::<MainWorld>();
+            let mut events = main_world.resource_mut::<Messages<AssetEvent<StandardMaterial>>>();
+            events.write(AssetEvent::Added { id: material_id });
+            events.write(AssetEvent::Removed { id: material_id });
+            events.write(AssetEvent::Added { id: material_id });
+        }
+        let mut schedule = Schedule::default();
+        schedule.add_systems(extract_standard_materials);
+
+        schedule.run(&mut world);
+
+        let runtime = world.resource::<RenderMaterialRegistry>();
+        assert_eq!(runtime.revisions.get(&material_id), Some(&1));
+        assert_eq!(runtime.registry.snapshot().active_materials, 1);
+        let diagnostics = world.resource::<PrismMaterialDiagnostics>();
+        assert_eq!(diagnostics.created, 1);
+        assert_eq!(diagnostics.retired, 0);
+        assert_eq!(diagnostics.errors, 0);
+        drop(handle);
+    }
+
+    #[test]
+    fn extraction_reconciles_final_absence_after_add_remove_add_events() {
+        let mut materials = Assets::<StandardMaterial>::default();
+        let handle = materials.add(StandardMaterial::default());
+        let material_id = handle.id();
+        let mut world = material_extraction_world(
+            materials,
+            Messages::<AssetEvent<StandardMaterial>>::default(),
+        );
+        let mut schedule = Schedule::default();
+        schedule.add_systems(extract_standard_materials);
+        schedule.run(&mut world);
+
+        {
+            let mut main_world = world.resource_mut::<MainWorld>();
+            main_world
+                .resource_mut::<Assets<StandardMaterial>>()
+                .remove(material_id);
+            let mut events = main_world.resource_mut::<Messages<AssetEvent<StandardMaterial>>>();
+            events.write(AssetEvent::Added { id: material_id });
+            events.write(AssetEvent::Removed { id: material_id });
+            events.write(AssetEvent::Added { id: material_id });
+        }
+
+        schedule.run(&mut world);
+
+        let runtime = world.resource::<RenderMaterialRegistry>();
+        assert!(runtime.material_handle(material_id).is_none());
+        assert_eq!(runtime.registry.snapshot().active_materials, 0);
+        assert!(!runtime.is_pending_retire(material_id));
+        assert_eq!(world.resource::<PrismMaterialDiagnostics>().retired, 1);
+        assert_eq!(world.resource::<PrismMaterialDiagnostics>().errors, 0);
+        drop(handle);
+    }
+
+    #[test]
+    fn removal_of_a_material_absent_from_assets_leaves_no_registry_row() {
+        let mut materials = Assets::<StandardMaterial>::default();
+        let handle = materials.add(StandardMaterial::default());
+        let material_id = handle.id();
+        let mut world = material_extraction_world(
+            materials,
+            Messages::<AssetEvent<StandardMaterial>>::default(),
+        );
+        let mut schedule = Schedule::default();
+        schedule.add_systems(extract_standard_materials);
+        schedule.run(&mut world);
+        assert!(world
+            .resource::<RenderMaterialRegistry>()
+            .material_handle(material_id)
+            .is_some());
+
+        {
+            let mut main_world = world.resource_mut::<MainWorld>();
+            let mut materials = main_world.resource_mut::<Assets<StandardMaterial>>();
+            materials.remove(material_id);
+            drop(materials);
+            main_world
+                .resource_mut::<Messages<AssetEvent<StandardMaterial>>>()
+                .write(AssetEvent::Removed { id: material_id });
+        }
+        schedule.run(&mut world);
+
+        let runtime = world.resource::<RenderMaterialRegistry>();
+        assert!(runtime.material_handle(material_id).is_none());
+        assert!(!runtime.has_pending_publish(material_id));
+        assert!(!runtime.is_pending_retire(material_id));
+        assert_eq!(runtime.registry.snapshot().active_materials, 0);
+        drop(handle);
+    }
+
+    #[test]
+    fn failed_event_publication_is_retried_after_the_event_is_consumed() {
+        let mut world = material_extraction_world(
+            Assets::<StandardMaterial>::default(),
+            Messages::<AssetEvent<StandardMaterial>>::default(),
+        );
+        let mut schedule = Schedule::default();
+        schedule.add_systems(extract_standard_materials);
+        schedule.run(&mut world);
+
+        {
+            let mut runtime = world.resource_mut::<RenderMaterialRegistry>();
+            runtime.registry = MaterialRegistry::new(0);
+            // Zero live capacity deterministically exercises retry-on-capacity
+            // without relying on a synthetic allocation to exhaust the pool.
+        }
+        let (material_id, _material_handle) = {
+            let mut main_world = world.resource_mut::<MainWorld>();
+            let handle = main_world
+                .resource_mut::<Assets<StandardMaterial>>()
+                .add(StandardMaterial::default());
+            let id = handle.id();
+            main_world
+                .resource_mut::<Messages<AssetEvent<StandardMaterial>>>()
+                .write(AssetEvent::Added { id });
+            (id, handle)
+        };
+
+        schedule.run(&mut world);
+        assert!(world
+            .resource::<RenderMaterialRegistry>()
+            .has_pending_publish(material_id));
+        assert_eq!(world.resource::<PrismMaterialDiagnostics>().errors, 1);
+
+        schedule.run(&mut world);
+        assert!(world
+            .resource::<RenderMaterialRegistry>()
+            .has_pending_publish(material_id));
+        assert_eq!(world.resource::<PrismMaterialDiagnostics>().errors, 1);
+    }
+
+    #[test]
+    fn one_material_capacity_publishes_exactly_one_asset() {
+        let mut materials = Assets::<StandardMaterial>::default();
+        let first = materials.add(StandardMaterial::default()).id();
+        let second = materials.add(StandardMaterial::default()).id();
+        let mut world = material_extraction_world(
+            materials,
+            Messages::<AssetEvent<StandardMaterial>>::default(),
+        );
+        world.resource_mut::<RenderMaterialRegistry>().registry = MaterialRegistry::new(1);
+        let mut schedule = Schedule::default();
+        schedule.add_systems(extract_standard_materials);
+
+        schedule.run(&mut world);
+
+        let runtime = world.resource::<RenderMaterialRegistry>();
+        assert_eq!(runtime.registry.snapshot().active_materials, 1);
+        assert_ne!(
+            runtime.material_handle(first).is_some(),
+            runtime.material_handle(second).is_some()
+        );
+        assert_eq!(world.resource::<PrismMaterialDiagnostics>().errors, 1);
+    }
+
+    #[test]
+    fn failed_retirement_keeps_source_query_for_retry() {
+        let image: Handle<Image> = Handle::from(Uuid::from_u128(0xC1));
+        let mut materials = Assets::<StandardMaterial>::default();
+        let handle = materials.add(StandardMaterial {
+            base_color_texture: Some(image),
+            ..StandardMaterial::default()
+        });
+        let material_id = handle.id();
+        let mut world = material_extraction_world(
+            materials,
+            Messages::<AssetEvent<StandardMaterial>>::default(),
+        );
+        let mut schedule = Schedule::default();
+        schedule.add_systems(extract_standard_materials);
+        schedule.run(&mut world);
+        assert!(world
+            .resource::<MaterialVtMaterialSourceQueries>()
+            .get(material_id)
+            .is_some());
+
+        // Leave the render registry's asset map intact but remove its row, so
+        // the lifecycle retirement fails with a stale handle. The source query
+        // must remain available while the retry is pending.
+        let published = world
+            .resource::<RenderMaterialRegistry>()
+            .material_handle(material_id)
+            .unwrap();
+        world
+            .resource_mut::<RenderMaterialRegistry>()
+            .registry
+            .retire(
+                published,
+                prism_render_architecture::gpu_scene::GpuCompletionValue(7),
+            )
+            .unwrap();
+
+        {
+            let mut main_world = world.resource_mut::<MainWorld>();
+            main_world
+                .resource_mut::<Assets<StandardMaterial>>()
+                .remove(material_id);
+            main_world
+                .resource_mut::<Messages<AssetEvent<StandardMaterial>>>()
+                .write(AssetEvent::Removed { id: material_id });
+        }
+        schedule.run(&mut world);
+
+        let runtime = world.resource::<RenderMaterialRegistry>();
+        assert!(runtime.is_pending_retire(material_id));
+        assert!(world
+            .resource::<MaterialVtMaterialSourceQueries>()
+            .get(material_id)
+            .is_some());
+        assert_eq!(world.resource::<PrismMaterialDiagnostics>().errors, 1);
+        drop(handle);
     }
 
     fn publish_texture_row(
@@ -348,7 +828,7 @@ mod tests {
         );
 
         let mut cached = MaterialVtMaterialSourceQueries::default();
-        cached.update(AssetId::default(), query);
+        cached.update(AssetId::default(), query, std::iter::empty());
         assert_eq!(cached.get(AssetId::default()), Some(query));
         cached.remove(AssetId::default());
         assert_eq!(cached.len(), 0);
@@ -495,6 +975,85 @@ mod tests {
     }
 
     #[test]
+    fn image_reverse_index_preserves_other_materials_when_one_reference_changes() {
+        fn image_handle(tag: u128) -> Handle<Image> {
+            Handle::<Image>::from(Uuid::from_u128(tag))
+        }
+
+        let shared = image_handle(0xB1);
+        let mut assets = Assets::<StandardMaterial>::default();
+        let first = assets.add(StandardMaterial {
+            base_color_texture: Some(shared.clone()),
+            ..StandardMaterial::default()
+        });
+        let second = assets.add(StandardMaterial {
+            base_color_texture: Some(shared.clone()),
+            ..StandardMaterial::default()
+        });
+        let first_id = first.id();
+        let second_id = second.id();
+
+        let mut world = World::new();
+        world.insert_resource(assets);
+        world.insert_resource(RenderMaterialRegistry::default());
+        for id in [first_id, second_id] {
+            world.resource_scope(|world, mut runtime: Mut<RenderMaterialRegistry>| {
+                let materials = world.resource::<Assets<StandardMaterial>>();
+                runtime
+                    .publish_asset(
+                        id,
+                        materials.get(id).unwrap(),
+                        prism_render_architecture::gpu_scene::GpuCompletionValue(0),
+                    )
+                    .unwrap();
+            });
+        }
+
+        let runtime = world.resource::<RenderMaterialRegistry>();
+        let referenced: HashSet<_> = runtime.materials_referencing_image(shared.id()).collect();
+        assert_eq!(referenced.len(), 2);
+        assert!(referenced.contains(&first_id));
+        assert!(referenced.contains(&second_id));
+        drop(runtime);
+
+        world
+            .resource_mut::<Assets<StandardMaterial>>()
+            .get_mut(first_id)
+            .unwrap()
+            .base_color_texture = None;
+        world.resource_scope(|world, mut runtime: Mut<RenderMaterialRegistry>| {
+            let materials = world.resource::<Assets<StandardMaterial>>();
+            runtime
+                .publish_asset(
+                    first_id,
+                    materials.get(first_id).unwrap(),
+                    prism_render_architecture::gpu_scene::GpuCompletionValue(0),
+                )
+                .unwrap();
+        });
+
+        let runtime = world.resource::<RenderMaterialRegistry>();
+        let referenced: Vec<_> = runtime.materials_referencing_image(shared.id()).collect();
+        assert_eq!(referenced, vec![second_id]);
+        drop(runtime);
+
+        world
+            .resource_mut::<RenderMaterialRegistry>()
+            .retire_asset(
+                second_id,
+                prism_render_architecture::gpu_scene::GpuCompletionValue(0),
+            )
+            .unwrap();
+        assert_eq!(
+            world
+                .resource::<RenderMaterialRegistry>()
+                .materials_referencing_image(shared.id())
+                .count(),
+            0
+        );
+    }
+
+    #[test]
     fn publishing_reference_counts_and_reconciles_material_textures() {
         use bevy_asset::Handle;
         use bevy_image::Image;
@@ -535,6 +1094,15 @@ mod tests {
                 .live_images,
             2
         );
+        {
+            let runtime = world.resource::<RenderMaterialRegistry>();
+            assert!(runtime
+                .materials_referencing_image(base.id())
+                .any(|item| item == id));
+            assert!(runtime
+                .materials_referencing_image(normal.id())
+                .any(|item| item == id));
+        }
 
         // Drop the normal map and republish: the stale reference is retired
         // until the GPU completion proof, so exactly one image is live while
@@ -569,6 +1137,15 @@ mod tests {
             stats.free_slots, 0,
             "a GPU-visible slot must not be reused early"
         );
+        {
+            let runtime = world.resource::<RenderMaterialRegistry>();
+            assert!(runtime
+                .materials_referencing_image(base.id())
+                .any(|item| item == id));
+            assert!(!runtime
+                .materials_referencing_image(normal.id())
+                .any(|item| item == id));
+        }
 
         world
             .resource_mut::<RenderMaterialRegistry>()
@@ -590,6 +1167,10 @@ mod tests {
             .resource_mut::<RenderMaterialRegistry>()
             .retire_asset(id, completion)
             .unwrap();
+        assert!(!world
+            .resource::<RenderMaterialRegistry>()
+            .materials_referencing_image(base.id())
+            .any(|item| item == id));
         world
             .resource_mut::<RenderMaterialRegistry>()
             .reclaim_completed_textures(completion);
@@ -642,6 +1223,15 @@ pub(crate) fn write_material_buffers(
     );
     upload(
         &mut buffers.textures,
+        &device,
+        &queue,
+        &pipeline_cache,
+        &mut jobs,
+        &mut bind_groups,
+        &pipelines,
+    );
+    upload(
+        &mut buffers.surface_contexts,
         &device,
         &queue,
         &pipeline_cache,
@@ -705,11 +1295,15 @@ pub(crate) fn prepare_material_bind_group(
 /// capacity for CPU-side bookkeeping only.
 pub(crate) fn configure_material_texture_capacity(
     arrays: Res<MaterialTextureArrays>,
+    virtual_texture: Res<super::virtual_texture::MaterialVirtualTextureGpuBundle>,
     mut runtime: ResMut<RenderMaterialRegistry>,
 ) {
-    if arrays.bindless() {
-        runtime.set_texture_capacity(arrays.capacity());
-    }
+    runtime.set_texture_capacity(if arrays.bindless() {
+        arrays.capacity()
+    } else {
+        virtual_texture.sizes().page_table_entry_capacity
+    });
+    runtime.set_portable_atlas(!arrays.bindless());
 }
 
 pub(crate) fn rebuild_material_buffers(

@@ -89,7 +89,7 @@ import prism_render_material::shaders::material::{
 };
 import prism_render_material::shaders::material_unpack::{
     prism_unpack_surface, prism_packed_word_count, prism_neutral_surface,
-    PRISM_LOBE_SUBSURFACE
+    PRISM_LOBE_SUBSURFACE, PRISM_SURFACE_MAX_WORDS
 };
 import prism_render_scene::shaders::gpu_scene::{
     GpuSceneInstance,
@@ -136,6 +136,49 @@ import bevy_render::maths::affine3_to_square;
 // merged module must enable the extension. WESL requires every `enable` to
 // follow all `import`s.
 @if(MATERIAL_BINDLESS) enable wgpu_binding_array;
+
+// Scene-local adapter state. This deliberately stays outside the canonical
+// material ABI: it describes how the current scene geometry addresses maps.
+struct PrismMaterialSurfaceContext {
+    generation: u32,
+    uv_channel_mask: u32,
+    padding: vec2<u32>,
+    uv_matrix_x: vec4<f32>,
+    uv_matrix_y: vec4<f32>,
+    uv_translation: vec4<f32>,
+}
+
+@group(1) @binding(13) var<storage, read> material_surface_contexts: array<PrismMaterialSurfaceContext>;
+
+fn shading_resolve_transform_uv(
+    context: PrismMaterialSurfaceContext,
+    uv: vec2<f32>,
+) -> vec2<f32> {
+    return vec2<f32>(
+        dot(context.uv_matrix_x.xy, uv) + context.uv_translation.x,
+        dot(context.uv_matrix_y.xy, uv) + context.uv_translation.y,
+    );
+}
+
+fn shading_resolve_transform_gradient(
+    context: PrismMaterialSurfaceContext,
+    gradient: vec2<f32>,
+) -> vec2<f32> {
+    return vec2<f32>(
+        dot(context.uv_matrix_x.xy, gradient),
+        dot(context.uv_matrix_y.xy, gradient),
+    );
+}
+
+fn shading_resolve_uses_uv1(
+    context: PrismMaterialSurfaceContext,
+    semantic: u32,
+) -> bool {
+    if semantic >= 32u {
+        return true;
+    }
+    return (context.uv_channel_mask & (1u << semantic)) != 0u;
+}
 
 fn shading_resolve_vec3_is_finite(value: vec3<f32>) -> bool {
     return prism_lod_in_range(value.x)
@@ -239,8 +282,10 @@ fn registered_response(
     permutation_high: u32,
 ) -> ResponseOutput {
     var invalid: ResponseOutput;
+    // Encode the unlinked seam as a quiet NaN. The response admission guard
+    // below rejects it before any response plane or scene output is published.
     invalid.words = array<f32, 16>(
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        bitcast<f32>(0x7fc00000u), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
     );
     return invalid;
@@ -402,12 +447,12 @@ struct MotionMatrices {
 // See opaque.wesl: gather a material's packed block out of the shared u32 heap
 // and expand it, returning the neutral surface if the declared range overruns.
 fn load_surface_parameters(word_offset: u32, lobe_mask: u32) -> PrismSurfaceParameters {
-    let n = min(prism_packed_word_count(lobe_mask), 40u);
+    let n = prism_packed_word_count(lobe_mask);
     let heap_words = arrayLength(&material_parameters);
-    if word_offset > heap_words || n > heap_words - word_offset {
+    if n > PRISM_SURFACE_MAX_WORDS || word_offset > heap_words || n > heap_words - word_offset {
         return prism_neutral_surface();
     }
-    var words: array<u32, 40>;
+    var words: array<u32, PRISM_SURFACE_MAX_WORDS>;
     for (var i = 0u; i < n; i = i + 1u) {
         words[i] = material_parameters[word_offset + i];
     }
@@ -2476,6 +2521,18 @@ fn neutral_response_output() -> ResponseOutput {
     return output;
 }
 
+// Registered programs are an untrusted shader-package boundary. Validate the
+// complete packed record before publishing it; a single NaN/Inf must not enter
+// the response planes or be mistaken for a successful evaluator invocation.
+fn response_output_is_finite(output: ResponseOutput) -> bool {
+    for (var word = 0u; word < 16u; word = word + 1u) {
+        if !prism_lod_in_range(output.words[word]) {
+            return false;
+        }
+    }
+    return true;
+}
+
 fn evaluate_response_arm(
     response_kind: u32,
     response_program_id: u32,
@@ -2513,6 +2570,12 @@ fn evaluate_response_arm(
         return arm;
     }
     if response_kind == RESPONSE_REGISTERED {
+        // The all-ones id is reserved by the CPU execution table for an
+        // invalid program. Never invoke the linker seam as a successful
+        // registered material when dispatch metadata is unresolved.
+        if response_program_id == 0xffffffffu {
+            return arm;
+        }
         arm.output = registered_response(
             surface,
             frame,
@@ -2528,6 +2591,9 @@ fn evaluate_response_arm(
             material_header.execution_permutation_low,
             material_header.execution_permutation_high,
         );
+        if !response_output_is_finite(arm.output) {
+            return arm;
+        }
         arm.valid = 1u;
         arm.registered = 1u;
         return arm;
@@ -2775,22 +2841,28 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
         }
     }
 
+    // Resolve and generation-validate the material record.
+    let material_index = metadata.x;
+    if material_index >= arrayLength(&material_headers) {
+        return;
+    }
+    let material_header = material_headers[material_index];
+    if material_header.is_active == 0u || material_header.generation != metadata.y {
+        return;
+    }
+    if material_index >= arrayLength(&material_surface_contexts) {
+        return;
+    }
+    let surface_context = material_surface_contexts[material_index];
+    if surface_context.generation != material_header.generation {
+        return;
+    }
+
+    let material_uv = shading_resolve_transform_uv(surface_context, geometry.uv);
     // Analytic per-pixel texture footprint (§7.1 distance LOD, roadmap P1-a).
-    //
-    // This is a compute dispatch, so the hardware cannot supply `dpdx`/`dpdy`
-    // and every material map used to be sampled at an explicit LOD 0 — full
-    // bandwidth and full aliasing at every distance. The footprint is still
-    // available: project the triangle's three vertices through the frame's
-    // `clip_from_world` and differentiate the barycentric UV interpolation,
-    // which gives the exact per-pixel `dUV/dx` / `dUV/dy` (barycentric
-    // gradients are constant over a triangle). Each record then picks its own
-    // level from *its own* texel count, so a 256² lookup table and a 4K albedo
-    // on the same material filter differently, as they should.
-    //
-    // Degenerate triangles and vertices behind the eye keep zero gradients,
-    // which maps to the base level — exactly the previous behaviour, so this can
-    // only ever remove aliasing/bandwidth, never change a well-formed surface's
-    // material.
+    // The affine material transform is applied to the triangle vertices before
+    // differentiation, so LOD, VT page selection, and normal forward taps all
+    // observe the same transformed footprint.
     var uv_gradients = array<vec2<f32>, 2>(vec2<f32>(0.0, 0.0), vec2<f32>(0.0, 0.0));
     var normal_uv_footprint_valid = false;
     if scene_index < arrayLength(&scene_current_transforms) {
@@ -2811,34 +2883,27 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
         );
         if projected_a.z > 0.0 && projected_b.z > 0.0 && projected_c.z > 0.0 {
             let resolution = vec2<f32>(f32(params.width), f32(params.height));
-            let normal_uv = array<vec2<f32>, 3>(vertex_a.uv, vertex_b.uv, vertex_c.uv);
+            let normal_uv = array<vec2<f32>, 3>(
+                shading_resolve_transform_uv(surface_context, vertex_a.uv),
+                shading_resolve_transform_uv(surface_context, vertex_b.uv),
+                shading_resolve_transform_uv(surface_context, vertex_c.uv),
+            );
             let normal_screen = array<vec2<f32>, 3>(
                 projected_a.xy * resolution,
                 projected_b.xy * resolution,
                 projected_c.xy * resolution,
             );
-            uv_gradients = prism_uv_gradients(
-                normal_uv,
-                normal_screen,
-            );
+            uv_gradients = prism_uv_gradients(normal_uv, normal_screen);
             normal_uv_footprint_valid = shading_resolve_normal_uv_footprint_is_valid(
                 normal_uv, normal_screen, uv_gradients,
             );
         }
     }
-
-    // Resolve and generation-validate the material record.
-    let material_index = metadata.x;
-    if material_index >= arrayLength(&material_headers) {
-        return;
-    }
-    let material_header = material_headers[material_index];
-    if material_header.is_active == 0u || material_header.generation != metadata.y {
-        return;
-    }
-    let parameter_words = min(prism_packed_word_count(material_header.lobe_mask), 40u);
+    let parameter_words = prism_packed_word_count(material_header.lobe_mask);
     let parameter_heap_words = arrayLength(&material_parameters);
-    if material_header.parameter_offset > parameter_heap_words
+    if material_header.parameter_size != parameter_words * 4u
+        || parameter_words > PRISM_SURFACE_MAX_WORDS
+        || material_header.parameter_offset > parameter_heap_words
         || parameter_words > parameter_heap_words - material_header.parameter_offset {
         return;
     }
@@ -2864,6 +2929,11 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
         i < tex_physical && i - material_header.texture_offset < material_header.texture_count;
         i = i + 1u) {
         let record = material_textures[i];
+        // The current geometry ABI has no UV1 stream. Do not silently sample
+        // UV0 for a UV1-authored map; neutral fallback is the safe result.
+        if shading_resolve_uses_uv1(surface_context, record.semantic) {
+            continue;
+        }
         // Per-record mip: the footprint is shared (one pixel), the texel count
         // is not, so each map converts the same UV gradients with its own size.
         var texel_dimensions = vec2<f32>(1.0, 1.0);
@@ -2873,14 +2943,14 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
             }
         }
         let lod = prism_texture_lod(uv_gradients, texel_dimensions);
-        let texel = sample_texture_slot(record, geometry.uv, lod);
+        let texel = sample_texture_slot(record, material_uv, lod);
         if material_is_normal_semantic(record.semantic) {
             // Both kinds replace all normal state, even when the new record's
             // footprint is invalid. Never retain a previous record's estimate.
             normal_center_valid = shading_resolve_vec3_is_finite(texel.xyz)
                 && prism_lod_in_range(parameters.normal_scale);
-            let forward_x_texel = sample_texture_slot(record, geometry.uv + uv_gradients[0], lod);
-            let forward_y_texel = sample_texture_slot(record, geometry.uv + uv_gradients[1], lod);
+            let forward_x_texel = sample_texture_slot(record, material_uv + uv_gradients[0], lod);
+            let forward_y_texel = sample_texture_slot(record, material_uv + uv_gradients[1], lod);
             normal_footprint_valid = normal_uv_footprint_valid && shading_resolve_normal_footprint_is_finite(
                 texel.xyz,
                 forward_x_texel.xyz,
