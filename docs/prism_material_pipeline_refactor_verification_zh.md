@@ -117,6 +117,13 @@ target/debug/deps/prism_render_scene-52519585a36c04ae shading_resolve_wesl_compi
 - 严格 GPU readback `PRISM_REQUIRE_GPU=1 ... physical_gpu_surface_encode_gbuffer_readback_and_composite_close_the_contract` 在当前环境因没有 adapter 于 fixture 初始化处失败，**未产生 GPU 通过证据**；不是 shader assertion 失败。
 - 该切片仍不等于 P0-material 完成：SurfaceIdentity ABI 没有显式 family word，因此消费侧只能对可由 arm 形状推导的 family 做准入；builtin NPR/Unlit-only MaskBlend、非 dynamic mask、完整默认主帧 golden parity、完整 texture/VT SurfaceData 和跨 adapter/backend 仍未闭合。
 
+## 0.5.7 2026-11-10 Material-VT surface context 与 GI evaluator 当前状态
+
+- **Material-VT/SurfaceData 生产切片已补齐**：`prism_render_scene` 现在把 UV0 affine context 发布到 stable material row，并通过 group 1 binding 13 进入 `shading_resolve`；resolve、VT demand、LOD、footprint、normal forward taps 使用同一变换，generation 不一致时 GPU fail-closed。该切片没有 per-pixel allocation。当前几何 ABI 只有 UV0，UV1 纹理在 CPU/GPU 两侧统一拒绝，尚未实现 UV1 顶点流。
+- **GI evaluator 已进入生产 dispatch，但仍是受限 evaluator**：trace 后由 frame graph 调度 evaluator，再由 candidate pass 消费 stamped evaluation；headers、parameters、texture rows、execution plans/programs 以及可用的 VT lease 已进入 evaluator 输入和 graph resource declaration，并保留同代 owner。当前 shader 只接受 builtin Unlit、单 plan、无 blend/mask、base-color/emissive texture rows 的子集；Lit、registered、多 lobe、MaskBlend、direct bindless image/sampler heap 和完整 texture semantics 仍 fail-closed。默认 `composite_material_buffers()` 尚未构造带 VT lease 的 bundle，因此默认生产调用链仍不能消费 VT evaluator。
+- **当前编译证据**：`CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 cargo check -p prism_render_app --lib --target-dir /private/tmp/prism-material-final-check --jobs 1` **通过**；临时 target 随后已清理。Native canonical response 的 CPU/source contract tests、GI evaluator architecture/trace tests 和 authoring alias tests 的通过记录来自各自独立切片，不能上推为 GPU dispatch/readback 或默认主帧 parity。
+- **仍未完成的 P0/P1 闭环**：默认 Native composite 尚未绑定 texture rows/VT 并执行完整 canonical response；完整 `SurfaceData`/identity、registered response、两臂 MaskBlend、材质/execution/texture/VT 同代 frame bundle、默认主 render pass 全帧 GPU readback + CPU golden parity、跨 adapter/backend parity 均未闭合。当前环境没有可用 GPU adapter，不能声明硬件 evaluator 或主帧 GPU parity 通过。
+
 ## 0.6 2026-10-21 材质 schema / ABI / authoring 干净构建复验
 
 - 当前工作树下 `cargo test -p prism_material_schema --lib --jobs 1`：**32 passed / 0 failed**。
