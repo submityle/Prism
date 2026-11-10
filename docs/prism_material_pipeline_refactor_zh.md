@@ -9,7 +9,7 @@
 > 核心命题：**没有全局硬顶，不做运行时塌缩，也不做 per-pixel 预算裁剪。模型开放可扩展，每材质按声明静态特化成它确切需要的瓣集与特征——"界"是每材质编译期事实，不是全局天花板。分层在烘焙期解析成同参数化纹理空间混合（层数天然不限）；距离/性能靠纹理预过滤 + 高光抗锯齿 + 静态置换 + 采样缩放，全程无损、确定、跨平台。**
 > 规范参数化：**运行时 über 以 OpenPBR Surface（ASWF/Adobe/Autodesk 2024）为规范核心，Prism über 是 OpenPBR 的真超集**——`Prism über = OpenPBR Surface（全字段） ∪ { NPR_FACE 私有瓣 } ∪ { 开放词汇表后续瓣 }`。现有 7 瓣只是今天未补齐的实现子集；补齐缺口（thin_film 虹彩、coat/fuzz/subsurface 全字段等）是对开放词汇表的**加法扩充**，不是改架构。超集成立的三条硬约束见 §4.5（纯 OpenPBR 子集合规对拍 / 扩展位段隔离 / 向下投影）。NPR_FACE 作为 OpenPBR 之外的 Prism 私有瓣服务 NPR。
 > 四线正交：**PBR / NPR / 混合 / 自定义不是四条管线，而是同一条 OpenPBR über 上的正交响应模式**，由 `axis.rs` 的 `illumination` 轴 + `render_class` + 可选 `custom_program` 钩子选择；共享同一套参数解包、per-tile 分类与降级。
-> 最后更新：2026-11-11（Native composite 当前状态以核验文档 §0.0/§7.19 为准；P2-h 原理化分层 BSDF 核心公式已完成，`reference_pt/openpbr.rs` 已有多瓣响应、混合采样和固定多 bounce CPU golden，adapter 的受限多瓣 CPU parity 切片已通过；剩余是实时 GPU ↔ reference 图像 parity、GPU/backend、真实纹理/材质提取及生产 integrator 组合验收；GI evaluator 已进入生产调度但仍是无纹理 builtin Unlit 切片。作者层新增受限 `nodedef` → `author_node` 语义闭环：`plus`/`mult`/`blend` 只作为 `add`/`multiply`/`mix` 的作者语法别名，不产生新的 runtime identity；完整 MaterialX 图、编辑器与 MaterialArtifact 接入仍未完成。）
+> 最后更新：2026-11-11（Native composite 当前状态以本文末尾当前 code-truth 和核验文档 §0.0/§7.23 为准；P2-h 原理化分层 BSDF 核心公式已完成，`reference_pt/openpbr.rs` 已有多瓣响应、混合采样和固定多 bounce CPU golden，adapter 的受限多瓣 CPU parity 切片已通过；剩余是实时 GPU ↔ reference 图像 parity、GPU/backend、真实纹理/材质提取及生产 integrator 组合验收。Surface encode 与 GI evaluator 已有 texture rows/VT 资源接线和 VT sampling 代码，但 GI evaluator 响应仍限 builtin Unlit 子集，不能写成完整材质响应。作者层新增受限 `nodedef` → `author_node` 语义闭环：`plus`/`mult`/`blend` 只作为 `add`/`multiply`/`mix` 的作者语法别名，不产生新的 runtime identity；完整 MaterialX 图、编辑器与 MaterialArtifact 接入仍未完成。）
 
 ---
 
@@ -530,7 +530,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 - 纹理段 `texture_offset/texture_count` → **VT 页引用**（指向 `texture_streaming` 的页表句柄），不再是固定 8 槽索引，数量不限。
 - 删除一切 `MAX_*` 常量语义（`MAX_MATERIAL_TEXTURES` / `MAX_CLOSURE_SLAB_DEPTH`）。
 - **PCM 扩展摘要（4 word，P1-h）**：`extensions_used_low/high` + `extensions_required_low/high`，由 `lobe_mask` 按 namespace/stability 派生（§5.3），覆盖 64 个注册槽位（19 word 基础字段 + 4 word 摘要 = **92 B**，WESL 各 `MaterialHeader` 镜像逐字段同步）。
-- `MATERIAL_ABI_VERSION = 6`（schema `abi_version` 亦为 6；当前版本只为材质纹理行增加可选 VT 元数据，采样闭环仍未接线）。
+- `MATERIAL_ABI_VERSION = 6`（schema `abi_version` 亦为 6；当前版本为材质纹理行增加 VT 元数据。Surface encode 已绑定 texture rows 与 VT page table/config/atlas 并写出 sampled material planes；GI evaluator 也有对应 rows/VT bind group 与 sampling 代码，但 Native composite group 2 不直接绑定这些资源，完整主帧消费仍未闭合）。
 - `material_classification.wesl` 的 `MaterialHeader` 镜像同步更新字段名（现仍是 v4 布局：`parameter_offset/parameter_size/lobe_mask`）。
 
 ### 8.3 per-tile 分类（复用现有，不加 tier 维度）
@@ -1762,6 +1762,49 @@ schema **只声明布局 + 元数据 + 契约**（在哪、多宽、谁消费、
 > 优先级：glint **中**（视觉收益明确）；测量瓣 **中低**（场景特定）；MaterialX 往返 **中**（协作价值，依赖 §4.5 投影）。
 
 **演进优先级小结**：**17.5 自描述 schema** 已深化为 PCM 单一声明源与全链路 codegen；**17.2 原理化分层**及 **17.1 运行时动态通道**均已有实现切片，不再是待启动项。当前着色系统的主阻塞是 Native 默认 composite 消费 canonical material response（见核验文档 §7.13）；P2-h 剩余的 reference parity 与其他扩展按各自图像/性能门禁推进。17.6 glint、17.3 光谱 RT、17.4 随机采样仍是后续演进方向。
+
+## 18. 2026-11-11 当前 code-truth（不改写历史）
+
+本节只覆盖当前工作树的材质切片状态；历史路线图、旧验证快照和旧结论保留原样。`HEAD` 为 `05f0df73a9`，其 Native composite 相关测试期望与当前工作树 layout/shader 已发生差异；本节按当前工作树源码记录，不把 HEAD 的旧契约期望当作当前通过证据。
+
+### 已完成的局部切片
+
+- **Surface encode 材质/VT 消费**：`surface_encode.wesl` 已绑定 material headers、parameters、texture rows 和 VT page table/config/atlas/sampler；通过 `sample_texture_slot`、`fold_material_texel` 生成 UV0、footprint、tangent angle 和 sampled material planes。当前仍只有 UV0，不能扩写为 UV1 已完成。
+- **Material-VT frame 资源生命周期**：生产入口已捕获 material/execution snapshot、active VT lease、publication generation，并构造同代 `MaterialFrameSnapshotBundle`；frame graph 已声明 texture rows、VT page table/config/atlas 的 import/read 依赖。
+- **原理化分层核心**：coat/base Fresnel 能量耦合及 coat darkening 已有 CPU/WESL/GPU 局部实现和门禁；这不是“待重写公式”，但不是实时主链全组合 parity。
+- **Path-traced reference 基础**：`reference_pt/openpbr.rs` 已有 base/EON、metallic/specular、transmission、coat、sheen、subsurface、thin-film/iridescence、glint、路径传输及五类 proposal 混合 `sample/pdf`；现有独立 OpenPBR/reference adapter CPU 切片已通过记录的定向测试。该项不是 clearcoat-only 占位。
+
+### 部分完成
+
+- **Native composite**：group 2 当前只绑定 material headers/parameters；composite 消费 group 1 已写入的 sampled material planes，并执行 SurfaceIdentity admission、builtin Lit/Unlit/有限 NPR/MaskBlend 与 finite fail-closed。texture rows/VT 资源仍由 producer、frame graph 和 GI evaluator 持有/消费，不应写成 composite shader 已直接完成完整 VT resolver。
+- **GI evaluator**：已有生产 `prepare_with_material_evaluator`、trace 后 evaluator dispatch、candidate 依赖、texture rows/VT bind group 和 shader-side VT sampling/代际校验；但响应范围仍是受限 builtin Unlit/有限 texture semantic 子集，`texture_slot_count` 等完整语义和注册/MaskBlend/Lit 组合尚未闭合。
+- **MaterialX/authoring**：受限 `author_node`、canonical alias、procedural/VT artifact 和定向 CPU/契约门禁已存在；完整 MaterialX vocabulary、任意图语义、编辑器集成和完整 artifact→response/reference parity 仍未完成。
+
+### 仍未完成
+
+- 默认 Native 主 render pass 的完整 material extraction → Surface encode → response/composite → HDR 输出 GPU readback，以及与 CPU golden 的全帧 parity。
+- 完整 Lit/registered/MaskBlend/channel/domain 组合、完整 texture semantic/VT resolver、UV1、真实动态通道和真实材质提取/打包。
+- GI evaluator 的真实 GPU dispatch/readback 与 CPU oracle parity，以及其对完整材质响应的覆盖。
+- realtime GPU 与 path-traced reference 的图像级 parity、完整生产多 bounce integrator、GPU/backend/cross-adapter parity。
+- 完整 MaterialX 图/编辑器闭环，以及性能 P50/P95/P99 和多适配器证据。
+
+### 下一验收命令（当前均未在本节记录为已执行）
+
+```sh
+# CPU/source contract first; this is not GPU parity.
+cargo test -p prism_render_app --lib composite_contract_tests -- --nocapture
+
+# Native composite/GBuffer slice; only a real passing run may close local GPU evidence.
+PRISM_REQUIRE_GPU=1 WGPU_BACKEND=metal cargo test -p prism_render_app --lib physical_gpu_surface_encode_gbuffer_readback_and_composite_close_the_contract -- --nocapture
+
+# GI trace -> material evaluator -> candidate slice; do not infer full-frame parity from it.
+PRISM_REQUIRE_GPU=1 WGPU_BACKEND=metal cargo test -p prism_render_app --lib physical_gpu_offscreen_host_graph_traces_builds_gi_and_composites -- --nocapture
+
+# Native non-empty scene reaches composite HDR; still a vertical slice, not the full frame.
+PRISM_REQUIRE_GPU=1 WGPU_BACKEND=metal cargo test -p prism_render_app --lib native_scene_mesh_reaches_composite_hdr_on_a_gpu -- --nocapture
+```
+
+以上命令是下一步验收入口，不是本次已完成的运行结果。
 
 ---
 

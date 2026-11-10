@@ -13,7 +13,8 @@
 - Native composite 已有 builtin Lit/Unlit、registered evaluator、有限 MaskBlend 与 16-word `ResponseOutput` 源码消费及局部 readback 夹具；当前生产 target-aware 入口统一为 `LightingGpuState::target_pass`，旧 `pass_for_target*` 名称不再是当前 API。
 - Native 仍未完成 canonical 全响应消费：完整 plan family/channel/mask/domain、逐像素 `SurfaceData`/identity、material/execution/texture/VT 共同逻辑代际、默认 Native mesh 全帧 GPU readback 与 CPU golden parity 仍开放。失效 tuple 必须 fail-closed，不能退回 albedo/Lambert 简化路径。
 - 原理化分层（coat/base 能量耦合）的实时核心公式已有 CPU/WESL/GPU 局部证据，不再列为“待重写公式”；剩余是更广 OpenPBR 输入的组合 parity 和场景级验收。
-- path-traced reference 保留为独立 oracle。`reference_pt/openpbr.rs` 已实现独立的 OpenPBR 响应、路径传输入口以及五类 proposal 的混合 `sample/pdf`；`ReferencePtMaterialAdapter` 也已能把当前 `SurfaceSample` 的 metallic/specular、transmission、sheen、subsurface、thin-film/iridescence、glint 等活动瓣映射到 `Bsdf::OpenPbr`。这证明“响应代码存在”，不证明实时主链 parity：adapter 的生产对拍仍是受限 clearcoat/EON direct slice，纹理/动态通道/真实材质提取、多 bounce 场景图像 parity、GPU/backend parity 和完整 OpenPBR 组合验收仍未完成。
+- path-traced reference 保留为独立 oracle。`reference_pt/openpbr.rs` 已实现独立的 OpenPBR 多瓣响应、路径传输入口以及五类 proposal 的混合 `sample/pdf`；`ReferencePtMaterialAdapter` 已能把当前 `SurfaceSample` 的 metallic/specular、transmission、sheen、subsurface、thin-film/iridescence、glint 等活动瓣映射到 `Bsdf::OpenPbr`。现有独立 OpenPBR/reference adapter CPU 切片已通过记录的定向测试，但这不证明实时主链 parity：纹理/动态通道/真实材质提取、多 bounce 生产 integrator、场景图像 parity、GPU/backend parity 和完整 OpenPBR 组合验收仍未完成。旧 clearcoat/EON direct slice 只作为历史记录。
+- GI evaluator 的当前 code-truth 已从“未生产接线”推进到生产准备/调度：`systems.rs`/`lighting_trace_gpu.rs` 已构造同代 evaluator input，trace 后 dispatch evaluator，candidate pass 依赖 evaluator，并绑定 texture rows 与 VT page table/config/atlas；但 shader 响应仍是受限 builtin Unlit/有限 texture semantic 子集，不能据此宣称完整材质响应或 GPU parity。
 
 ## 0.0.1 2026-11-10 MaterialX author_node bounded contract
 
@@ -830,3 +831,71 @@ CARGO_INCREMENTAL=0 cargo test -p prism_render_architecture --lib ray_scene::nat
   host/CPU 契约与 Rust target 编译通过，不能证明 evaluator shader 已完成 GPU dispatch/readback。
   当前裁决仍是：**生产调用和调度顺序已接线，evaluator 的完整资源消费、GPU readback/CPU
   oracle parity 仍未完成**。
+
+## 7.23 2026-11-11 当前 code-truth（权威覆盖；不改写历史）
+
+本节只覆盖当前工作树的材质切片状态，覆盖前文与当前源码冲突的“当前结论”；§0.x 和
+§7.20–§7.22 的历史运行记录不删除、不改写。当前 `HEAD` 为 `05f0df73a9`，其 Native
+composite 相关测试期望仍与当前工作树的 `[0,1]` group-2 layout/shader 收敛状态不同，
+因此以下按当前工作树源码记录，未运行的命令不计为通过。
+
+### 已完成的局部切片
+
+- **Surface encode 材质/VT 消费**：`pkg/prism_render_app/src/shaders/surface_encode.wesl`
+  已绑定 material headers、parameters、texture rows 和 VT page table/config/atlas/sampler，
+  通过 `sample_texture_slot`/`fold_material_texel` 生成 UV0、footprint、tangent angle 和
+  sampled material planes。UV1 顶点流仍未实现。
+- **Material-VT frame 资源生命周期**：`systems.rs` 已捕获 material/execution snapshot 与
+  active VT lease，校验 publication generation/device/version 并构造同代
+  `MaterialFrameSnapshotBundle`；`frame.rs` 已声明 texture rows、VT page table/config/atlas
+  的 graph import/read 依赖。这个证据是资源生命周期/图依赖证据，不是 composite 直接采样证据。
+- **原理化分层核心**：coat/base Fresnel 能量耦合与 coat darkening 已有 CPU/WESL/GPU
+  局部实现和门禁；该公式不再是“待重写”事项，但更广 OpenPBR 组合和场景级 parity 仍开放。
+- **Path-traced reference**：`reference_pt/openpbr.rs` 已有 base/EON、metallic/specular、
+  transmission、coat、sheen、subsurface、thin-film/iridescence、glint、路径传输及五类
+  proposal 混合 `sample/pdf`；OpenPBR/reference adapter CPU 切片已有独立定向记录。它不是
+  clearcoat-only 占位实现。
+
+### 部分完成
+
+- **Native composite**：当前 `composite_material.wesl` 的 group 2 只绑定 headers/parameters；
+  composite 消费 group 1 的 sampled material planes，并执行 SurfaceIdentity admission、
+  builtin Lit/Unlit/有限 NPR/MaskBlend 与 finite fail-closed。texture rows/VT 资源由
+  producer、frame graph 和 GI evaluator 持有/消费，不能写成 composite shader 已直接完成完整
+  canonical texture/VT resolver。
+- **GI evaluator**：已有生产 `prepare_with_material_evaluator`、trace 后 evaluator dispatch、
+  candidate 依赖、texture rows/VT bind group、shader-side VT sampling 和代际校验；但响应
+  仍限 builtin Unlit/有限 texture semantic 子集，`texture_slot_count` 仍为零，Lit、registered、
+  完整 MaskBlend/channel/domain 组合及 GPU readback/CPU oracle parity 尚未闭合。
+- **MaterialX/authoring**：受限 `author_node`、`plus`/`mult`/`blend` canonical alias、
+  procedural/VT artifact 和定向 CPU/契约门禁已存在；完整 MaterialX vocabulary、任意图语义、
+  编辑器集成及 artifact→response/reference parity 仍未完成。
+
+### 仍未完成
+
+1. 默认 Native 主 render pass 的完整 material extraction → Surface encode → response/composite
+   → HDR 输出 GPU readback，以及和 CPU golden 的全帧 parity。
+2. 完整 Lit/registered/MaskBlend/channel/domain 组合、完整 texture semantic/VT resolver、UV1、
+   真实动态通道和真实材质提取/打包。
+3. GI evaluator 的真实 GPU dispatch/readback、CPU oracle parity，以及完整材质响应覆盖。
+4. realtime GPU ↔ path-traced reference 图像级 parity、完整生产多 bounce integrator、
+   GPU/backend/cross-adapter parity。
+5. 完整 MaterialX 图/编辑器闭环，以及多适配器和性能 P50/P95/P99 证据。
+
+### 下一验收命令（本节未执行；不得视为通过）
+
+```sh
+# CPU/source contract; not GPU parity.
+cargo test -p prism_render_app --lib composite_contract_tests -- --nocapture
+
+# Native Surface encode/GBuffer/composite vertical slice.
+PRISM_REQUIRE_GPU=1 WGPU_BACKEND=metal cargo test -p prism_render_app --lib physical_gpu_surface_encode_gbuffer_readback_and_composite_close_the_contract -- --nocapture
+
+# Native GI trace -> evaluator -> candidate vertical slice.
+PRISM_REQUIRE_GPU=1 WGPU_BACKEND=metal cargo test -p prism_render_app --lib physical_gpu_offscreen_host_graph_traces_builds_gi_and_composites -- --nocapture
+
+# Non-empty native scene reaches composite HDR; still not full-frame parity.
+PRISM_REQUIRE_GPU=1 WGPU_BACKEND=metal cargo test -p prism_render_app --lib native_scene_mesh_reaches_composite_hdr_on_a_gpu -- --nocapture
+```
+
+上述命令只定义下一步证据入口；在实际运行并记录结果前，不把它们写成 GPU 通过。
