@@ -165,8 +165,10 @@ fn native_particle_multi_output_case(first: FirstParticleOutput) {
             targets: &mut camera_targets,
             frame_index: frame,
             taa_history: &mut crate::TaaHistoryCache::default(),
+            live_taa_keys: &mut alloc::collections::BTreeSet::new(),
             texture_imports: &texture_imports,
             composite_material_buffers: None,
+            registered_response_wgsl: None,
             ember: Some(&ember),
             ember_external: &external,
         };
@@ -221,6 +223,7 @@ fn native_particle_multi_output_case(first: FirstParticleOutput) {
                         None,
                         Some(&particle),
                         Some(&mut context),
+                        None,
                         requests.primary_window() == Some(id),
                         first_submission.is_none(),
                         &mut stats,
@@ -407,6 +410,61 @@ fn null_surface_presents_and_releases_window_resources() {
     assert!(runtime.wait_idle());
     assert!(targets.release(&runtime));
     assert!(targets.is_empty());
+}
+
+#[test]
+fn hiding_an_existing_window_releases_its_surface_and_target() {
+    let extent = Extent3d::new_2d(16, 16);
+    let runtime =
+        RenderRuntime::<NullInstance>::headless(NullInstance::new(), extent).expect("null runtime");
+    let device = runtime.device_handle();
+    let baseline = device.live_resource_count();
+    let id = WindowId(3);
+    let mut requests = WindowRenderRequests::<NullInstance>::default();
+    requests.attach_factory(id, RenderViewport::from_extent(extent), |runtime| {
+        runtime
+            .instance()
+            .create_surface(Arc::new(FakeWindow), runtime.device(), runtime.queue())
+    });
+
+    let mut targets = WindowRenderTargets::default();
+    let queues = RenderQueues::new();
+    let functions = DrawFunctions::new();
+    let mut stats = RenderFrameStats::default();
+    assert!(targets
+        .drive(
+            &runtime,
+            &requests,
+            &WindowRenderQueues::default(),
+            &queues,
+            &functions,
+            None,
+            None,
+            &mut stats,
+        )
+        .first_submission
+        .is_some());
+    assert_eq!(targets.len(), 1);
+
+    assert!(runtime.wait_idle());
+    assert!(requests.update(id, RenderViewport::from_extent(extent), false));
+    let receipt = targets.drive(
+        &runtime,
+        &requests,
+        &WindowRenderQueues::default(),
+        &queues,
+        &functions,
+        None,
+        None,
+        &mut stats,
+    );
+    assert!(receipt.handled);
+    assert_eq!(targets.len(), 0);
+    assert!(matches!(
+        targets.status(id),
+        Some(WindowFrameStatus::Skipped)
+    ));
+    assert_eq!(device.live_resource_count(), baseline);
 }
 
 #[test]

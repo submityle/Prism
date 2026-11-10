@@ -332,8 +332,8 @@ struct WindowGpu<I: Instance + 'static> {
     surface: I::Surface,
     config: SurfaceConfig,
     present: PresentPipeline<I::Device>,
-    target: OwnedTarget<I::Device>,
     display_transform: DisplayTransformGpu,
+    target: OwnedTarget<I::Device>,
     lifetime: Arc<WindowLifetime>,
     needs_reconfigure: bool,
     lost: bool,
@@ -585,6 +585,7 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
             trace,
             particle,
             None,
+            None,
             stats,
         )
     }
@@ -615,6 +616,43 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
             lighting_context,
             trace,
             particle,
+            None,
+            Some(context),
+            stats,
+        )
+    }
+
+    /// Production window driver with the native frame lifecycle attached.
+    /// Focused presentation callers keep using `drive_with_surface_views`;
+    /// RenderApp supplies the receipt for the complete native frame.
+    pub(crate) fn drive_with_surface_views_native(
+        &mut self,
+        runtime: &RenderRuntime<I>,
+        requests: &WindowRenderRequests<I>,
+        overrides: &WindowRenderQueues,
+        queues: &RenderQueues,
+        functions: &DrawFunctions,
+        lighting_context: Option<(&LightingGpuState<I>, &LightingPlan)>,
+        trace: Option<TraceGraphRecorder>,
+        particle: Option<&crate::particle::ParticleGpuState>,
+        native_frame: &mut crate::NativeFrameExecution,
+        context: SurfaceViewDriveContext<'_, I>,
+        stats: &mut RenderFrameStats,
+    ) -> WindowDriveReceipt
+    where
+        I::Device: Send + Sync + 'static,
+        I::Queue: FrameSync,
+    {
+        self.drive_internal(
+            runtime,
+            requests,
+            overrides,
+            queues,
+            functions,
+            lighting_context,
+            trace,
+            particle,
+            Some(native_frame),
             Some(context),
             stats,
         )
@@ -630,6 +668,7 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
         lighting_context: Option<(&LightingGpuState<I>, &LightingPlan)>,
         trace: Option<TraceGraphRecorder>,
         particle: Option<&crate::particle::ParticleGpuState>,
+        mut native_frame: Option<&mut crate::NativeFrameExecution>,
         mut context: Option<SurfaceViewDriveContext<'_, I>>,
         stats: &mut RenderFrameStats,
     ) -> WindowDriveReceipt
@@ -671,6 +710,9 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
                     );
                 }
                 stats.frames_failed += 1;
+                if let Some(native_frame) = native_frame.as_deref_mut() {
+                    native_frame.failed_with("window retirement completion was unconfirmed");
+                }
                 return WindowDriveReceipt {
                     handled: true,
                     first_submission: None,
@@ -687,6 +729,9 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
                         )),
                     );
                     stats.frames_failed += 1;
+                    if let Some(native_frame) = native_frame.as_deref_mut() {
+                        native_frame.failed_with("window target dependency eviction failed");
+                    }
                     return WindowDriveReceipt {
                         handled: true,
                         first_submission: None,
@@ -735,6 +780,7 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
                 trace,
                 particle,
                 context.as_mut(),
+                native_frame.as_deref_mut(),
                 requests.primary_window() == Some(id),
                 receipt.first_submission.is_none(),
                 stats,
@@ -753,6 +799,12 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
                         receipt.first_submission.get_or_insert(submission);
                     }
                     stats.frames_failed += 1;
+                    if let Some(native_frame) = native_frame.as_deref_mut() {
+                        native_frame.failed_with(format!(
+                            "window {} execution failed: {:?}",
+                            id.0, failure.error
+                        ));
+                    }
                     WindowFrameStatus::Failed(failure.error)
                 }
             };
@@ -772,6 +824,7 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
         trace: Option<TraceGraphRecorder>,
         particle: Option<&crate::particle::ParticleGpuState>,
         mut context: Option<&mut SurfaceViewDriveContext<'_, I>>,
+        mut native_frame: Option<&mut crate::NativeFrameExecution>,
         is_primary: bool,
         frame_work: bool,
         stats: &mut RenderFrameStats,
@@ -898,9 +951,12 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
                     Arc::clone(&lifetime.in_flight),
                     Arc::clone(&lifetime.destroy_allowed),
                 );
+                // Drop dependent resources in reverse ownership order: the
+                // present bind group references the transform output, and the
+                // transform bind group references the scene target view.
                 gpu.present = present;
-                gpu.target = target;
                 gpu.display_transform = display_transform;
+                gpu.target = target;
                 gpu.lifetime = lifetime;
             }
             gpu.config = config;
@@ -1170,7 +1226,13 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
         let passes = graph.pass_count() as u64;
         let particle_output = particle.and_then(|particle| particle.graph_output_lease(&graph));
         gpu.lifetime.in_flight.fetch_add(1, Ordering::AcqRel);
-        let submission = match runtime.execute_tracked(graph) {
+        let submission_result = match native_frame.as_deref_mut() {
+            Some(native_frame) => {
+                crate::native_frame::execute_native_graph(native_frame, runtime, graph)
+            }
+            None => runtime.execute_tracked(graph),
+        };
+        let submission = match submission_result {
             Ok(submission) => submission,
             Err(error) => {
                 gpu.lifetime.in_flight.fetch_sub(1, Ordering::AcqRel);

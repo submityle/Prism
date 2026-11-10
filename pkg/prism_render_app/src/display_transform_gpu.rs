@@ -23,13 +23,18 @@ pub enum DisplayTransformGpuError {
     InvalidExtent { width: u32, height: u32 },
     /// The two-dimensional dispatch exceeds a device workgroup limit.
     DispatchLimit { x: u32, y: u32, limit: u32 },
+    /// An Ember graph could not be declared in the host frame graph.
+    EmberGraph,
+    /// Particle camera/owner admission rejected the host frame graph.
+    ParticleGraph,
 }
 
 /// A device-local WGSL implementation of [`OcioConfig::reference_transform`].
 ///
-/// Samples the frame's linear `Rgba8Unorm` color texture and writes a persistent
-/// `Rgba8Unorm` texture containing display-transfer-encoded RGB. The final
-/// present pass decodes sRGB for an sRGB attachment (whose hardware store then
+/// Samples the frame's linear HDR `Rgba16Float` color texture (also accepting
+/// `Rgba8Unorm` inputs) and writes a persistent `Rgba8Unorm` texture containing
+/// display-transfer-encoded RGB. The final present pass decodes sRGB for an
+/// sRGB attachment (whose hardware store then
 /// performs exactly one encode); non-sRGB attachments consume encoded values
 /// directly.
 pub struct DisplayTransformGpu {
@@ -188,12 +193,13 @@ impl DisplayTransformGpu {
         let bind_group = self.bind_group;
         let x = self.extent.width.div_ceil(WORKGROUP_EDGE);
         let y = self.extent.height.div_ceil(WORKGROUP_EDGE);
+        let mut output = destination;
         graph.add_compute_pass(
             "ocio-display-transform",
             PassFlags::SIDE_EFFECT,
-            move |builder| {
+            |builder| {
                 builder.sample(source);
-                builder.write_storage_texture(destination);
+                output = builder.write_storage_texture(destination);
                 move |ctx| {
                     ctx.set_compute_pipeline(pipeline)
                         .set_compute_bind_group(0, bind_group, Vec::new())
@@ -201,7 +207,7 @@ impl DisplayTransformGpu {
                 }
             },
         );
-        Ok(destination)
+        Ok(output)
     }
 
     /// View of the persistent display output, bound by the final raster pass.
@@ -565,15 +571,116 @@ mod tests {
     use prism_render_architecture::lighting::ocio::{
         OcioDisplayGamut, OcioToneMapping, OcioTransferFunction,
     };
+    use prism_render_architecture::particle::half_float_f16::{f16_bits_to_f32, f32_to_f16_bits};
     use prism_render_driver::{
-        Extent3d, ImageDataLayout, TextureDescriptor, TextureUsages, TextureViewDescriptor,
-        TextureWrite,
+        Extent3d, ImageDataLayout, RenderDevice, TextureDescriptor, TextureUsages,
+        TextureViewDescriptor, TextureWrite,
     };
+    use prism_render_driver_null::NullInstance;
     use prism_render_driver_wgpu::{require_hardware_gpu, HardwareDeviceError, WgpuInstance};
     use prism_render_graph::{ImportedTexture, RenderGraph, TextureDesc};
+    use prism_render_runtime::RenderRuntime;
+
+    #[test]
+    fn null_transform_returns_the_post_write_handle_for_present() {
+        let extent = Extent3d::new_2d(4, 4);
+        let runtime = RenderRuntime::<NullInstance>::headless(NullInstance::new(), extent)
+            .expect("null runtime");
+        let device = runtime.device_handle();
+        let source = device.create_texture(&TextureDescriptor::new_2d(
+            extent,
+            rhi::TextureFormat::Rgba16Float,
+            TextureUsages::TEXTURE_BINDING,
+        ));
+        let source_view = device.create_texture_view(source, &TextureViewDescriptor::default());
+        let device_dyn: Arc<dyn RenderDevice + Send + Sync> = device.clone();
+        let transform = DisplayTransformGpu::new(
+            device_dyn,
+            source_view,
+            extent,
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicBool::new(true)),
+        )
+        .expect("null display transform");
+        let mut graph = RenderGraph::new(extent);
+        let source_handle = graph.import_texture(
+            "null-display-source",
+            TextureDesc::color(rhi::TextureFormat::Rgba16Float)
+                .with_usage(TextureUsages::TEXTURE_BINDING),
+            ImportedTexture {
+                texture: source,
+                default_view: source_view,
+                entry_state: rhi::TextureState::initial(),
+                exit_state: rhi::TextureState::shader_read(rhi::PipelineStages::COMPUTE_SHADER),
+                mip_levels: 1,
+                array_layers: 1,
+            },
+        );
+        let transformed = transform
+            .append(
+                &mut graph,
+                runtime.queue(),
+                &OcioConfig::srgb(),
+                source_handle,
+            )
+            .expect("null display-transform graph");
+        assert_eq!(transformed.version(), 1);
+        graph.compile().expect("post-write present source compiles");
+        drop(transform);
+        device.destroy_texture_view(source_view);
+        device.destroy_texture(source);
+    }
 
     #[test]
     fn physical_gpu_transform_matches_cpu_reference_for_supported_pipeline_matrix() {
+        let pixels: [[u8; 4]; 6] = [
+            [0, 0, 0, 0],
+            [1, 5, 64, 51],
+            [64, 128, 255, 102],
+            [255, 128, 64, 153],
+            [240, 32, 128, 204],
+            [17, 220, 80, 255],
+        ];
+        assert_transform_pipeline_matrix(
+            rhi::TextureFormat::Rgba8Unorm,
+            &pixels.map(|pixel| pixel.map(|value| f32::from(value) / 255.0)),
+            bytemuck::cast_slice(&pixels),
+            0.75,
+        );
+    }
+
+    #[test]
+    fn physical_gpu_hdr_transform_preserves_highlights_before_negative_exposure() {
+        // Direct texture fixtures test the display transform, not scene lighting.
+        // All values are exactly representable in binary16. Negative exposure
+        // brings highlights into SDR range, exposing any clamp before exposure.
+        let pixels: [[f32; 4]; 6] = [
+            [0.0, 0.0, 0.0, 0.0],
+            [2.0, 4.0, 8.0, 0.25],
+            [4.0, 2.0, 1.0, 0.5],
+            [8.0, 16.0, 32.0, 0.75],
+            [0.125, 0.5, 1.5, 1.0],
+            [-2.0, 3.0, 0.25, 0.5],
+        ];
+        let encoded = pixels.map(|pixel| pixel.map(f32_to_f16_bits));
+        let uploaded = encoded.map(|pixel| pixel.map(f16_bits_to_f32));
+        assert_eq!(uploaded, pixels, "HDR fixture must be exact in binary16");
+        assert_transform_pipeline_matrix(
+            rhi::TextureFormat::Rgba16Float,
+            &uploaded,
+            bytemuck::cast_slice(&encoded),
+            -4.0,
+        );
+    }
+
+    // Reuse the same physical-device gate, graph, compute pipeline, output
+    // readback and 3 x 3 x 4 configuration matrix for SDR and HDR sources.
+    fn assert_transform_pipeline_matrix(
+        source_format: rhi::TextureFormat,
+        pixels: &[[f32; 4]; 6],
+        upload: &[u8],
+        exposure_stops: f32,
+    ) {
         let (device, queue) = match WgpuInstance::new().request_default_hardware_device() {
             Ok(device_and_queue) => device_and_queue,
             Err(HardwareDeviceError::NoAdapter) => {
@@ -599,17 +706,9 @@ mod tests {
         let device_handle = Arc::new(device);
         let device: Arc<dyn RenderDevice + Send + Sync> = device_handle.clone();
         let extent = Extent3d::new_2d(3, 2);
-        let pixels: [[u8; 4]; 6] = [
-            [0, 0, 0, 0],
-            [1, 5, 64, 51],
-            [64, 128, 255, 102],
-            [255, 128, 64, 153],
-            [240, 32, 128, 204],
-            [17, 220, 80, 255],
-        ];
         let input = device.create_texture(&TextureDescriptor::new_2d(
             extent,
-            rhi::TextureFormat::Rgba8Unorm,
+            source_format,
             TextureUsages::TEXTURE_BINDING.union(TextureUsages::COPY_DST),
         ));
         let input_view = device.create_texture_view(input, &TextureViewDescriptor::default());
@@ -620,16 +719,16 @@ mod tests {
                 origin: [0, 0, 0],
                 size: extent,
             },
-            bytemuck::cast_slice(&pixels),
+            upload,
             ImageDataLayout {
                 offset: 0,
-                bytes_per_row: Some(12),
-                rows_per_image: Some(2),
+                bytes_per_row: Some(upload.len() as u32 / extent.height),
+                rows_per_image: Some(extent.height),
             },
         );
         let lifetime_count = Arc::new(AtomicUsize::new(0));
         let destroy_allowed = Arc::new(AtomicBool::new(true));
-        let mut transform = DisplayTransformGpu::new(
+        let transform = DisplayTransformGpu::new(
             Arc::clone(&device),
             input_view,
             extent,
@@ -655,7 +754,7 @@ mod tests {
                 ] {
                     let config = OcioConfig {
                         tone_mapping,
-                        exposure_stops: 0.75,
+                        exposure_stops,
                         white_balance:
                             prism_render_architecture::lighting::ocio::OcioWhiteBalance::new(
                                 1.1, 0.9, 1.2,
@@ -667,7 +766,7 @@ mod tests {
                     let mut graph = RenderGraph::new(extent);
                     let source = graph.import_texture(
                         "ocio-test-source",
-                        TextureDesc::color(rhi::TextureFormat::Rgba8Unorm)
+                        TextureDesc::color(source_format)
                             .with_usage(TextureUsages::TEXTURE_BINDING),
                         ImportedTexture {
                             texture: input,
@@ -683,35 +782,63 @@ mod tests {
                     transform
                         .append(&mut graph, &queue, &config, source)
                         .expect("valid transform graph");
-                    graph
+                    let recorded = graph
                         .execute(&*device_handle, &queue)
                         .expect("valid transform graph execution");
-                    let actual = queue.read_texture_rgba8(
-                        transform.output_texture(),
-                        extent.width,
-                        extent.height,
-                    );
+                    let actual = queue
+                        .read_texture_rgba8(transform.output_texture(), extent.width, extent.height)
+                        .expect("display-transform SDR GPU readback must complete");
+                    // Same-queue synchronous readback completes the graph's GPU use.
+                    recorded.release(&*device_handle);
+                    assert_eq!(actual.len(), pixels.len() * 4, "SDR output is RGBA8");
+                    let mut distinguishable_hdr_channels = 0;
                     for (index, (source, result)) in
                         pixels.iter().zip(actual.chunks_exact(4)).enumerate()
                     {
-                        let source = source.map(|value| f32::from(value) / 255.0);
+                        let linear = [source[0], source[1], source[2]];
                         let expected = config
-                            .reference_transform([source[0], source[1], source[2]])
+                            .reference_transform(linear)
                             .expect("finite CPU reference input");
+                        let early_clamped = config
+                            .reference_transform(linear.map(|value| value.clamp(0.0, 1.0)))
+                            .expect("finite early-clamp counterexample");
                         for channel in 0..3 {
                             let actual = f32::from(result[channel]) / 255.0;
                             assert!(
-                                (actual - expected[channel]).abs() <= 0.012,
-                                "tone={tone_mapping:?} gamut={display_gamut:?} transfer={transfer_function:?} pixel={index} channel={channel}: GPU={} CPU={}",
+                                (actual - expected[channel]).abs() <= 2.0 / 255.0,
+                                "source={source_format:?} exposure={exposure_stops} tone={tone_mapping:?} gamut={display_gamut:?} transfer={transfer_function:?} pixel={index} channel={channel}: GPU={} CPU={}",
                                 actual,
                                 expected[channel]
                             );
+                            if (expected[channel] - early_clamped[channel]).abs() > 0.1 {
+                                distinguishable_hdr_channels += 1;
+                                assert!(
+                                    (actual - early_clamped[channel]).abs() > 0.08,
+                                    "HDR highlight was clamped before exposure: tone={tone_mapping:?} gamut={display_gamut:?} transfer={transfer_function:?} pixel={index} channel={channel}"
+                                );
+                            }
                         }
-                        assert_eq!(result[3], pixels[index][3], "alpha must pass through");
+                        let expected_alpha = (source[3] * 255.0).round() as u8;
+                        if source_format == rhi::TextureFormat::Rgba8Unorm {
+                            assert_eq!(result[3], expected_alpha, "alpha must pass through");
+                        } else {
+                            assert!(
+                                result[3].abs_diff(expected_alpha) <= 1,
+                                "alpha must pass through: pixel={index} GPU={} CPU={expected_alpha}",
+                                result[3]
+                            );
+                        }
+                    }
+                    if source_format == rhi::TextureFormat::Rgba16Float {
+                        assert!(
+                            distinguishable_hdr_channels > 0,
+                            "every HDR configuration must distinguish early clamping"
+                        );
                     }
                 }
             }
         }
+        drop(transform);
         device.destroy_texture_view(input_view);
         device.destroy_texture(input);
     }
@@ -744,13 +871,18 @@ mod tests {
         let device_dyn: Arc<dyn RenderDevice + Send + Sync> = device.clone();
         let extent = Extent3d::new_2d(5, 3);
         let target = crate::target::RenderTarget::new(&*device, extent);
-        let mut display = OffscreenDisplayTransform::default();
+        assert_eq!(target.format(), rhi::TextureFormat::Rgba16Float);
+        let config = OcioConfig {
+            exposure_stops: -3.0,
+            ..OcioConfig::aces()
+        };
+        let mut display = OffscreenDisplayTransform::new(config);
         display
             .ensure(device_dyn, target.view(), extent, 0)
             .expect("valid offscreen display transform");
         let queues = crate::queue::RenderQueues::new();
         let functions = crate::draw::canonical::registry();
-        let mut graph = crate::frame::target_graph_with_display_transform(
+        let graph = crate::frame::target_graph_with_display_transform(
             &target, &queues, &functions, None, &display, &queue,
         )
         .expect("offscreen transform pass is appended to the host frame graph");
@@ -762,31 +894,41 @@ mod tests {
             stages.present_passes, 0,
             "headless graph has no window present"
         );
-        assert_eq!(graph.pass_count(), 2, "clear then display transform");
-        graph
+        // HDR and GBuffer attachments are cleared separately because their
+        // combined bytes-per-sample exceed the WebGPU color-attachment limit.
+        // The transform therefore follows two host clear passes.
+        assert_eq!(
+            graph.pass_count(),
+            stages.scene_passes as usize + 1,
+            "host clears then display transform"
+        );
+        let host_frame = graph
             .execute(&*device, &queue)
             .expect("offscreen host graph executes");
 
         // The host graph's clear pass is part of the frame. Seed the persistent
         // target after that submission, then exercise the same transform over
-        // representative non-zero linear values.
-        let pixels: [[u8; 4]; 15] = [
-            [0, 0, 0, 0],
-            [16, 32, 64, 32],
-            [32, 64, 128, 64],
-            [64, 128, 192, 96],
-            [128, 192, 255, 128],
-            [8, 80, 160, 160],
-            [24, 96, 200, 192],
-            [48, 112, 224, 224],
-            [80, 144, 240, 255],
-            [255, 128, 32, 16],
-            [200, 100, 50, 48],
-            [160, 80, 40, 80],
-            [120, 60, 30, 112],
-            [80, 40, 20, 176],
-            [40, 20, 10, 240],
+        // HDR values. This is a transform/capture fixture, not lighting evidence.
+        // The odd extent also exercises padded rows in both readback formats.
+        let pixels: [[f32; 4]; 15] = [
+            [0.0, 0.0, 0.0, 0.0],
+            [2.0, 4.0, 8.0, 0.125],
+            [4.0, 2.0, 1.0, 0.25],
+            [8.0, 16.0, 32.0, 0.375],
+            [0.125, 0.5, 1.5, 0.5],
+            [-2.0, 3.0, 0.25, 0.625],
+            [0.001, 0.003, 0.01, 0.75],
+            [0.18, 0.36, 0.72, 0.875],
+            [0.5, 1.0, 2.0, 1.0],
+            [32.0, 8.0, 2.0, 0.0625],
+            [16.0, 4.0, 1.0, 0.1875],
+            [8.0, 2.0, 0.5, 0.3125],
+            [4.0, 1.0, 0.25, 0.4375],
+            [2.0, 0.5, 0.125, 0.6875],
+            [1.0, 0.25, 0.0625, 0.9375],
         ];
+        let encoded = pixels.map(|pixel| pixel.map(f32_to_f16_bits));
+        let uploaded = encoded.map(|pixel| pixel.map(f16_bits_to_f32));
         queue.write_texture(
             TextureWrite {
                 texture: target.texture(),
@@ -794,18 +936,25 @@ mod tests {
                 origin: [0, 0, 0],
                 size: extent,
             },
-            bytemuck::cast_slice(&pixels),
+            bytemuck::cast_slice(&encoded),
             ImageDataLayout {
                 offset: 0,
-                bytes_per_row: Some(extent.width * 4),
+                bytes_per_row: Some(extent.width * 8),
                 rows_per_image: Some(extent.height),
             },
         );
+        let linear_capture = queue
+            .read_texture_rgba16f(target.texture(), extent.width, extent.height)
+            .expect("display-transform HDR seed readback must complete");
+        // The synchronous readback also completes the preceding host submission.
+        host_frame.release(&*device);
+        assert_eq!(linear_capture.as_slice(), uploaded.as_slice());
+        assert!(linear_capture.iter().any(|pixel| pixel[2] > 1.0));
+        assert!(linear_capture.iter().any(|pixel| pixel[0] < 0.0));
         let mut parity_graph = RenderGraph::new(extent);
         let source_handle = parity_graph.import_texture(
             "offscreen-parity-source",
-            TextureDesc::color(rhi::TextureFormat::Rgba8Unorm)
-                .with_usage(TextureUsages::TEXTURE_BINDING),
+            TextureDesc::color(target.format()).with_usage(TextureUsages::TEXTURE_BINDING),
             ImportedTexture {
                 texture: target.texture(),
                 default_view: target.view(),
@@ -818,11 +967,18 @@ mod tests {
         display
             .append(&mut parity_graph, &queue, source_handle)
             .expect("the offscreen transform accepts seeded linear pixels");
-        parity_graph
+        let parity_frame = parity_graph
             .execute(&*device, &queue)
             .expect("the seeded offscreen transform graph executes");
+        assert_eq!(
+            queue
+                .read_texture_rgba16f(target.texture(), extent.width, extent.height)
+                .expect("display-transform parity readback must complete"),
+            linear_capture,
+            "linear capture must remain unexposed and unmodified by the display pass"
+        );
+        parity_frame.release(&*device);
 
-        let source = queue.read_texture_rgba8(target.texture(), extent.width, extent.height);
         let mut frame_output = OffscreenFrameOutput::default();
         frame_output.publish(OffscreenOutputFrame::new(
             display.output_texture().expect("prepared output texture"),
@@ -835,35 +991,77 @@ mod tests {
         assert_eq!(frame.extent(), extent);
         assert_eq!(frame.frame_index(), 17);
         assert_eq!(frame.device_generation(), 0);
-        let output = queue.read_texture_rgba8(frame.texture(), extent.width, extent.height);
-        let config = OcioConfig::srgb();
-        assert_eq!(
-            source.as_slice(),
-            bytemuck::cast_slice::<[u8; 4], u8>(&pixels)
-        );
-        for (index, (source, actual)) in source
-            .chunks_exact(4)
-            .zip(output.chunks_exact(4))
-            .enumerate()
-        {
-            let linear = [
-                f32::from(source[0]) / 255.0,
-                f32::from(source[1]) / 255.0,
-                f32::from(source[2]) / 255.0,
-            ];
+        let output = queue
+            .read_texture_rgba8(frame.texture(), extent.width, extent.height)
+            .expect("published display-transform output readback must complete");
+        assert_eq!(output.len(), pixels.len() * 4, "SDR output is RGBA8");
+        // The backend's RGBA8 readback helper is only valid for the display
+        // output, not the HDR scene target. Compare to the uploaded half values.
+        let mut distinguished = [0_usize; 5];
+        for (index, (source, actual)) in uploaded.iter().zip(output.chunks_exact(4)).enumerate() {
+            let linear = [source[0], source[1], source[2]];
             let expected = config
                 .reference_transform(linear)
                 .expect("finite frame target input");
+            let counterexamples = [
+                (
+                    "early clamp",
+                    config.reference_transform(linear.map(|v| v.clamp(0.0, 1.0))),
+                ),
+                (
+                    "missing exposure",
+                    OcioConfig {
+                        exposure_stops: 0.0,
+                        ..config
+                    }
+                    .reference_transform(linear),
+                ),
+                (
+                    "double exposure",
+                    OcioConfig {
+                        exposure_stops: config.exposure_stops * 2.0,
+                        ..config
+                    }
+                    .reference_transform(linear),
+                ),
+                (
+                    "double display transform",
+                    config.reference_transform(expected),
+                ),
+                (
+                    "double transfer",
+                    OcioConfig::srgb().reference_transform(expected),
+                ),
+            ];
             for channel in 0..3 {
                 let actual = f32::from(actual[channel]) / 255.0;
                 assert!(
-                    (actual - expected[channel]).abs() <= 0.012,
+                    (actual - expected[channel]).abs() <= 2.0 / 255.0,
                     "pixel={index} channel={channel}: GPU={actual} CPU={}",
                     expected[channel]
                 );
+                for (case, (label, result)) in counterexamples.iter().enumerate() {
+                    let wrong = result.as_ref().expect("finite counterexample input")[channel];
+                    if (expected[channel] - wrong).abs() > 0.05 {
+                        distinguished[case] += 1;
+                        assert!(
+                            (actual - wrong).abs() > 0.03,
+                            "{label}: pixel={index} channel={channel} GPU={actual} wrong={wrong}"
+                        );
+                    }
+                }
             }
-            assert_eq!(actual[3], source[3], "alpha must pass through");
+            let expected_alpha = (source[3] * 255.0).round() as u8;
+            assert!(
+                actual[3].abs_diff(expected_alpha) <= 1,
+                "alpha must pass through"
+            );
         }
+        assert!(
+            distinguished.iter().all(|count| *count > 0),
+            "the HDR fixture must distinguish each ordering/duplication bug: {distinguished:?}"
+        );
+        drop(display);
         target.destroy(&*device);
     }
 }
