@@ -4,16 +4,19 @@
 //! 12 `u32` words per node and triangle. This module consumes those words
 //! directly and performs a bounded stack traversal in WGSL.
 
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 
-use crate::lighting::{LightingGiCandidateInput, LightingSurfaceInput};
+use crate::lighting::{LightingGiCandidateInput, LightingMaterialProof, LightingSurfaceInput};
 use crate::lighting_gpu::LightingGiCandidateTarget;
+use crate::material::MaterialFrameSnapshotBundle;
 use prism_ecs::prelude::Resource;
 use prism_render_architecture::lighting::raygen::{
     append_surface_gi_rays, GiRay, SurfaceRayGenInput,
 };
 use prism_render_architecture::ray_scene::{
-    GpuBvhBuffers, RayHitAttributeRecord, NODE_WORDS, TRIANGLE_WORDS,
+    GpuBvhBuffers, NativeGiMaterialEvaluationRecord, NativeGiMaterialEvaluatorConfig,
+    RayHitAttributeRecord, RayHitMaterialSnapshot, NATIVE_GI_MATERIAL_EVALUATOR_ABI_VERSION,
+    NATIVE_GI_MATERIAL_EVALUATOR_CONFIG_WORDS, NODE_WORDS, TRIANGLE_WORDS,
 };
 use prism_render_driver as rhi;
 use rhi::{RenderDevice, RenderQueue};
@@ -24,7 +27,7 @@ const MAX_NODE_COUNT: usize = 1_000_000;
 const MAX_TRIANGLE_COUNT: usize = 2_000_000;
 const MAX_RAY_COUNT: usize = 1_000_000;
 const RAY_WORDS: usize = 12;
-const HIT_WORDS: usize = 16;
+const HIT_WORDS: usize = 32;
 /// Host GI trace work is explicitly bounded to 64 rays for each of 1024
 /// extracted surfaces; a following GPU pass builds surface-major candidates.
 pub const MAX_HOST_TRACE_RAYS: usize = 65_536;
@@ -64,11 +67,21 @@ pub struct TraceHit {
     /// Stable geometry identity carried by the hit payload.
     pub geometry_id: u32,
     /// Material content generation carried by the hit payload.
+    pub material_index: u32,
+    /// Material content generation carried by the hit payload.
     pub material_generation: u32,
+    /// Published material-record revision carried by the hit payload.
+    pub material_revision: u32,
+    /// Material snapshot epoch carried by the hit payload.
+    pub material_epoch: u64,
+    /// Verified plan/program/package/permutation proof carried by the hit.
+    pub execution_binding: [u32; 5],
     /// Interpolated texture coordinate carried by the hit payload.
     pub uv: [f32; 2],
     /// Interpolated shading normal carried by the hit payload.
     pub shading_normal: [f32; 3],
+    /// Interpolated tangent and handedness carried by the hit payload.
+    pub tangent: [f32; 4],
     /// Ray parameter of the nearest hit; zero for a miss.
     pub t: f32,
     /// First barycentric coordinate; zero for a miss.
@@ -84,13 +97,30 @@ impl TraceHit {
         triangle_index: u32::MAX,
         instance_id: u32::MAX,
         geometry_id: u32::MAX,
+        material_index: u32::MAX,
         material_generation: u32::MAX,
+        material_revision: u32::MAX,
+        material_epoch: u64::MAX,
+        execution_binding: [u32::MAX; 5],
         uv: [0.0; 2],
         shading_normal: [0.0; 3],
+        tangent: [0.0; 4],
         t: 0.0,
         u: 0.0,
         v: 0.0,
     };
+
+    /// Returns the material snapshot identity committed with this hit.
+    #[must_use]
+    pub const fn material_snapshot(self) -> RayHitMaterialSnapshot {
+        RayHitMaterialSnapshot {
+            material_index: self.material_index,
+            material_generation: self.material_generation,
+            material_revision: self.material_revision,
+            material_epoch: self.material_epoch,
+            execution_binding: self.execution_binding,
+        }
+    }
 }
 
 /// Invalid input to [`build_gi_candidates_reference`].
@@ -236,7 +266,11 @@ pub fn build_gi_candidates_reference(
                 }
                 if hit.instance_id == u32::MAX
                     || hit.geometry_id == u32::MAX
+                    || hit.material_index == u32::MAX
                     || hit.material_generation == u32::MAX
+                    || hit.material_revision == u32::MAX
+                    || hit.material_epoch == u64::MAX
+                    || hit.execution_binding.contains(&u32::MAX)
                 {
                     return Err(GiCandidateReferenceError::MissingHitAttributes(ray_index));
                 }
@@ -247,7 +281,11 @@ pub fn build_gi_candidates_reference(
                     .ok_or(GiCandidateReferenceError::InvalidHitAttributes(ray_index))?;
                 if attributes.identity.instance_id != hit.instance_id
                     || attributes.identity.geometry_id != hit.geometry_id
+                    || attributes.identity.material_index != hit.material_index
                     || attributes.identity.material_generation != hit.material_generation
+                    || attributes.identity.material_revision != hit.material_revision
+                    || attributes.identity.material_epoch != hit.material_epoch
+                    || attributes.identity.execution_binding != hit.execution_binding
                     || attributes
                         .uv
                         .into_iter()
@@ -257,6 +295,11 @@ pub fn build_gi_candidates_reference(
                         .shading_normal
                         .into_iter()
                         .zip(hit.shading_normal)
+                        .any(|(expected, actual)| expected.to_bits() != actual.to_bits())
+                    || attributes
+                        .tangent
+                        .into_iter()
+                        .zip(hit.tangent)
                         .any(|(expected, actual)| expected.to_bits() != actual.to_bits())
                 {
                     return Err(GiCandidateReferenceError::InvalidHitAttributes(ray_index));
@@ -292,6 +335,9 @@ pub fn build_gi_candidates_reference(
                 }
                 candidate.position = position;
                 candidate.normal = attributes.shading_normal;
+                if !attributes.tangent.into_iter().all(f32::is_finite) {
+                    return Err(GiCandidateReferenceError::InvalidHitAttributes(ray_index));
+                }
                 let radiance = outgoing_radiance[triangle];
                 candidate.radiance = radiance;
                 candidate.visibility = 1.0;
@@ -385,6 +431,13 @@ pub enum TraceGpuError {
     StackDepthExceeded,
     /// A zero-length ray batch cannot be dispatched.
     EmptyRays,
+    /// A GI candidate dispatch was requested without a Native material
+    /// snapshot/texture/VT evaluator seam.
+    MaterialEvaluatorUnavailable,
+    /// The typed Native evaluator seam is malformed or incomplete.
+    InvalidMaterialEvaluator,
+    /// A Native evaluator result buffer cannot cover every traced hit.
+    MaterialEvaluatorBufferTooSmall,
     /// A storage binding exceeds the device's declared limit.
     StorageBindingLimit,
     /// A packed input byte size cannot be represented without overflow.
@@ -401,6 +454,80 @@ pub enum TraceGpuError {
     CandidateBatchShape,
     /// The GPU detected a traversal safety-bound violation.
     TraversalFault(usize),
+}
+
+/// The material resources currently consumed by the linked Native evaluator.
+///
+/// This is deliberately narrower than the architecture-level binding contract:
+/// the first production dispatch evaluates the texture-free builtin Unlit
+/// subset. Textured rows are rejected by the shader until their bindless/VT
+/// resources are added to this same immutable frame input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NativeGiMaterialEvaluatorInput {
+    /// Snapshot/configuration proof for the material frame.
+    pub config: NativeGiMaterialEvaluatorConfig,
+    /// Material header storage buffer and logical byte range.
+    pub material_headers: TraceGraphBuffer,
+    /// Packed material parameter storage buffer and logical byte range.
+    pub material_parameters: TraceGraphBuffer,
+    /// Execution-plan table storage buffer and logical byte range.
+    pub execution_plans: TraceGraphBuffer,
+    /// Response-program table storage buffer and logical byte range.
+    pub execution_programs: TraceGraphBuffer,
+}
+
+impl NativeGiMaterialEvaluatorInput {
+    /// Captures the exact resources of one coherent material frame.
+    #[must_use]
+    pub fn from_material_bundle(bundle: &MaterialFrameSnapshotBundle) -> Self {
+        let material = bundle.material();
+        let execution = bundle.execution();
+        let epoch = material.material_epoch();
+        let vt_generation = material.vt_publication_generation();
+        Self {
+            config: NativeGiMaterialEvaluatorConfig {
+                abi_version: NATIVE_GI_MATERIAL_EVALUATOR_ABI_VERSION,
+                material_epoch_low: epoch as u32,
+                material_epoch_high: (epoch >> 32) as u32,
+                execution_table_version: execution.version(),
+                vt_generation_low: vt_generation as u32,
+                vt_generation_high: (vt_generation >> 32) as u32,
+                material_header_count: material.header_capacity(),
+                parameter_word_count: material.parameter_capacity_words(),
+                texture_row_count: material.texture_capacity_rows(),
+                execution_plan_count: execution.plan_rows().len() as u32,
+                execution_program_count: execution.program_rows().len() as u32,
+                texture_slot_count: 0,
+                vt_page_table_word_count: 0,
+                flags: 0,
+                _padding: [0; 2],
+            },
+            material_headers: TraceGraphBuffer {
+                id: material.headers(),
+                size_bytes: u64::from(material.header_capacity())
+                    * core::mem::size_of::<prism_render_material::GpuMaterialHeader>() as u64,
+            },
+            material_parameters: TraceGraphBuffer {
+                id: material.parameters(),
+                size_bytes: u64::from(material.parameter_capacity_words()) * 4,
+            },
+            execution_plans: TraceGraphBuffer {
+                id: execution.plan_buffer(),
+                size_bytes: execution.plan_rows().len() as u64
+                    * (prism_render_material::EXECUTION_PLAN_ROW_WORDS * 4) as u64,
+            },
+            execution_programs: TraceGraphBuffer {
+                id: execution.program_buffer(),
+                size_bytes: execution.program_rows().len() as u64 * 20,
+            },
+        }
+    }
+
+    fn validate(self) -> Result<(), TraceGpuError> {
+        self.config
+            .validate()
+            .map_err(|_| TraceGpuError::InvalidMaterialEvaluator)
+    }
 }
 
 /// Host-side validation outcome for preparing the optional frame trace pass.
@@ -450,6 +577,17 @@ pub enum TracePreparationError {
     RadianceCapacity,
     /// An outgoing-radiance value is negative or non-finite.
     InvalidRadiance(usize),
+    /// The material snapshot table does not cover every packed triangle.
+    MaterialSnapshotCountMismatch {
+        /// Number of packed triangles in the trace scene.
+        triangles: usize,
+        /// Number of material proofs in the snapshot.
+        proofs: usize,
+    },
+    /// A packed triangle has no proof for its stable primitive identity.
+    MissingMaterialSnapshot(u32),
+    /// A hit attribute identity disagrees with the published material proof.
+    MaterialSnapshotMismatch(u32),
     /// Scene validation or GPU preparation rejected the packed input.
     Trace(TraceGpuError),
     /// Architecture ray generation rejected a surface or allocation.
@@ -480,6 +618,8 @@ pub struct LightingTraceState {
     surface_id_scratch: Vec<u64>,
     ray_scratch: Vec<TraceRay>,
     raygen_scratch: Vec<GiRay>,
+    material_proof_scratch: Vec<LightingMaterialProof>,
+    material_proof_identity: Option<(usize, usize, usize, u64)>,
 }
 
 impl Default for TracePreparationStatus {
@@ -504,6 +644,32 @@ impl LightingTraceState {
         device: Arc<dyn RenderDevice + Send + Sync>,
         queue: &dyn RenderQueue,
         candidate_target: Option<LightingGiCandidateTarget>,
+    ) -> Option<TraceGraphRecorder> {
+        self.prepare_with_material_evaluator(
+            input,
+            surfaces,
+            frame_index,
+            device_generation,
+            device,
+            queue,
+            candidate_target,
+            None,
+        )
+    }
+
+    /// Prepares trace, material evaluation, and candidate passes from one
+    /// immutable material frame. The evaluator is required by the production
+    /// GI path and is intentionally optional only for trace-only callers.
+    pub fn prepare_with_material_evaluator(
+        &mut self,
+        input: Option<&crate::LightingTraceSceneInput>,
+        surfaces: &[crate::LightingSurfaceInput],
+        frame_index: u64,
+        device_generation: u64,
+        device: Arc<dyn RenderDevice + Send + Sync>,
+        queue: &dyn RenderQueue,
+        candidate_target: Option<LightingGiCandidateTarget>,
+        material_evaluator: Option<NativeGiMaterialEvaluatorInput>,
     ) -> Option<TraceGraphRecorder> {
         // A device-generation change invalidates every trace/candidate object,
         // even when this frame has no trace input.  Do this before the early
@@ -628,6 +794,40 @@ impl LightingTraceState {
             }
             self.validated_scene = Some(Arc::clone(&input.bvh));
         }
+        if candidate_target.is_some() {
+            let proof_identity = (
+                Arc::as_ptr(&input.bvh) as usize,
+                input.material_proofs.as_ptr() as usize,
+                input.material_proofs.len(),
+                input.radiance_revision,
+            );
+            if self.material_proof_identity != Some(proof_identity) {
+                self.material_proof_scratch.clear();
+                if self.material_proof_scratch.capacity() < input.material_proofs.len()
+                    && self
+                        .material_proof_scratch
+                        .try_reserve_exact(input.material_proofs.len())
+                        .is_err()
+                {
+                    self.status = TracePreparationStatus::Failed(
+                        TracePreparationError::MaterialSnapshotCountMismatch {
+                            triangles: scene.triangles.len() / TRIANGLE_WORDS,
+                            proofs: input.material_proofs.len(),
+                        },
+                    );
+                    return None;
+                }
+                self.material_proof_scratch
+                    .extend_from_slice(&input.material_proofs);
+                self.material_proof_scratch
+                    .sort_unstable_by_key(|proof| proof.primitive_id);
+                self.material_proof_identity = Some(proof_identity);
+            }
+            if let Err(error) = validate_material_snapshots(&scene, &self.material_proof_scratch) {
+                self.status = TracePreparationStatus::Failed(error);
+                return None;
+            }
+        }
         for (surface, &stable_id) in surfaces.iter().zip(&input.surface_ids) {
             if let Err(error) = append_surface_gi_rays(
                 SurfaceRayGenInput {
@@ -672,18 +872,33 @@ impl LightingTraceState {
                 }));
         }
         let output = self.output.as_ref().expect("output allocated above");
-        let recorder = self
-            .gpu
-            .as_mut()
-            .expect("GPU pass created above")
-            .prepare_graph(
-                queue,
-                &scene,
-                &self.ray_scratch,
-                output.id,
-                output.capacity_bytes,
-                candidate_target,
-            );
+        let recorder = match material_evaluator {
+            Some(evaluator) => self
+                .gpu
+                .as_mut()
+                .expect("GPU pass created above")
+                .prepare_graph_with_material_evaluator(
+                    queue,
+                    &scene,
+                    &self.ray_scratch,
+                    output.id,
+                    output.capacity_bytes,
+                    candidate_target,
+                    Some(evaluator),
+                ),
+            None => self
+                .gpu
+                .as_mut()
+                .expect("GPU pass created above")
+                .prepare_graph(
+                    queue,
+                    &scene,
+                    &self.ray_scratch,
+                    output.id,
+                    output.capacity_bytes,
+                    candidate_target,
+                ),
+        };
         match recorder {
             Ok(recorder) => {
                 self.status = TracePreparationStatus::Prepared {
@@ -891,8 +1106,69 @@ fn validate_secondary_attributes(scene: &impl PackedSceneWords) -> Result<(), Tr
     }
     for (index, record) in attributes.iter().enumerate() {
         record
-            .validate()
+            .validate_secondary()
             .map_err(|_| TraceGpuError::InvalidHitAttributePayload(index))?;
+    }
+    Ok(())
+}
+
+/// Proves that each packed triangle's hit ABI and its evaluated radiance use
+/// the same immutable material snapshot.  The proof is done once per scene /
+/// radiance revision before the candidate pass; the GPU then repeats the
+/// identity checks from the hit attributes before consuming the radiance row.
+fn validate_material_snapshots(
+    scene: &BorrowedPackedTraceScene<'_>,
+    proofs: &[LightingMaterialProof],
+) -> Result<(), TracePreparationError> {
+    scene.validate().map_err(TracePreparationError::Trace)?;
+    scene
+        .validate_secondary_attributes()
+        .map_err(TracePreparationError::Trace)?;
+    let triangle_count = scene.triangles.len() / TRIANGLE_WORDS;
+    if proofs.len() != triangle_count {
+        return Err(TracePreparationError::MaterialSnapshotCountMismatch {
+            triangles: triangle_count,
+            proofs: proofs.len(),
+        });
+    }
+    if proofs
+        .windows(2)
+        .any(|pair| pair[0].primitive_id == pair[1].primitive_id)
+    {
+        let duplicate = proofs
+            .windows(2)
+            .find(|pair| pair[0].primitive_id == pair[1].primitive_id)
+            .map_or(u32::MAX, |pair| pair[0].primitive_id);
+        return Err(TracePreparationError::MaterialSnapshotMismatch(duplicate));
+    }
+    for triangle in 0..triangle_count {
+        let primitive_id = scene.triangles[triangle * TRIANGLE_WORDS + 9];
+        let proof = proofs
+            .binary_search_by_key(&primitive_id, |proof| proof.primitive_id)
+            .ok()
+            .and_then(|index| proofs.get(index))
+            .ok_or(TracePreparationError::MissingMaterialSnapshot(primitive_id))?;
+        let identity = scene
+            .hit_attributes
+            .and_then(|attributes| attributes.get(triangle))
+            .map(|record| record.hit_identity())
+            .ok_or(TracePreparationError::MissingMaterialSnapshot(primitive_id))?;
+        let expected = RayHitMaterialSnapshot {
+            material_index: proof.material_handle.index,
+            material_generation: proof.material_handle.generation,
+            material_revision: proof.material_revision,
+            material_epoch: proof.material_epoch,
+            execution_binding: proof.execution_binding,
+        };
+        if !expected.is_complete()
+            || identity.instance_id == u32::MAX
+            || identity.geometry_id == u32::MAX
+            || identity.material_snapshot() != expected
+        {
+            return Err(TracePreparationError::MaterialSnapshotMismatch(
+                primitive_id,
+            ));
+        }
     }
     Ok(())
 }
@@ -940,10 +1216,12 @@ pub struct TraceGraphBuffer {
 /// The originating pass retains every graph bind group until it is dropped,
 /// and retired input buffers are retained for the same period. Keep the pass
 /// alive through graph execution and queue submission. The graph must import
-/// `nodes`, `triangles`, `attributes`, and `rays` as
-/// storage reads and `hits` as a storage write. The prepared input buffers are
-/// not replaced while this recorder exists because preparation requires a
-/// mutable borrow of the pass.
+/// `nodes`, `triangles`, `attributes`, and `rays` as storage reads and `hits`
+/// as a storage write. When present, the evaluator pass must also import and
+/// read the four material buffers and its config uniform, then write
+/// `material_evaluations`. The prepared input buffers are not replaced while
+/// this recorder exists because preparation requires a mutable borrow of the
+/// pass.
 #[derive(Clone, Copy)]
 pub struct TraceGraphRecorder {
     pub nodes: TraceGraphBuffer,
@@ -960,11 +1238,29 @@ pub struct TraceGraphRecorder {
     pub surfaces: Option<TraceGraphBuffer>,
     /// Lighting parameters consumed by candidate build.
     pub params: Option<TraceGraphBuffer>,
+    /// Material header snapshot read by the evaluator.
+    pub material_headers: Option<TraceGraphBuffer>,
+    /// Packed material parameter snapshot read by the evaluator.
+    pub material_parameters: Option<TraceGraphBuffer>,
+    /// Execution-plan snapshot read by the evaluator.
+    pub execution_plans: Option<TraceGraphBuffer>,
+    /// Response-program snapshot read by the evaluator.
+    pub execution_programs: Option<TraceGraphBuffer>,
+    /// Evaluator configuration uniform read by the evaluator.
+    pub evaluator_config: Option<TraceGraphBuffer>,
+    /// Material evaluator dispatch output, when the candidate path uses the
+    /// authoritative material snapshot instead of the trace-only candidate.
+    pub material_evaluations: Option<TraceGraphBuffer>,
     pipeline: rhi::ComputePipelineId,
     bind_group: rhi::BindGroupId,
     workgroups: u32,
+    evaluator_pipeline: Option<rhi::ComputePipelineId>,
+    evaluator_bind_group: Option<rhi::BindGroupId>,
+    evaluator_workgroups: u32,
     candidate_pipeline: Option<rhi::ComputePipelineId>,
     candidate_bind_group: Option<rhi::BindGroupId>,
+    material_candidate_pipeline: Option<rhi::ComputePipelineId>,
+    material_candidate_bind_group: Option<rhi::BindGroupId>,
     candidate_workgroups: u32,
 }
 
@@ -997,11 +1293,25 @@ impl TraceGraphRecorder {
             .dispatch(self.workgroups, 1, 1);
     }
 
+    /// Records the authoritative material evaluator after trace hits exist.
+    pub fn record_evaluator_graph(&self, context: &mut prism_render_graph::ExecuteContext<'_>) {
+        if let (Some(pipeline), Some(bind_group)) =
+            (self.evaluator_pipeline, self.evaluator_bind_group)
+        {
+            context
+                .set_compute_pipeline(pipeline)
+                .set_compute_bind_group(0, bind_group, vec![])
+                .dispatch(self.evaluator_workgroups, 1, 1);
+        }
+    }
+
     /// Records the candidate-build dispatch after trace hits are available.
     pub fn record_candidate_graph(&self, context: &mut prism_render_graph::ExecuteContext<'_>) {
-        if let (Some(pipeline), Some(bind_group)) =
-            (self.candidate_pipeline, self.candidate_bind_group)
-        {
+        let selected = self
+            .material_candidate_pipeline
+            .zip(self.material_candidate_bind_group)
+            .or_else(|| self.candidate_pipeline.zip(self.candidate_bind_group));
+        if let Some((pipeline, bind_group)) = selected {
             context
                 .set_compute_pipeline(pipeline)
                 .set_compute_bind_group(0, bind_group, vec![])
@@ -1046,6 +1356,14 @@ pub struct LightingTraceGpu {
     candidate_pipeline_layout: rhi::PipelineLayoutId,
     candidate_shader: rhi::ShaderModuleId,
     candidate_pipeline: rhi::ComputePipelineId,
+    evaluator_layout: rhi::BindGroupLayoutId,
+    evaluator_pipeline_layout: rhi::PipelineLayoutId,
+    evaluator_shader: rhi::ShaderModuleId,
+    evaluator_pipeline: rhi::ComputePipelineId,
+    material_candidate_layout: rhi::BindGroupLayoutId,
+    material_candidate_pipeline_layout: rhi::PipelineLayoutId,
+    material_candidate_shader: rhi::ShaderModuleId,
+    material_candidate_pipeline: rhi::ComputePipelineId,
     nodes: Option<ResidentBuffer>,
     triangles: Option<ResidentBuffer>,
     attributes: Option<ResidentBuffer>,
@@ -1055,6 +1373,12 @@ pub struct LightingTraceGpu {
     retired_bind_groups: Vec<rhi::BindGroupId>,
     candidate_bind_group: Option<(rhi::BindGroupId, [rhi::BufferId; 8])>,
     retired_candidate_bind_groups: Vec<rhi::BindGroupId>,
+    material_candidate_bind_group: Option<(rhi::BindGroupId, [rhi::BufferId; 9])>,
+    retired_material_candidate_bind_groups: Vec<rhi::BindGroupId>,
+    evaluator_config: Option<ResidentBuffer>,
+    evaluations: Option<ResidentBuffer>,
+    evaluator_bind_group: Option<(rhi::BindGroupId, [rhi::BufferId; 8])>,
+    retired_evaluator_bind_groups: Vec<rhi::BindGroupId>,
     packed_rays: Vec<u32>,
     uploaded_scene_identity: Option<(
         usize,
@@ -1141,6 +1465,87 @@ impl LightingTraceGpu {
             module: candidate_shader,
             entry_point: "main".into(),
         });
+        let evaluator_layout = device.create_bind_group_layout(&rhi::BindGroupLayoutDescriptor {
+            label: Some("native-gi-material-evaluator-layout".into()),
+            entries: (0..8)
+                .map(|binding| rhi::BindGroupLayoutEntry {
+                    binding,
+                    visibility: rhi::ShaderStages::COMPUTE,
+                    ty: if binding == 6 {
+                        rhi::BindingType::Buffer {
+                            ty: rhi::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: Some(
+                                NATIVE_GI_MATERIAL_EVALUATOR_CONFIG_WORDS as u64 * 4,
+                            ),
+                        }
+                    } else {
+                        rhi::BindingType::Buffer {
+                            ty: rhi::BufferBindingType::Storage {
+                                read_only: binding != 7,
+                            },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        }
+                    },
+                    count: None,
+                })
+                .collect(),
+        });
+        let evaluator_pipeline_layout =
+            device.create_pipeline_layout(&rhi::PipelineLayoutDescriptor {
+                label: Some("native-gi-material-evaluator-pipeline-layout".into()),
+                bind_group_layouts: vec![evaluator_layout],
+                push_constant_ranges: vec![],
+            });
+        let evaluator_shader = device.create_shader_module(&rhi::ShaderModuleDescriptor {
+            label: Some("native-gi-material-evaluator".into()),
+            source: rhi::ShaderSource::Wgsl(Cow::Borrowed(include_str!(concat!(
+                env!("OUT_DIR"),
+                "/native_gi_material_evaluator.wgsl"
+            )))),
+        });
+        let evaluator_pipeline = device.create_compute_pipeline(&rhi::ComputePipelineDescriptor {
+            label: Some("native-gi-material-evaluator".into()),
+            layout: Some(evaluator_pipeline_layout),
+            module: evaluator_shader,
+            entry_point: "main".into(),
+        });
+        let material_candidate_layout =
+            device.create_bind_group_layout(&rhi::BindGroupLayoutDescriptor {
+                label: Some("lighting-gi-material-candidate-build-layout".into()),
+                entries: (0..9)
+                    .map(|binding| rhi::BindGroupLayoutEntry {
+                        binding,
+                        visibility: rhi::ShaderStages::COMPUTE,
+                        ty: rhi::BindingType::Buffer {
+                            ty: rhi::BufferBindingType::Storage {
+                                read_only: binding != 7,
+                            },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    })
+                    .collect(),
+            });
+        let material_candidate_pipeline_layout =
+            device.create_pipeline_layout(&rhi::PipelineLayoutDescriptor {
+                label: Some("lighting-gi-material-candidate-build-pipeline-layout".into()),
+                bind_group_layouts: vec![material_candidate_layout],
+                push_constant_ranges: vec![],
+            });
+        let material_candidate_shader = device.create_shader_module(&rhi::ShaderModuleDescriptor {
+            label: Some("lighting-gi-material-candidate-build".into()),
+            source: rhi::ShaderSource::Wgsl(Cow::Owned(material_candidate_shader_source())),
+        });
+        let material_candidate_pipeline =
+            device.create_compute_pipeline(&rhi::ComputePipelineDescriptor {
+                label: Some("lighting-gi-material-candidate-build".into()),
+                layout: Some(material_candidate_pipeline_layout),
+                module: material_candidate_shader,
+                entry_point: "main".into(),
+            });
         Self {
             device,
             layout,
@@ -1151,6 +1556,14 @@ impl LightingTraceGpu {
             candidate_pipeline_layout,
             candidate_shader,
             candidate_pipeline,
+            evaluator_layout,
+            evaluator_pipeline_layout,
+            evaluator_shader,
+            evaluator_pipeline,
+            material_candidate_layout,
+            material_candidate_pipeline_layout,
+            material_candidate_shader,
+            material_candidate_pipeline,
             nodes: None,
             triangles: None,
             attributes: None,
@@ -1160,6 +1573,12 @@ impl LightingTraceGpu {
             retired_bind_groups: Vec::new(),
             candidate_bind_group: None,
             retired_candidate_bind_groups: Vec::new(),
+            material_candidate_bind_group: None,
+            retired_material_candidate_bind_groups: Vec::new(),
+            evaluator_config: None,
+            evaluations: None,
+            evaluator_bind_group: None,
+            retired_evaluator_bind_groups: Vec::new(),
             packed_rays: Vec::new(),
             uploaded_scene_identity: None,
             allocations: 0,
@@ -1196,6 +1615,29 @@ impl LightingTraceGpu {
         output_size_bytes: u64,
         candidate_target: Option<LightingGiCandidateTarget>,
     ) -> Result<TraceGraphRecorder, TraceGpuError> {
+        self.prepare_graph_with_material_evaluator(
+            queue,
+            scene,
+            rays,
+            output,
+            output_size_bytes,
+            candidate_target,
+            None,
+        )
+    }
+
+    /// Prepares the trace graph and, when supplied, the authoritative Native
+    /// material evaluator followed by its evaluator-aware candidate pass.
+    pub fn prepare_graph_with_material_evaluator(
+        &mut self,
+        queue: &dyn RenderQueue,
+        scene: &BorrowedPackedTraceScene<'_>,
+        rays: &[TraceRay],
+        output: rhi::BufferId,
+        output_size_bytes: u64,
+        candidate_target: Option<LightingGiCandidateTarget>,
+        material_evaluator: Option<NativeGiMaterialEvaluatorInput>,
+    ) -> Result<TraceGraphRecorder, TraceGpuError> {
         scene.validate()?;
         validate_rays(rays)?;
         if rays.is_empty() {
@@ -1215,6 +1657,9 @@ impl LightingTraceGpu {
         ];
         if candidate_target.is_some() {
             scene.validate_secondary_attributes()?;
+            if let Some(evaluator) = material_evaluator {
+                evaluator.validate()?;
+            }
         }
         validate_output_size(output_size_bytes, sizes[4])?;
         let caps = self.device.capabilities();
@@ -1299,6 +1744,42 @@ impl LightingTraceGpu {
             sizes[3],
             limit,
         );
+        let (evaluation_buffer, evaluator_config_buffer) =
+            if let Some(evaluator) = material_evaluator {
+                let evaluation_bytes = byte_size(
+                    rays.len(),
+                    core::mem::size_of::<NativeGiMaterialEvaluationRecord>(),
+                )?;
+                if evaluation_bytes > limit
+                    || evaluator.material_headers.size_bytes > limit
+                    || evaluator.material_parameters.size_bytes > limit
+                    || evaluator.execution_plans.size_bytes > limit
+                    || evaluator.execution_programs.size_bytes > limit
+                {
+                    return Err(TraceGpuError::StorageBindingLimit);
+                }
+                let evaluation_buffer = ensure_resident_buffer(
+                    &*self.device,
+                    &mut self.evaluations,
+                    &mut self.retired_buffers,
+                    &mut self.allocations,
+                    evaluation_bytes.max(16),
+                    limit,
+                );
+                let config_buffer = ensure_resident_buffer_with_usages(
+                    &*self.device,
+                    &mut self.evaluator_config,
+                    &mut self.retired_buffers,
+                    &mut self.allocations,
+                    (NATIVE_GI_MATERIAL_EVALUATOR_CONFIG_WORDS * 4) as u64,
+                    limit,
+                    rhi::BufferUsages::UNIFORM | rhi::BufferUsages::COPY_DST,
+                );
+                queue.write_buffer(config_buffer, 0, bytemuck::bytes_of(&evaluator.config));
+                (Some(evaluation_buffer), Some(config_buffer))
+            } else {
+                (None, None)
+            };
         let scene_identity = (
             scene.nodes.as_ptr() as usize,
             scene.nodes.len(),
@@ -1405,6 +1886,101 @@ impl LightingTraceGpu {
         } else {
             None
         };
+        let evaluator_group = if let (Some(evaluator), Some(evaluations), Some(config)) = (
+            material_evaluator,
+            evaluation_buffer,
+            evaluator_config_buffer,
+        ) {
+            let buffers = [
+                output,
+                attribute_buffer,
+                evaluator.material_headers.id,
+                evaluator.material_parameters.id,
+                evaluator.execution_plans.id,
+                evaluator.execution_programs.id,
+                config,
+                evaluations,
+            ];
+            let sizes = [
+                output_size_bytes,
+                self.attributes
+                    .expect("attribute buffer was ensured")
+                    .capacity_bytes,
+                evaluator.material_headers.size_bytes,
+                evaluator.material_parameters.size_bytes,
+                evaluator.execution_plans.size_bytes,
+                evaluator.execution_programs.size_bytes,
+                (NATIVE_GI_MATERIAL_EVALUATOR_CONFIG_WORDS * 4) as u64,
+                self.evaluations
+                    .expect("evaluation buffer was ensured")
+                    .capacity_bytes,
+            ];
+            let group = if let Some((group, previous)) = self.evaluator_bind_group {
+                if previous == buffers {
+                    group
+                } else {
+                    self.retired_evaluator_bind_groups.push(group);
+                    let group = self.create_evaluator_bind_group(buffers, sizes);
+                    self.evaluator_bind_group = Some((group, buffers));
+                    group
+                }
+            } else {
+                let group = self.create_evaluator_bind_group(buffers, sizes);
+                self.evaluator_bind_group = Some((group, buffers));
+                group
+            };
+            Some((group, buffers))
+        } else {
+            None
+        };
+        let material_candidate =
+            if let (Some(target), Some(evaluations)) = (candidate_target, evaluation_buffer) {
+                let buffers = [
+                    ray_buffer,
+                    output,
+                    triangle_buffer,
+                    attribute_buffer,
+                    target.radiance,
+                    target.surfaces,
+                    target.params,
+                    target.candidates,
+                    evaluations,
+                ];
+                let sizes = [
+                    self.rays.expect("ray buffer was ensured").capacity_bytes,
+                    output_size_bytes,
+                    self.triangles
+                        .expect("triangle buffer was ensured")
+                        .capacity_bytes,
+                    self.attributes
+                        .expect("attribute buffer was ensured")
+                        .capacity_bytes,
+                    target.radiance_size_bytes,
+                    target.surfaces_size_bytes,
+                    target.params_size_bytes,
+                    target.candidates_size_bytes,
+                    self.evaluations
+                        .expect("evaluation buffer was ensured")
+                        .capacity_bytes,
+                ];
+                let group = if let Some((group, previous)) = self.material_candidate_bind_group {
+                    if previous == buffers {
+                        group
+                    } else {
+                        self.retired_material_candidate_bind_groups.push(group);
+                        let group = self.create_material_candidate_bind_group(buffers, sizes);
+                        self.material_candidate_bind_group = Some((group, buffers));
+                        group
+                    }
+                } else {
+                    let group = self.create_material_candidate_bind_group(buffers, sizes);
+                    self.material_candidate_bind_group = Some((group, buffers));
+                    group
+                };
+                Some((group, buffers))
+            } else {
+                None
+            };
         let candidate_enabled = candidate.is_some();
         Ok(TraceGraphRecorder {
             nodes: TraceGraphBuffer {
@@ -1446,8 +2022,29 @@ impl LightingTraceGpu {
                 id: target.params,
                 size_bytes: target.params_size_bytes,
             }),
+            material_headers: material_evaluator.map(|evaluator| evaluator.material_headers),
+            material_parameters: material_evaluator.map(|evaluator| evaluator.material_parameters),
+            execution_plans: material_evaluator.map(|evaluator| evaluator.execution_plans),
+            execution_programs: material_evaluator.map(|evaluator| evaluator.execution_programs),
+            evaluator_config: evaluator_config_buffer.map(|id| TraceGraphBuffer {
+                id,
+                size_bytes: (NATIVE_GI_MATERIAL_EVALUATOR_CONFIG_WORDS * 4) as u64,
+            }),
+            material_evaluations: evaluation_buffer.map(|id| TraceGraphBuffer {
+                id,
+                size_bytes: self
+                    .evaluations
+                    .expect("evaluation buffer was ensured")
+                    .capacity_bytes,
+            }),
+            evaluator_pipeline: evaluator_group.map(|_| self.evaluator_pipeline),
+            evaluator_bind_group: evaluator_group.map(|(group, _)| group),
+            evaluator_workgroups: workgroups,
             candidate_pipeline: candidate_enabled.then_some(self.candidate_pipeline),
             candidate_bind_group: candidate.map(|(group, _)| group),
+            material_candidate_pipeline: material_candidate
+                .map(|_| self.material_candidate_pipeline),
+            material_candidate_bind_group: material_candidate.map(|(group, _)| group),
             candidate_workgroups: workgroups,
         })
     }
@@ -1460,6 +2057,54 @@ impl LightingTraceGpu {
         self.device.create_bind_group(&rhi::BindGroupDescriptor {
             label: Some("lighting-gi-candidate-build-bind-group".into()),
             layout: Some(self.candidate_layout),
+            entries: buffers
+                .into_iter()
+                .zip(sizes)
+                .enumerate()
+                .map(|(binding, (buffer, size))| rhi::BindGroupEntry {
+                    binding: binding as u32,
+                    resource: rhi::BindingResource::Buffer {
+                        buffer,
+                        offset: 0,
+                        size: Some(size),
+                    },
+                })
+                .collect(),
+        })
+    }
+
+    fn create_material_candidate_bind_group(
+        &self,
+        buffers: [rhi::BufferId; 9],
+        sizes: [u64; 9],
+    ) -> rhi::BindGroupId {
+        self.device.create_bind_group(&rhi::BindGroupDescriptor {
+            label: Some("lighting-gi-material-candidate-build-bind-group".into()),
+            layout: Some(self.material_candidate_layout),
+            entries: buffers
+                .into_iter()
+                .zip(sizes)
+                .enumerate()
+                .map(|(binding, (buffer, size))| rhi::BindGroupEntry {
+                    binding: binding as u32,
+                    resource: rhi::BindingResource::Buffer {
+                        buffer,
+                        offset: 0,
+                        size: Some(size),
+                    },
+                })
+                .collect(),
+        })
+    }
+
+    fn create_evaluator_bind_group(
+        &self,
+        buffers: [rhi::BufferId; 8],
+        sizes: [u64; 8],
+    ) -> rhi::BindGroupId {
+        self.device.create_bind_group(&rhi::BindGroupDescriptor {
+            label: Some("native-gi-material-evaluator-bind-group".into()),
+            layout: Some(self.evaluator_layout),
             entries: buffers
                 .into_iter()
                 .zip(sizes)
@@ -1541,7 +2186,25 @@ impl Drop for LightingTraceGpu {
         for bind_group in self.retired_candidate_bind_groups.drain(..) {
             self.device.destroy_bind_group(bind_group);
         }
+        if let Some((bind_group, _)) = self.material_candidate_bind_group.take() {
+            self.device.destroy_bind_group(bind_group);
+        }
+        for bind_group in self.retired_material_candidate_bind_groups.drain(..) {
+            self.device.destroy_bind_group(bind_group);
+        }
+        if let Some((bind_group, _)) = self.evaluator_bind_group.take() {
+            self.device.destroy_bind_group(bind_group);
+        }
+        for bind_group in self.retired_evaluator_bind_groups.drain(..) {
+            self.device.destroy_bind_group(bind_group);
+        }
         for buffer in [self.nodes, self.triangles, self.attributes, self.rays]
+            .into_iter()
+            .flatten()
+        {
+            self.device.destroy_buffer(buffer.id);
+        }
+        for buffer in [self.evaluator_config, self.evaluations]
             .into_iter()
             .flatten()
         {
@@ -1553,13 +2216,27 @@ impl Drop for LightingTraceGpu {
         self.device.destroy_compute_pipeline(self.pipeline);
         self.device
             .destroy_compute_pipeline(self.candidate_pipeline);
+        self.device
+            .destroy_compute_pipeline(self.evaluator_pipeline);
+        self.device
+            .destroy_compute_pipeline(self.material_candidate_pipeline);
         self.device.destroy_shader_module(self.shader);
         self.device.destroy_shader_module(self.candidate_shader);
+        self.device.destroy_shader_module(self.evaluator_shader);
+        self.device
+            .destroy_shader_module(self.material_candidate_shader);
         self.device.destroy_pipeline_layout(self.pipeline_layout);
         self.device
             .destroy_pipeline_layout(self.candidate_pipeline_layout);
+        self.device
+            .destroy_pipeline_layout(self.evaluator_pipeline_layout);
+        self.device
+            .destroy_pipeline_layout(self.material_candidate_pipeline_layout);
         self.device.destroy_bind_group_layout(self.layout);
         self.device.destroy_bind_group_layout(self.candidate_layout);
+        self.device.destroy_bind_group_layout(self.evaluator_layout);
+        self.device
+            .destroy_bind_group_layout(self.material_candidate_layout);
     }
 }
 
@@ -1596,6 +2273,26 @@ fn ensure_resident_buffer(
     required_bytes: u64,
     binding_limit: u64,
 ) -> rhi::BufferId {
+    ensure_resident_buffer_with_usages(
+        device,
+        slot,
+        retired_buffers,
+        allocations,
+        required_bytes,
+        binding_limit,
+        rhi::BufferUsages::STORAGE | rhi::BufferUsages::COPY_DST,
+    )
+}
+
+fn ensure_resident_buffer_with_usages(
+    device: &dyn RenderDevice,
+    slot: &mut Option<ResidentBuffer>,
+    retired_buffers: &mut Vec<rhi::BufferId>,
+    allocations: &mut u64,
+    required_bytes: u64,
+    binding_limit: u64,
+    usages: rhi::BufferUsages,
+) -> rhi::BufferId {
     if let Some(buffer) = slot.filter(|buffer| buffer.capacity_bytes >= required_bytes) {
         return buffer.id;
     }
@@ -1604,10 +2301,7 @@ fn ensure_resident_buffer(
         required_bytes,
         binding_limit,
     );
-    let id = device.create_buffer(&rhi::BufferDescriptor::new(
-        capacity_bytes,
-        rhi::BufferUsages::STORAGE | rhi::BufferUsages::COPY_DST,
-    ));
+    let id = device.create_buffer(&rhi::BufferDescriptor::new(capacity_bytes, usages));
     if let Some(previous) = slot.replace(ResidentBuffer { id, capacity_bytes }) {
         retired_buffers.push(previous.id);
     }
@@ -1664,9 +2358,14 @@ fn trace_one(scene: &BorrowedPackedTraceScene<'_>, ray: TraceRay) -> TraceHit {
                             triangle_index: tri as u32,
                             instance_id: u32::MAX,
                             geometry_id: u32::MAX,
+                            material_index: u32::MAX,
                             material_generation: u32::MAX,
+                            material_revision: u32::MAX,
+                            material_epoch: u64::MAX,
+                            execution_binding: [u32::MAX; 5],
                             uv: [0.0; 2],
                             shading_normal: [0.0; 3],
+                            tangent: [0.0; 4],
                             t,
                             u,
                             v,
@@ -1678,9 +2377,14 @@ fn trace_one(scene: &BorrowedPackedTraceScene<'_>, ray: TraceRay) -> TraceHit {
                         {
                             hit.instance_id = attributes.identity.instance_id;
                             hit.geometry_id = attributes.identity.geometry_id;
+                            hit.material_index = attributes.identity.material_index;
                             hit.material_generation = attributes.identity.material_generation;
+                            hit.material_revision = attributes.identity.material_revision;
+                            hit.material_epoch = attributes.identity.material_epoch;
+                            hit.execution_binding = attributes.identity.execution_binding;
                             hit.uv = attributes.uv;
                             hit.shading_normal = attributes.shading_normal;
+                            hit.tangent = attributes.tangent;
                         }
                     }
                 }
@@ -1805,18 +2509,18 @@ fn slab(b:u32,o:vec3<f32>,d:vec3<f32>,tmin:f32,tmax:f32)->bool{
 fn tri_hit(b:u32,o:vec3<f32>,d:vec3<f32>,tmin:f32,tmax:f32)->vec3<f32>{
  let a=vec3at(b);let e1=vec3at(b+3u)-a;let e2=vec3at(b+6u)-a;let p=cross(d,e2);let det=dot(e1,p);if(abs(det)<=1.0e-8){return vec3<f32>(-1.0);}let inv=1.0/det;let tv=o-a;let u=dot(tv,p)*inv;if(u<0.0||u>1.0){return vec3<f32>(-1.0);}let q=cross(tv,e1);let v=dot(d,q)*inv;if(v<0.0||u+v>1.0){return vec3<f32>(-1.0);}let t=dot(e2,q)*inv;if(t<tmin||t>tmax){return vec3<f32>(-1.0);}return vec3<f32>(t,u,v);
 }
-fn clear_hit(hb:u32,state:u32){hits[hb]=state;for(var i=1u;i<16u;i++){hits[hb+i]=0u;}hits[hb+1u]=0xffffffffu;hits[hb+5u]=0xffffffffu;hits[hb+6u]=0xffffffffu;hits[hb+7u]=0xffffffffu;hits[hb+8u]=0xffffffffu;}
+fn clear_hit(hb:u32,state:u32){hits[hb]=state;for(var i=1u;i<32u;i++){hits[hb+i]=0u;}hits[hb+1u]=0xffffffffu;hits[hb+5u]=0xffffffffu;for(var i=6u;i<16u;i++){hits[hb+i]=0xffffffffu;}}
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid:vec3<u32>){
  let ri=gid.x;if(ri>=arrayLength(&rays)/12u){return;}
- let rb=ri*12u;let hb=ri*16u;let o=vec3<f32>(f(rays[rb]),f(rays[rb+1u]),f(rays[rb+2u]));let tmin=f(rays[rb+3u]);let d=vec3<f32>(f(rays[rb+4u]),f(rays[rb+5u]),f(rays[rb+6u]));var closest=f(rays[rb+7u]);var best_id=0xffffffffu;var best_triangle=0xffffffffu;var bu=0.0;var bv=0.0;var node=0u;var stack:array<u32,64>;var sp=0u;var steps=0u;
+ let rb=ri*12u;let hb=ri*32u;let o=vec3<f32>(f(rays[rb]),f(rays[rb+1u]),f(rays[rb+2u]));let tmin=f(rays[rb+3u]);let d=vec3<f32>(f(rays[rb+4u]),f(rays[rb+5u]),f(rays[rb+6u]));var closest=f(rays[rb+7u]);var best_id=0xffffffffu;var best_triangle=0xffffffffu;var bu=0.0;var bv=0.0;var node=0u;var stack:array<u32,64>;var sp=0u;var steps=0u;
  loop{if(steps>=arrayLength(&nodes)/12u*2u+1u){clear_hit(hb,2u);return;}steps++;let nb=node*12u;if(slab(nb,o,d,tmin,closest)){let count=nodes[nb+8u];if(count>0u){let start=nodes[nb+6u];for(var i=0u;i<count;i++){let ti=start+i;let tb=ti*12u;let h=tri_hit(tb,o,d,tmin,closest);if(h.x>=0.0){closest=h.x;best_id=triangles[tb+9u];best_triangle=ti;bu=h.y;bv=h.z;}}if(sp==0u){break;}sp--;node=stack[sp];}else{let left=node+1u;let right=nodes[nb+7u];let axis=nodes[nb+9u];var near=left;var far=right;if(d[axis]<0.0){near=right;far=left;}if(sp>=64u){clear_hit(hb,2u);return;}stack[sp]=far;sp++;node=near;}}else{if(sp==0u){break;}sp--;node=stack[sp];}}
  if(best_id==0xffffffffu){clear_hit(hb,0u);return;}
- hits[hb]=1u;hits[hb+1u]=best_id;hits[hb+2u]=bitcast<u32>(closest);hits[hb+3u]=bitcast<u32>(bu);hits[hb+4u]=bitcast<u32>(bv);hits[hb+5u]=best_triangle;
- hits[hb+6u]=0xffffffffu;hits[hb+7u]=0xffffffffu;hits[hb+8u]=0xffffffffu;hits[hb+14u]=0u;hits[hb+15u]=0u;
- let ab=best_triangle*20u;if(ab+19u>=arrayLength(&attributes)){return;}
- let ids=vec3<u32>(attributes[ab],attributes[ab+1u],attributes[ab+2u]);if(ids.x==0xffffffffu||ids.y==0xffffffffu||ids.z==0xffffffffu){return;}
- let w=1.0-bu-bv;let uv=vec2<f32>(w*f(attributes[ab+4u])+bu*f(attributes[ab+6u])+bv*f(attributes[ab+8u]),w*f(attributes[ab+5u])+bu*f(attributes[ab+7u])+bv*f(attributes[ab+9u]));let nraw=vec3<f32>(w*f(attributes[ab+10u])+bu*f(attributes[ab+13u])+bv*f(attributes[ab+16u]),w*f(attributes[ab+11u])+bu*f(attributes[ab+14u])+bv*f(attributes[ab+17u]),w*f(attributes[ab+12u])+bu*f(attributes[ab+15u])+bv*f(attributes[ab+18u]));let nlen=dot(nraw,nraw);if(!finite(uv.x)||!finite(uv.y)||!finite3(nraw)||!finite(nlen)||nlen<=1.0e-20){return;}let n=nraw*inverseSqrt(nlen);if(!finite3(n)){return;}hits[hb+6u]=ids.x;hits[hb+7u]=ids.y;hits[hb+8u]=ids.z;hits[hb+9u]=bitcast<u32>(uv.x);hits[hb+10u]=bitcast<u32>(uv.y);hits[hb+11u]=bitcast<u32>(n.x);hits[hb+12u]=bitcast<u32>(n.y);hits[hb+13u]=bitcast<u32>(n.z);
+ let ab=best_triangle*40u;if(ab+39u>=arrayLength(&attributes)){clear_hit(hb,2u);return;}
+ let material_index=attributes[ab+2u];let material_generation=attributes[ab+3u];let material_revision=attributes[ab+4u];let epoch_low=attributes[ab+5u];let epoch_high=attributes[ab+6u];if(attributes[ab]==0xffffffffu||attributes[ab+1u]==0xffffffffu||material_index==0xffffffffu||material_generation==0xffffffffu||material_revision==0xffffffffu||epoch_low==0xffffffffu&&epoch_high==0xffffffffu){clear_hit(hb,2u);return;}
+ for(var proof=7u;proof<12u;proof++){if(attributes[ab+proof]==0xffffffffu){clear_hit(hb,2u);return;}}
+ let w=1.0-bu-bv;let uv=vec2<f32>(w*f(attributes[ab+12u])+bu*f(attributes[ab+14u])+bv*f(attributes[ab+16u]),w*f(attributes[ab+13u])+bu*f(attributes[ab+15u])+bv*f(attributes[ab+17u]));let nraw=vec3<f32>(w*f(attributes[ab+18u])+bu*f(attributes[ab+21u])+bv*f(attributes[ab+24u]),w*f(attributes[ab+19u])+bu*f(attributes[ab+22u])+bv*f(attributes[ab+25u]),w*f(attributes[ab+20u])+bu*f(attributes[ab+23u])+bv*f(attributes[ab+26u]));let traw=vec4<f32>(w*f(attributes[ab+27u])+bu*f(attributes[ab+31u])+bv*f(attributes[ab+35u]),w*f(attributes[ab+28u])+bu*f(attributes[ab+32u])+bv*f(attributes[ab+36u]),w*f(attributes[ab+29u])+bu*f(attributes[ab+33u])+bv*f(attributes[ab+37u]),w*f(attributes[ab+30u])+bu*f(attributes[ab+34u])+bv*f(attributes[ab+38u]));let nlen=dot(nraw,nraw);let tlen=dot(traw.xyz,traw.xyz);if(!finite(uv.x)||!finite(uv.y)||!finite3(nraw)||!finite3(traw.xyz)||!finite(traw.w)||!finite(nlen)||!finite(tlen)||nlen<=1.0e-20||tlen<=1.0e-20||abs(abs(traw.w)-1.0)>1.0e-3){clear_hit(hb,2u);return;}let n=nraw*inverseSqrt(nlen);let tangent=vec4<f32>(traw.xyz*inverseSqrt(tlen),traw.w);if(!finite3(n)||!finite3(tangent.xyz)){clear_hit(hb,2u);return;}
+ hits[hb]=1u;hits[hb+1u]=best_id;hits[hb+2u]=bitcast<u32>(closest);hits[hb+3u]=bitcast<u32>(bu);hits[hb+4u]=bitcast<u32>(bv);hits[hb+5u]=best_triangle;hits[hb+6u]=attributes[ab];hits[hb+7u]=attributes[ab+1u];hits[hb+8u]=material_index;hits[hb+9u]=material_generation;hits[hb+10u]=material_revision;hits[hb+11u]=epoch_low;hits[hb+12u]=epoch_high;for(var proof=0u;proof<5u;proof++){hits[hb+13u+proof]=attributes[ab+7u+proof];}hits[hb+18u]=bitcast<u32>(uv.x);hits[hb+19u]=bitcast<u32>(uv.y);hits[hb+20u]=bitcast<u32>(n.x);hits[hb+21u]=bitcast<u32>(n.y);hits[hb+22u]=bitcast<u32>(n.z);hits[hb+23u]=bitcast<u32>(tangent.x);hits[hb+24u]=bitcast<u32>(tangent.y);hits[hb+25u]=bitcast<u32>(tangent.z);hits[hb+26u]=bitcast<u32>(tangent.w);
 }
 "#;
 
@@ -1841,20 +2545,49 @@ fn luminance(v:vec3<f32>)->f32{return dot(v,vec3<f32>(0.2126,0.7152,0.0722));}
 fn main(@builtin(global_invocation_id) gid:vec3<u32>){
  let ri=gid.x; let rays_per_surface=params.counts.w; if(rays_per_surface==0u||ri>=arrayLength(&rays)/12u){return;}
  let si=ri/rays_per_surface; let local=ri%rays_per_surface; if(si>=params.counts.x||local>=64u){return;}
- let surface=surfaces[si]; let rb=ri*12u; let hb=ri*16u; let base=surface.candidate_range.x+local; if(base>=arrayLength(&candidates)){return;}
+ let surface=surfaces[si]; let rb=ri*12u; let hb=ri*32u; let base=surface.candidate_range.x+local; if(base>=arrayLength(&candidates)){return;}
  var c:Candidate; c.position_source_pdf=vec4<f32>(0.0,0.0,0.0,f(rays[rb+8u])); c.normal_target_pdf=vec4<f32>(0.0,1.0,0.0,0.0); c.radiance_selection_u01=vec4<f32>(0.0,0.0,0.0,0.0); c.visibility_padding=vec4<f32>(0.0);
  c.radiance_selection_u01.w=f(rays[rb+9u]);
  if(!finite(c.radiance_selection_u01.w)||c.radiance_selection_u01.w<0.0||c.radiance_selection_u01.w>=1.0){return;}
  let hit_state=hits[hb]; if(hit_state==2u){c.visibility_padding.x=-1.0;candidates[base]=c;return;} if(hit_state==0u){candidates[base]=c;return;} if(hit_state!=1u){c.visibility_padding.x=-1.0;candidates[base]=c;return;}
- let tri=hits[hb+5u]; if(tri>=params.flags.w||tri>=arrayLength(&outgoing)||tri>=(arrayLength(&triangles)/12u)){c.visibility_padding.x=-1.0;candidates[base]=c;return;} let tc=tri*12u; let ab=tri*20u;
- if(triangles[tc+9u]!=hits[hb+1u]||ab+19u>=arrayLength(&attributes)){c.visibility_padding.x=-1.0;candidates[base]=c;return;}
- if(attributes[ab]==0xffffffffu||attributes[ab+1u]==0xffffffffu||attributes[ab+2u]==0xffffffffu||attributes[ab]!=hits[hb+6u]||attributes[ab+1u]!=hits[hb+7u]||attributes[ab+2u]!=hits[hb+8u]){c.visibility_padding.x=-1.0;candidates[base]=c;return;}
+ let tri=hits[hb+5u]; if(tri>=params.flags.w||tri>=arrayLength(&outgoing)||tri>=(arrayLength(&triangles)/12u)){c.visibility_padding.x=-1.0;candidates[base]=c;return;} let tc=tri*12u; let ab=tri*40u;
+ if(triangles[tc+9u]!=hits[hb+1u]||ab+39u>=arrayLength(&attributes)){c.visibility_padding.x=-1.0;candidates[base]=c;return;}
+ if(attributes[ab]==0xffffffffu||attributes[ab+1u]==0xffffffffu||attributes[ab+2u]==0xffffffffu||attributes[ab+3u]==0xffffffffu||attributes[ab+4u]==0xffffffffu||attributes[ab+5u]==0xffffffffu&&attributes[ab+6u]==0xffffffffu){c.visibility_padding.x=-1.0;candidates[base]=c;return;} for(var proof=7u;proof<12u;proof++){if(attributes[ab+proof]==0xffffffffu){c.visibility_padding.x=-1.0;candidates[base]=c;return;}}
+ if(attributes[ab]!=hits[hb+6u]||attributes[ab+1u]!=hits[hb+7u]||attributes[ab+2u]!=hits[hb+8u]||attributes[ab+3u]!=hits[hb+9u]||attributes[ab+4u]!=hits[hb+10u]||attributes[ab+5u]!=hits[hb+11u]||attributes[ab+6u]!=hits[hb+12u]){c.visibility_padding.x=-1.0;candidates[base]=c;return;} for(var proof=0u;proof<5u;proof++){if(attributes[ab+7u+proof]!=hits[hb+13u+proof]){c.visibility_padding.x=-1.0;candidates[base]=c;return;}}
  let o=vec3<f32>(f(rays[rb]),f(rays[rb+1u]),f(rays[rb+2u])); let d=vec3<f32>(f(rays[rb+4u]),f(rays[rb+5u]),f(rays[rb+6u])); let t=f(hits[hb+2u]); let u=f(hits[hb+3u]); let v=f(hits[hb+4u]);
  if(!finite(t)||!finite(u)||!finite(v)||t<f(rays[rb+3u])||t>f(rays[rb+7u])||u<0.0||v<0.0||u+v>1.00001){c.visibility_padding.x=-1.0;candidates[base]=c;return;}
- let w=1.0-u-v;let uv=vec2<f32>(w*f(attributes[ab+4u])+u*f(attributes[ab+6u])+v*f(attributes[ab+8u]),w*f(attributes[ab+5u])+u*f(attributes[ab+7u])+v*f(attributes[ab+9u]));let nraw=vec3<f32>(w*f(attributes[ab+10u])+u*f(attributes[ab+13u])+v*f(attributes[ab+16u]),w*f(attributes[ab+11u])+u*f(attributes[ab+14u])+v*f(attributes[ab+17u]),w*f(attributes[ab+12u])+u*f(attributes[ab+15u])+v*f(attributes[ab+18u]));let nlen=dot(nraw,nraw);if(!finite(uv.x)||!finite(uv.y)||!finite3(nraw)||!finite(nlen)||nlen<=1.0e-20){c.visibility_padding.x=-1.0;candidates[base]=c;return;}let n=nraw*inverseSqrt(nlen);if(!finite3(n)){c.visibility_padding.x=-1.0;candidates[base]=c;return;}let hit_uv=vec2<f32>(f(hits[hb+9u]),f(hits[hb+10u]));let hit_n=vec3<f32>(f(hits[hb+11u]),f(hits[hb+12u]),f(hits[hb+13u]));if(any(abs(uv-hit_uv)>vec2<f32>(1.0e-5))||any(abs(n-hit_n)>vec3<f32>(1.0e-5))){c.visibility_padding.x=-1.0;candidates[base]=c;return;} let p=o+d*t; let wi=safe_normalize(d); let cos_primary=max(dot(safe_normalize(surface.normal.xyz),wi),0.0); let le=outgoing[tri].xyz; if(!finite3(le)||any(le<vec3<f32>(0.0))){c.visibility_padding.x=-1.0;candidates[base]=c;return;} let target_density=luminance(surface.albedo.xyz*le*(cos_primary/3.141592653589793)); if(!finite(target_density)||target_density<0.0){c.visibility_padding.x=-1.0;candidates[base]=c;return;}
+ let w=1.0-u-v;let uv=vec2<f32>(w*f(attributes[ab+12u])+u*f(attributes[ab+14u])+v*f(attributes[ab+16u]),w*f(attributes[ab+13u])+u*f(attributes[ab+15u])+v*f(attributes[ab+17u]));let nraw=vec3<f32>(w*f(attributes[ab+18u])+u*f(attributes[ab+21u])+v*f(attributes[ab+24u]),w*f(attributes[ab+19u])+u*f(attributes[ab+22u])+v*f(attributes[ab+25u]),w*f(attributes[ab+20u])+u*f(attributes[ab+23u])+v*f(attributes[ab+26u]));let traw=vec4<f32>(w*f(attributes[ab+27u])+u*f(attributes[ab+31u])+v*f(attributes[ab+35u]),w*f(attributes[ab+28u])+u*f(attributes[ab+32u])+v*f(attributes[ab+36u]),w*f(attributes[ab+29u])+u*f(attributes[ab+33u])+v*f(attributes[ab+37u]),w*f(attributes[ab+30u])+u*f(attributes[ab+34u])+v*f(attributes[ab+38u]));let nlen=dot(nraw,nraw);let tlen=dot(traw.xyz,traw.xyz);if(!finite(uv.x)||!finite(uv.y)||!finite3(nraw)||!finite3(traw.xyz)||!finite(traw.w)||!finite(nlen)||!finite(tlen)||nlen<=1.0e-20||tlen<=1.0e-20||abs(abs(traw.w)-1.0)>1.0e-3){c.visibility_padding.x=-1.0;candidates[base]=c;return;}let n=nraw*inverseSqrt(nlen);let tangent=vec4<f32>(traw.xyz*inverseSqrt(tlen),traw.w);if(!finite3(n)||!finite3(tangent.xyz)){c.visibility_padding.x=-1.0;candidates[base]=c;return;}let hit_uv=vec2<f32>(f(hits[hb+18u]),f(hits[hb+19u]));let hit_n=vec3<f32>(f(hits[hb+20u]),f(hits[hb+21u]),f(hits[hb+22u]));let hit_t=vec4<f32>(f(hits[hb+23u]),f(hits[hb+24u]),f(hits[hb+25u]),f(hits[hb+26u]));if(any(abs(uv-hit_uv)>vec2<f32>(1.0e-5))||any(abs(n-hit_n)>vec3<f32>(1.0e-5))||any(abs(tangent-hit_t)>vec4<f32>(1.0e-5))){c.visibility_padding.x=-1.0;candidates[base]=c;return;} let p=o+d*t; let wi=safe_normalize(d); let cos_primary=max(dot(safe_normalize(surface.normal.xyz),wi),0.0); let le=outgoing[tri].xyz; if(!finite3(le)||any(le<vec3<f32>(0.0))){c.visibility_padding.x=-1.0;candidates[base]=c;return;} let target_density=luminance(surface.albedo.xyz*le*(cos_primary/3.141592653589793)); if(!finite(target_density)||target_density<0.0){c.visibility_padding.x=-1.0;candidates[base]=c;return;}
  c.position_source_pdf=vec4<f32>(p,f(rays[rb+8u])); c.normal_target_pdf=vec4<f32>(n,target_density); c.radiance_selection_u01=vec4<f32>(le,c.radiance_selection_u01.w); c.visibility_padding=vec4<f32>(1.0,0.0,0.0,0.0); candidates[base]=c;
 }
 "#;
+
+fn material_candidate_shader_source() -> String {
+    let mut source = CANDIDATE_WGSL.replace(
+        "@group(0) @binding(7) var<storage, read_write> candidates: array<Candidate>;",
+        "@group(0) @binding(7) var<storage, read_write> candidates: array<Candidate>;\n@group(0) @binding(8) var<storage, read> evaluations: array<vec4<f32>>;",
+    );
+    assert!(
+        source.contains("@group(0) @binding(8) var<storage, read> evaluations"),
+        "material candidate shader must expose evaluator output"
+    );
+    let old = "let le=outgoing[tri].xyz; if(!finite3(le)||any(le<vec3<f32>(0.0))){c.visibility_padding.x=-1.0;candidates[base]=c;return;}";
+    let replacement = "let evaluation_base=ri*4u; if(evaluation_base+3u>=arrayLength(&evaluations)){c.visibility_padding.x=-1.0;candidates[base]=c;return;} let evaluation_head=evaluations[evaluation_base]; let evaluation_identity_a=evaluations[evaluation_base+1u]; let evaluation_identity_b=evaluations[evaluation_base+2u]; let evaluation_identity_c=evaluations[evaluation_base+3u]; if(bitcast<u32>(evaluation_head.w)!=1u || bitcast<u32>(evaluation_identity_a.x)!=hits[hb+6u] || bitcast<u32>(evaluation_identity_a.y)!=hits[hb+7u] || bitcast<u32>(evaluation_identity_a.z)!=hits[hb+8u] || bitcast<u32>(evaluation_identity_a.w)!=hits[hb+9u] || bitcast<u32>(evaluation_identity_b.x)!=hits[hb+10u] || bitcast<u32>(evaluation_identity_b.y)!=hits[hb+11u] || bitcast<u32>(evaluation_identity_b.z)!=hits[hb+12u] || bitcast<u32>(evaluation_identity_b.w)!=hits[hb+13u] || bitcast<u32>(evaluation_identity_c.x)!=hits[hb+14u] || bitcast<u32>(evaluation_identity_c.y)!=hits[hb+15u] || bitcast<u32>(evaluation_identity_c.z)!=hits[hb+16u] || bitcast<u32>(evaluation_identity_c.w)!=hits[hb+17u]){c.visibility_padding.x=-1.0;candidates[base]=c;return;} let le=evaluation_head.xyz; if(!finite3(le)||any(le<vec3<f32>(0.0))){c.visibility_padding.x=-1.0;candidates[base]=c;return;}";
+    assert!(
+        source.contains(old),
+        "material candidate shader must replace triangle radiance consumption"
+    );
+    source.replace_range(
+        source
+            .find(old)
+            .expect("candidate radiance expression exists")
+            ..source
+                .find(old)
+                .expect("candidate radiance expression exists")
+                + old.len(),
+        replacement,
+    );
+    source
+}
 
 #[cfg(test)]
 mod tests {
@@ -1974,7 +2707,7 @@ mod tests {
         let (device, _) = descriptor_device();
         let _trace = LightingTraceGpu::new(device.clone());
         let layouts = device.layouts.lock().unwrap();
-        assert_eq!(layouts.len(), 2);
+        assert_eq!(layouts.len(), 4);
         assert_eq!(
             layouts[0].label.as_deref(),
             Some("lighting-trace-gpu-layout")
@@ -2033,7 +2766,7 @@ mod tests {
         let (device, _) = descriptor_device();
         let _trace = LightingTraceGpu::new(device.clone());
         let layouts = device.layouts.lock().unwrap();
-        assert_eq!(layouts.len(), 2);
+        assert_eq!(layouts.len(), 4);
         assert_eq!(
             layouts[1].label.as_deref(),
             Some("lighting-gi-candidate-build-layout")
@@ -2218,7 +2951,7 @@ mod tests {
         )]);
         let packed_bvh = GpuBvhBuffers::from_bvh(&bvh)
             .with_hit_attributes(vec![RayHitAttributeRecord::new(
-                RayHitIdentity::new(3, 19, 7),
+                RayHitIdentity::new(3, 19, 7).with_material_proof(5, 17, 23, [1, 2, 3, 4, 5]),
                 [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
                 [[0.0, 0.0, 1.0]; 3],
             )])
@@ -2238,9 +2971,14 @@ mod tests {
             triangle_index: 0,
             instance_id: 3,
             geometry_id: 19,
+            material_index: 5,
             material_generation: 7,
+            material_revision: 17,
+            material_epoch: 23,
+            execution_binding: [1, 2, 3, 4, 5],
             uv: [0.25, 0.5],
             shading_normal: [0.0, 0.0, 1.0],
+            tangent: [1.0, 0.0, 0.0, 1.0],
             t: 1.0,
             u: 0.25,
             v: 0.5,
@@ -2271,7 +3009,8 @@ mod tests {
                 let c = vec3(triangle, 6);
                 let normal = normalize(cross(sub(b, a), sub(c, a)));
                 RayHitAttributeRecord::new(
-                    prism_render_architecture::ray_scene::RayHitIdentity::new(1, triangle[9], 7),
+                    prism_render_architecture::ray_scene::RayHitIdentity::new(1, triangle[9], 7)
+                        .with_material_proof(5, 17, 23, [1, 2, 3, 4, 5]),
                     [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
                     [normal; 3],
                 )
@@ -3174,11 +3913,15 @@ mod tests {
             )
             .expect("candidate pass fits the parity graph");
         let recorded = graph.execute(device.as_ref(), &queue).unwrap();
-        let hit_bytes = queue.read_buffer(hits, 2 * HIT_WORDS as u64 * 4);
+        let hit_bytes = queue
+            .read_buffer(hits, 2 * HIT_WORDS as u64 * 4)
+            .expect("lighting candidate hit readback must complete");
         let hit_words: &[u32] = bytemuck::try_cast_slice(&hit_bytes).unwrap();
         assert_eq!(hit_words[0], 1, "first candidate ray must hit");
         assert_eq!(hit_words[HIT_WORDS], 0, "second candidate ray must miss");
-        let bytes = queue.read_buffer(candidates, target.candidates_size_bytes);
+        let bytes = queue
+            .read_buffer(candidates, target.candidates_size_bytes)
+            .expect("lighting candidate input readback must complete");
         let actual: &[LightingGiCandidateInput] = bytemuck::try_cast_slice(&bytes).unwrap();
         for (candidate_index, (actual, expected)) in actual.iter().zip(&expected[0]).enumerate() {
             let float_fields = actual
@@ -3326,7 +4069,9 @@ mod tests {
             },
         );
         let recorded = graph.execute(device.as_ref(), &queue).unwrap();
-        let bytes = queue.read_buffer(output, (rays.len() * HIT_WORDS * 4) as u64);
+        let bytes = queue
+            .read_buffer(output, (rays.len() * HIT_WORDS * 4) as u64)
+            .expect("lighting trace output readback must complete");
         let words: &[u32] = bytemuck::try_cast_slice(&bytes).unwrap();
         for (i, hit) in expected.iter().enumerate() {
             let b = i * HIT_WORDS;
@@ -3341,23 +4086,55 @@ mod tests {
                 );
             }
             assert_eq!(words[b + 5], hit.triangle_index, "ray {i} triangle index");
+            if !hit.hit {
+                continue;
+            }
             assert_eq!(words[b + 6], hit.instance_id, "ray {i} instance identity");
             assert_eq!(words[b + 7], hit.geometry_id, "ray {i} geometry identity");
+            assert_eq!(words[b + 8], hit.material_index, "ray {i} material index");
             assert_eq!(
-                words[b + 8],
+                words[b + 9],
                 hit.material_generation,
                 "ray {i} material generation"
             );
+            assert_eq!(
+                words[b + 10],
+                hit.material_revision,
+                "ray {i} material revision"
+            );
+            assert_eq!(
+                words[b + 11],
+                hit.material_epoch as u32,
+                "ray {i} material epoch low"
+            );
+            assert_eq!(
+                words[b + 12],
+                (hit.material_epoch >> 32) as u32,
+                "ray {i} material epoch high"
+            );
+            for (offset, expected_value) in hit.execution_binding.into_iter().enumerate() {
+                assert_eq!(
+                    words[b + 13 + offset],
+                    expected_value,
+                    "ray {i} execution binding word {offset}"
+                );
+            }
             for (offset, expected_value) in hit.uv.into_iter().enumerate() {
                 assert!(
-                    (f32::from_bits(words[b + 9 + offset]) - expected_value).abs() < 1e-5,
+                    (f32::from_bits(words[b + 18 + offset]) - expected_value).abs() < 1e-5,
                     "ray {i} uv word {offset}"
                 );
             }
             for (offset, expected_value) in hit.shading_normal.into_iter().enumerate() {
                 assert!(
-                    (f32::from_bits(words[b + 11 + offset]) - expected_value).abs() < 1e-5,
+                    (f32::from_bits(words[b + 20 + offset]) - expected_value).abs() < 1e-5,
                     "ray {i} shading normal word {offset}"
+                );
+            }
+            for (offset, expected_value) in hit.tangent.into_iter().enumerate() {
+                assert!(
+                    (f32::from_bits(words[b + 23 + offset]) - expected_value).abs() < 1e-5,
+                    "ray {i} tangent word {offset}"
                 );
             }
         }

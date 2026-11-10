@@ -539,6 +539,11 @@ impl FrameGraphBuffers {
                 trace.candidates,
                 trace.radiance,
                 trace.surfaces,
+                trace.material_headers,
+                trace.material_parameters,
+                trace.execution_plans,
+                trace.execution_programs,
+                trace.material_evaluations,
             ]
             .into_iter()
             .flatten()
@@ -548,11 +553,14 @@ impl FrameGraphBuffers {
                     BufferDesc::new(buffer.size_bytes, BufferUsages::STORAGE),
                 );
             }
-            if let Some(params) = trace.params {
-                self.require(
-                    params.id,
-                    BufferDesc::new(params.size_bytes, BufferUsages::UNIFORM),
-                );
+            for (buffer, usage) in [
+                (trace.params, BufferUsages::UNIFORM),
+                (trace.evaluator_config, BufferUsages::UNIFORM),
+            ]
+            .into_iter()
+            .filter_map(|(buffer, usage)| buffer.map(|buffer| (buffer, usage)))
+            {
+                self.require(buffer.id, BufferDesc::new(buffer.size_bytes, usage));
             }
         }
     }
@@ -1405,6 +1413,8 @@ fn append_target_graph(
     let mut trace_hits = None;
     let mut trace_inputs = None;
     let mut trace_pass_dependency = None;
+    let mut trace_evaluator_dependency = None;
+    let mut trace_material_evaluations = None;
     if let Some(trace) = trace {
         let nodes = buffers.import(
             graph,
@@ -1459,6 +1469,80 @@ fn append_target_graph(
         trace_pass_dependency = Some(trace_pass);
         trace_hits = Some(hits);
         trace_inputs = Some((triangles, attributes, rays));
+        if let (
+            Some(material_headers),
+            Some(material_parameters),
+            Some(execution_plans),
+            Some(execution_programs),
+            Some(evaluator_config),
+            Some(evaluations),
+        ) = (
+            trace.material_headers,
+            trace.material_parameters,
+            trace.execution_plans,
+            trace.execution_programs,
+            trace.evaluator_config,
+            trace.material_evaluations,
+        ) {
+            let material_headers = buffers.import(
+                graph,
+                "prism-lighting-native-material-headers",
+                BufferDesc::new(material_headers.size_bytes, BufferUsages::STORAGE),
+                material_headers.id,
+            );
+            let material_parameters = buffers.import(
+                graph,
+                "prism-lighting-native-material-parameters",
+                BufferDesc::new(material_parameters.size_bytes, BufferUsages::STORAGE),
+                material_parameters.id,
+            );
+            let execution_plans = buffers.import(
+                graph,
+                "prism-lighting-native-material-execution-plans",
+                BufferDesc::new(execution_plans.size_bytes, BufferUsages::STORAGE),
+                execution_plans.id,
+            );
+            let execution_programs = buffers.import(
+                graph,
+                "prism-lighting-native-material-execution-programs",
+                BufferDesc::new(execution_programs.size_bytes, BufferUsages::STORAGE),
+                execution_programs.id,
+            );
+            let evaluator_config = buffers.import(
+                graph,
+                "prism-lighting-native-material-evaluator-config",
+                BufferDesc::new(evaluator_config.size_bytes, BufferUsages::UNIFORM),
+                evaluator_config.id,
+            );
+            let mut evaluation_buffer = buffers.import(
+                graph,
+                "prism-lighting-native-material-evaluations",
+                BufferDesc::new(evaluations.size_bytes, BufferUsages::STORAGE),
+                evaluations.id,
+            );
+            let evaluator_pass = graph
+                .try_add_pass_with_dependencies(
+                    "prism-lighting-native-material-evaluator",
+                    prism_render_graph::pass::PassKind::Compute,
+                    PassFlags::SIDE_EFFECT,
+                    trace_pass_dependency.into_iter().collect(),
+                    |builder| {
+                        let _hits = builder.read_storage_buffer(hits);
+                        let _attributes = builder.read_storage_buffer(attributes);
+                        let _material_headers = builder.read_storage_buffer(material_headers);
+                        let _material_parameters = builder.read_storage_buffer(material_parameters);
+                        let _execution_plans = builder.read_storage_buffer(execution_plans);
+                        let _execution_programs = builder.read_storage_buffer(execution_programs);
+                        let _evaluator_config = builder.read_uniform(evaluator_config);
+                        evaluation_buffer = builder.write_storage_buffer(evaluation_buffer);
+                        move |context| trace.record_evaluator_graph(context)
+                    },
+                )
+                .expect("native material evaluator pass fits the host frame graph");
+            buffers.publish(evaluations.id, evaluation_buffer);
+            trace_evaluator_dependency = Some(evaluator_pass);
+            trace_material_evaluations = Some(evaluation_buffer);
+        }
     }
 
     let Some(lighting) = lighting else {
@@ -1716,12 +1800,16 @@ fn append_target_graph(
         assert_eq!(candidate_output.id, lighting.candidates);
         assert_eq!(candidate_surfaces.id, lighting.surfaces);
         assert_eq!(candidate_params.id, lighting.params);
+        let candidate_dependencies = trace_evaluator_dependency
+            .or(trace_pass_dependency)
+            .into_iter()
+            .collect();
         graph
             .try_add_pass_with_dependencies(
                 "prism-lighting-gi-candidate-build",
                 prism_render_graph::pass::PassKind::Compute,
                 PassFlags::SIDE_EFFECT,
-                trace_pass_dependency.into_iter().collect(),
+                candidate_dependencies,
                 |builder| {
                     let _rays = builder.read_storage_buffer(trace_rays);
                     let _hits = builder.read_storage_buffer(hits);
@@ -1730,6 +1818,9 @@ fn append_target_graph(
                     let _radiance = builder.read_storage_buffer(radiance);
                     let _surfaces = builder.read_storage_buffer(surfaces);
                     let _params = builder.read_uniform(params);
+                    if let Some(evaluations) = trace_material_evaluations {
+                        let _evaluations = builder.read_storage_buffer(evaluations);
+                    }
                     candidates = builder.write_storage_buffer(candidates);
                     move |context| trace.record_candidate_graph(context)
                 },
