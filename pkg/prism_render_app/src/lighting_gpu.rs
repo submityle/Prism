@@ -16,6 +16,7 @@ use prism_render_driver::{
     TextureViewDimension, TextureViewId,
 };
 use prism_render_runtime::{RenderRuntime, ReplayHandle};
+use prism_render_shading::{LobeSampleBudget, LobeSamplingPolicy, ShadingQuality};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
@@ -87,6 +88,7 @@ const DIRECTIONAL_BYTES: u64 =
 const PUNCTUAL_BYTES: u64 = (MAX_PUNCTUALS * core::mem::size_of::<LightingPunctualInput>()) as u64;
 const AREA_BYTES: u64 = (MAX_AREAS * core::mem::size_of::<LightingAreaInput>()) as u64;
 pub(crate) const CAMERA_VIEW_BYTES: u64 = core::mem::size_of::<GpuCameraView>() as u64;
+pub(crate) const LOBE_SAMPLE_BUDGET_BYTES: u64 = 8 * core::mem::size_of::<u32>() as u64;
 const GI_CANDIDATE_BYTES: u64 = (MAX_LIGHTING_SURFACES
     * GI_CANDIDATES_PER_SURFACE
     * core::mem::size_of::<LightingGiCandidateInput>()) as u64;
@@ -146,6 +148,42 @@ struct GpuLightingParams {
 struct GpuCameraView {
     position: [f32; 3],
     _padding: f32,
+}
+
+/// Native composite copy of the shading-quality budget. The field order is a
+/// stable eight-word ABI shared with `native/lobe_budget.wesl`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
+struct GpuLobeSampleBudget {
+    sss_separable_taps: u32,
+    sss_preintegration_steps: u32,
+    translucency_profile_samples: u32,
+    multiscatter_dir_samples: u32,
+    multiscatter_march_samples: u32,
+    total_samples: u32,
+    revision: u32,
+    max_full_lobes: u32,
+}
+
+impl GpuLobeSampleBudget {
+    const fn for_quality(quality: ShadingQuality) -> Self {
+        let budget = quality.budget();
+        Self::from_budget(quality, budget, 0)
+    }
+
+    const fn from_budget(quality: ShadingQuality, budget: LobeSampleBudget, revision: u32) -> Self {
+        let budget = budget.clamped();
+        Self {
+            sss_separable_taps: budget.sss_separable_taps,
+            sss_preintegration_steps: budget.sss_preintegration_steps,
+            translucency_profile_samples: budget.translucency_profile_samples,
+            multiscatter_dir_samples: budget.multiscatter_dir_samples,
+            multiscatter_march_samples: budget.multiscatter_march_samples,
+            total_samples: budget.total_samples(),
+            revision,
+            max_full_lobes: LobeSamplingPolicy::for_budget(quality, budget).max_full_lobes(),
+        }
+    }
 }
 
 const PARAM_BYTES: u64 = core::mem::size_of::<GpuLightingParams>() as u64;
@@ -412,10 +450,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 pub(crate) const LIGHTING_COMPOSITE_WGSL: &str = r#"
 // WESL's EscapeMangler keeps imported BRDF types module-qualified. These
 // aliases bridge the raw runtime entry code to that linked, canonical ABI.
-alias SurfaceSample = _2prism_render_scene_shaders_brdf_SurfaceSample;
-alias ShadingFrame = _2prism_render_scene_shaders_brdf_ShadingFrame;
-alias DirectLightSample = _2prism_render_scene_shaders_brdf_DirectLightSample;
-alias PrincipledPre = _2prism_render_scene_shaders_brdf_PrincipledPre;
+alias SurfaceSample = _2prism_render_app_shaders_brdf_SurfaceSample;
+alias ShadingFrame = _2prism_render_app_shaders_brdf_ShadingFrame;
+alias DirectLightSample = _2prism_render_app_shaders_brdf_DirectLightSample;
+alias PrincipledPre = _2prism_render_app_shaders_brdf_PrincipledPre;
 alias PrismSurfaceParameters = _2prism_render_material_shaders_material_PrismSurfaceParameters;
 alias PrismMaterialHeader = _2prism_render_material_shaders_material_PrismMaterialHeader;
 
@@ -537,16 +575,22 @@ fn composite_mask_value(identity: SurfaceIdentity) -> CompositeMaskValue {
     } else {
         raw = bitcast<f32>(header.dynamic_dissolve);
     }
-    if (!finite(raw)) {
+    if (!finite(raw) || raw < 0.0 || raw > 1.0) {
         return CompositeMaskValue(false, 0.0);
     }
-    return CompositeMaskValue(true, clamp(raw, 0.0, 1.0));
+    return CompositeMaskValue(true, raw);
+}
+
+fn composite_lerp(left: f32, right: f32, mask: f32) -> f32 {
+    if (mask == 0.0) { return left; }
+    if (mask == 1.0) { return right; }
+    return left + (right - left) * mask;
 }
 
 fn composite_lerp3(left: vec3<f32>, right: vec3<f32>, mask: f32) -> vec3<f32> {
     if (mask == 0.0) { return left; }
     if (mask == 1.0) { return right; }
-    return mix(left, right, mask);
+    return left + (right - left) * mask;
 }
 
 fn composite_blend_response(
@@ -567,24 +611,24 @@ fn composite_blend_response(
         result.words[2] = direct.z;
     }
     if ((channels & 2u) != 0u) {
-        result.words[3] = mix(left.words[3], right.words[3], mask);
-        result.words[4] = mix(left.words[4], right.words[4], mask);
-        result.words[5] = mix(left.words[5], right.words[5], mask);
+        result.words[3] = composite_lerp(left.words[3], right.words[3], mask);
+        result.words[4] = composite_lerp(left.words[4], right.words[4], mask);
+        result.words[5] = composite_lerp(left.words[5], right.words[5], mask);
     }
     if ((channels & 4u) != 0u) {
-        result.words[6] = mix(left.words[6], right.words[6], mask);
-        result.words[7] = mix(left.words[7], right.words[7], mask);
-        result.words[8] = mix(left.words[8], right.words[8], mask);
+        result.words[6] = composite_lerp(left.words[6], right.words[6], mask);
+        result.words[7] = composite_lerp(left.words[7], right.words[7], mask);
+        result.words[8] = composite_lerp(left.words[8], right.words[8], mask);
     }
     if ((channels & 8u) != 0u) {
-        result.words[9] = mix(left.words[9], right.words[9], mask);
-        result.words[10] = mix(left.words[10], right.words[10], mask);
-        result.words[11] = mix(left.words[11], right.words[11], mask);
+        result.words[9] = composite_lerp(left.words[9], right.words[9], mask);
+        result.words[10] = composite_lerp(left.words[10], right.words[10], mask);
+        result.words[11] = composite_lerp(left.words[11], right.words[11], mask);
     }
     if ((channels & 16u) != 0u) {
-        result.words[12] = mix(left.words[12], right.words[12], mask);
-        result.words[13] = mix(left.words[13], right.words[13], mask);
-        result.words[14] = mix(left.words[14], right.words[14], mask);
+        result.words[12] = composite_lerp(left.words[12], right.words[12], mask);
+        result.words[13] = composite_lerp(left.words[13], right.words[13], mask);
+        result.words[14] = composite_lerp(left.words[14], right.words[14], mask);
     }
     // Native opaque coverage is the shared alpha contract. It is not part of
     // the radiance channel mask and therefore never lerps from authored alpha.
@@ -1356,6 +1400,7 @@ fn composite_static_layout_descriptor() -> BindGroupLayoutDescriptor {
             storage_layout(3, AREA_BYTES, true),
             storage_layout(4, OUTPUT_BYTES, true),
             camera_view_layout(5),
+            lobe_budget_layout(6),
         ],
     }
 }
@@ -1666,7 +1711,7 @@ mod composite_contract_tests {
                 .iter()
                 .map(|entry| entry.binding)
                 .collect::<Vec<_>>(),
-            vec![0, 1, 2, 3, 4, 5]
+            vec![0, 1, 2, 3, 4, 5, 6]
         );
         assert!(static_layout
             .entries
@@ -1868,6 +1913,29 @@ mod composite_contract_tests {
     }
 
     #[test]
+    fn composite_admission_is_canonical_and_mask_is_fail_closed() {
+        let material = include_str!("shaders/composite_material.wesl");
+        for contract in [
+            "composite_execution_identity_is_valid",
+            "header.execution_program_index == identity.left_program_index",
+            "identity.program_kind != identity.left_program_kind",
+            "builtin MaskBlend is the canonical fused Lit/Lit form",
+            "identity.mask_kind != 5u || identity.mask_index > 3u",
+        ] {
+            assert!(
+                material.contains(contract),
+                "missing canonical material admission contract: {contract}"
+            );
+        }
+
+        let shader = LIGHTING_COMPOSITE_WGSL;
+        assert!(shader.contains("raw < 0.0 || raw > 1.0"));
+        assert!(shader.contains("return CompositeMaskValue(true, raw);"));
+        assert!(!shader.contains("mix(left.words"));
+        assert!(shader.contains("composite_lerp(left.words[3]"));
+    }
+
+    #[test]
     fn composite_consumes_native_sampled_material_planes() {
         let shader = LIGHTING_COMPOSITE_WGSL;
         for declaration in [
@@ -1890,6 +1958,25 @@ mod composite_contract_tests {
                 "missing Native sampled channel consumer: {declaration}"
             );
         }
+    }
+
+    #[test]
+    fn lobe_budget_native_uniform_matches_the_wesl_eight_word_abi() {
+        assert_eq!(core::mem::size_of::<GpuLobeSampleBudget>(), 32);
+        assert_eq!(LOBE_SAMPLE_BUDGET_BYTES, 32);
+        let budget = GpuLobeSampleBudget::for_quality(ShadingQuality::High);
+        assert_eq!(budget.sss_separable_taps, 13);
+        assert_eq!(budget.sss_preintegration_steps, 160);
+        assert_eq!(budget.translucency_profile_samples, 48);
+        assert_eq!(budget.multiscatter_dir_samples, 64);
+        assert_eq!(budget.multiscatter_march_samples, 16);
+        assert_eq!(budget.total_samples, 301);
+        assert_eq!(budget.revision, 0);
+        assert_eq!(
+            budget.max_full_lobes,
+            LobeSamplingPolicy::for_quality(ShadingQuality::High).max_full_lobes()
+        );
+        assert_eq!(bytes_of(&budget).len(), 8 * core::mem::size_of::<u32>());
     }
 }
 
@@ -2120,7 +2207,7 @@ mod gbuffer_gpu_contract_tests {
                 0,
                 0,
                 0,
-                1,
+                2,
                 0,
                 1,
                 5,
@@ -2130,13 +2217,13 @@ mod gbuffer_gpu_contract_tests {
             ]),
         );
         let execution_programs = runtime.device().create_buffer(&BufferDescriptor::new(
-            MATERIAL_PROGRAM_ROW_BYTES * 2,
+            MATERIAL_PROGRAM_ROW_BYTES * 3,
             BufferUsages::STORAGE | BufferUsages::COPY_DST,
         ));
         runtime.queue().write_buffer(
             execution_programs,
             0,
-            cast_slice(&[0u32, 0, 1, 0, 0, 1, 0, 1, 0, 1]),
+            cast_slice(&[0u32, 0, 1, 0, 0, 1, 0, 1, 0, 1, 0, 0, 1, 0, 0]),
         );
         let mut pass = lighting
             .target_pass(
@@ -2154,7 +2241,7 @@ mod gbuffer_gpu_contract_tests {
                     execution_plans: Some(execution_plans),
                     execution_plans_size_bytes: MATERIAL_PLAN_ROW_BYTES * 3,
                     execution_programs: Some(execution_programs),
-                    execution_programs_size_bytes: MATERIAL_PROGRAM_ROW_BYTES * 2,
+                    execution_programs_size_bytes: MATERIAL_PROGRAM_ROW_BYTES * 3,
                 },
                 None,
             )
@@ -2335,6 +2422,193 @@ return RegisteredResponse(
             "identity={identity_words:?}"
         );
         assert!(hdr[1..].iter().all(|pixel| *pixel == [0.0; 4]));
+    }
+
+    fn half_rgba_bytes(values: [f32; 4]) -> Vec<u8> {
+        values
+            .into_iter()
+            .flat_map(|value| {
+                prism_render_architecture::particle::half_float_f16::f32_to_f16_bits(value)
+                    .to_le_bytes()
+            })
+            .collect()
+    }
+
+    fn half_rgba_values(values: [f32; 4]) -> [f32; 4] {
+        values.map(|value| {
+            prism_render_architecture::particle::half_float_f16::f16_bits_to_f32(
+                prism_render_architecture::particle::half_float_f16::f32_to_f16_bits(value),
+            )
+        })
+    }
+
+    fn srgb8_to_linear(value: u8) -> f32 {
+        let value = f32::from(value) / 255.0;
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    fn decode_sampled_coat_normal(encoded: [u8; 2]) -> [f32; 3] {
+        let p = [
+            f32::from(encoded[0]) / 255.0 * 2.0 - 1.0,
+            f32::from(encoded[1]) / 255.0 * 2.0 - 1.0,
+        ];
+        let mut normal = [p[0], p[1], 1.0 - p[0].abs() - p[1].abs()];
+        if normal[2] < 0.0 {
+            let reflected = [
+                (1.0 - normal[1].abs()) * if normal[0] >= 0.0 { 1.0 } else { -1.0 },
+                (1.0 - normal[0].abs()) * if normal[1] >= 0.0 { 1.0 } else { -1.0 },
+            ];
+            normal[0] = reflected[0];
+            normal[1] = reflected[1];
+        }
+        normalize(normal, [0.0, 1.0, 0.0])
+    }
+
+    #[test]
+    fn physical_gpu_non_neutral_sampled_material_matches_cpu_golden() {
+        let Some(f) = fixture() else {
+            return;
+        };
+        let queue = f.runtime.queue();
+        let target = f.target;
+
+        // These are deliberately non-neutral across all three sampled planes.
+        // A/B are written as the actual RGBA16F attachment payloads and C is
+        // the actual R32Uint oct-normal/roughness/validity packing.
+        let sampled_a = half_rgba_values([0.23, 0.61, 0.37, 0.65]);
+        let sampled_b = half_rgba_values([0.58, 0.82, 0.72, 0.18]);
+        let sampled_c = [160_u8, 192, 96, 255];
+        let albedo = [128_u8, 96, 64, 255];
+        let write = |texture, bytes: &[u8]| {
+            queue.write_texture(
+                rhi::TextureWrite {
+                    texture,
+                    mip_level: 0,
+                    origin: [0, 0, 0],
+                    size: Extent3d::new_2d(1, 1),
+                },
+                bytes,
+                rhi::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bytes.len() as u32),
+                    rows_per_image: Some(1),
+                },
+            );
+        };
+        for (texture, value) in [
+            (target.position_x_texture(), 0.0_f32),
+            (target.position_y_texture(), 0.0_f32),
+            (target.position_z_texture(), 0.0_f32),
+        ] {
+            write(texture, &value.to_le_bytes());
+        }
+        write(
+            target.normal_texture(),
+            &half_rgba_bytes([0.0, 1.0, 0.0, 1.0]),
+        );
+        write(target.albedo_texture(), &albedo);
+        write(target.surface_id_texture(), &1_u32.to_le_bytes());
+        write(
+            target.surface_data_texture(),
+            &half_rgba_bytes([0.0, 0.0, 0.0, 1.0]),
+        );
+        write(
+            target.surface_material_a_texture(),
+            &half_rgba_bytes(sampled_a),
+        );
+        write(
+            target.surface_material_b_texture(),
+            &half_rgba_bytes(sampled_b),
+        );
+        write(
+            target.surface_material_c_texture(),
+            &u32::from_le_bytes(sampled_c).to_le_bytes(),
+        );
+
+        let mut encoder = CommandEncoder::new();
+        encoder.push_compute_pass(None, composite_commands(f.pass));
+        queue.submit(&[encoder.finish()]);
+        assert!(
+            queue.wait_idle(),
+            "sampled material composite dispatch completes"
+        );
+
+        let hdr = queue
+            .read_texture_rgba16f(target.texture(), WIDTH, HEIGHT)
+            .expect("sampled material HDR readback must complete");
+        let response_bytes = queue
+            .read_buffer(f.pass.response_output, f.pass.response_output_size_bytes)
+            .expect("sampled material ResponseOutput readback must complete");
+        let response_words = response_bytes
+            .chunks_exact(core::mem::size_of::<f32>())
+            .map(|bytes| f32::from_le_bytes(bytes.try_into().expect("f32 response word")))
+            .collect::<Vec<_>>();
+        let center = 0usize;
+
+        let sampled_albedo = albedo.map(srgb8_to_linear);
+        let mut surface = surface_sample_from_parameters(&GpuSurfaceParameters::default());
+        surface.base_color = sampled_albedo[..3].try_into().unwrap();
+        surface.metallic = sampled_a[3];
+        surface.perceptual_roughness = sampled_b[0];
+        surface.ambient_occlusion = sampled_b[1];
+        surface.clearcoat = sampled_b[2];
+        surface.normal_variance = sampled_b[3];
+        surface.clearcoat_roughness = f32::from(sampled_c[2]) / 255.0;
+        surface.coat_normal = decode_sampled_coat_normal([sampled_c[0], sampled_c[1]]);
+
+        let normal = [0.0, 1.0, 0.0];
+        let tangent = normalize(cross([1.0, 0.0, 0.0], normal), [1.0, 0.0, 0.0]);
+        let bitangent = normalize(cross(normal, tangent), [0.0, 0.0, 1.0]);
+        let frame = ShadingFrame {
+            normal,
+            view: normal,
+            tangent,
+            bitangent,
+        };
+        let light = DirectLightSample {
+            direction: [0.0, 1.0, 0.0],
+            illuminance: [4.0, 2.0, 1.0],
+            visibility: 1.0,
+        };
+        let expected = evaluate_principled_direct(surface, frame, light);
+        let neutral = evaluate_principled_direct(
+            surface_sample_from_parameters(&GpuSurfaceParameters {
+                base_color: [sampled_albedo[0], sampled_albedo[1], sampled_albedo[2], 1.0],
+                ..GpuSurfaceParameters::default()
+            }),
+            frame,
+            light,
+        );
+        assert!(
+            expected
+                .into_iter()
+                .zip(neutral)
+                .any(|(sampled, neutral)| (sampled - neutral).abs() > 0.01),
+            "non-neutral sampled A/B/C payload must change the golden response"
+        );
+        for channel in 0..3 {
+            assert!(
+                (hdr[center][channel] - expected[channel]).abs() <= 0.003,
+                "sampled material HDR channel {channel}: GPU {} != CPU {}",
+                hdr[center][channel],
+                expected[channel]
+            );
+            assert!(
+                (response_words[channel] - expected[channel]).abs() <= 0.003,
+                "sampled material ResponseOutput channel {channel}: GPU {} != CPU {}",
+                response_words[channel],
+                expected[channel]
+            );
+        }
+        assert_eq!(hdr[center][3], 1.0, "sampled material HDR coverage");
+        assert_eq!(
+            response_words[15], 1.0,
+            "sampled material response coverage"
+        );
     }
 
     fn normalize(value: [f32; 3], fallback: [f32; 3]) -> [f32; 3] {
@@ -3113,11 +3387,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         assert_eq!(npr_response_words[center * 16 + 15], 1.0);
         assert_eq!(npr_hdr[center][3], 1.0);
 
-        // Select a registered MaskBlend plan. The left endpoint is the
-        // canonical Lit program, the right endpoint is the builtin NPR
-        // program, and the dynamic wetness channel supplies a 0.5 mask.
+        // Select a canonical fused-builtin MaskBlend plan. Both endpoints are
+        // Lit programs, and the dynamic wetness channel supplies a 0.5 mask.
         // Readback proves that the identity prepass and the response-channel
-        // composition both consume the same plan row.
+        // composition both consume the same plan row; split-only NPR is not
+        // allowed to masquerade as this family.
         let mut blend_header = npr_header;
         blend_header.execution_plan_index = 2;
         blend_header.execution_program_index = 0;
@@ -3146,7 +3420,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             .map(|bytes| f32::from_le_bytes(bytes.try_into().expect("f32 response word")))
             .collect::<Vec<_>>();
         for channel in 0..3 {
-            let expected = (valid_hdr[center][channel] + npr_hdr[center][channel]) * 0.5;
+            let expected = valid_hdr[center][channel];
             assert!(
                 (blend_hdr[center][channel] - expected).abs() <= 0.002,
                 "MaskBlend HDR channel {channel}: GPU {} != CPU {expected}",
@@ -3167,6 +3441,35 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         assert_eq!(blend_response_words[center * 16 + 15], 1.0);
         assert_eq!(blend_hdr[center][3], 1.0);
+
+        // An out-of-range dynamic mask is malformed input, not a value to
+        // clamp into a plausible composition. The consumer must clear both
+        // public outputs.
+        blend_header.dynamic_wetness = 1.5_f32.to_bits();
+        queue.write_buffer(
+            headers,
+            0,
+            cast_slice(&[
+                GpuMaterialHeader::default(),
+                blend_header,
+                GpuMaterialHeader::default(),
+                GpuMaterialHeader::default(),
+            ]),
+        );
+        queue.submit(core::slice::from_ref(&commands));
+        assert!(queue.wait_idle());
+        let invalid_mask_hdr = queue
+            .read_texture_rgba16f(target.texture(), WIDTH, HEIGHT)
+            .expect("invalid MaskBlend mask HDR readback must complete");
+        let invalid_mask_response = queue
+            .read_buffer(f.pass.response_output, f.pass.response_output_size_bytes)
+            .expect("invalid MaskBlend mask ResponseOutput readback must complete");
+        assert_eq!(invalid_mask_hdr[center], [0.0; 4]);
+        assert!(invalid_mask_response
+            .chunks_exact(core::mem::size_of::<f32>())
+            .skip(center * 16)
+            .take(16)
+            .all(|word| f32::from_le_bytes(word.try_into().unwrap()) == 0.0));
 
         upload_material(
             GpuMaterialHeader {
@@ -3519,6 +3822,8 @@ pub struct LightingGpuBundle {
     pub surface_identity_layout: BindGroupLayoutId,
     /// Canonical material group-2 layout consumed by the composite resolver.
     pub composite_material_layout: BindGroupLayoutId,
+    /// Native shading-quality budget consumed by the composite lobe helpers.
+    pub lobe_sample_budget: BufferId,
     pub camera_view: BufferId,
     pub composite_bind_group: prism_render_driver::BindGroupId,
 }
@@ -3545,6 +3850,7 @@ pub(crate) struct LightingGpuPass {
     pub surface_identity_layout: BindGroupLayoutId,
     pub composite_material_layout: BindGroupLayoutId,
     pub composite_bind_group: prism_render_driver::BindGroupId,
+    pub lobe_sample_budget: BufferId,
     pub camera_view: BufferId,
     /// Target-specific group-1 binding. It is populated only by the
     /// canonical material-aware target pass.
@@ -3748,6 +4054,7 @@ impl LightingGpuPass {
                 buffer_binding(3, self.areas, AREA_BYTES),
                 buffer_binding(4, self.gi_output, OUTPUT_BYTES),
                 buffer_binding(5, camera_view, CAMERA_VIEW_BYTES),
+                buffer_binding(6, self.lobe_sample_budget, LOBE_SAMPLE_BUDGET_BYTES),
             ],
         })
     }
@@ -4321,8 +4628,18 @@ where
     pub fn new(
         runtime: &mut RenderRuntime<I>,
     ) -> Result<Self, prism_render_runtime::ReplayFailure> {
-        let bundle = runtime.register_replay("lighting-kernels", |device, _queue| {
-            Ok(build_bundle(device))
+        Self::new_with_quality(runtime, ShadingQuality::High)
+    }
+
+    /// Creates the lighting bundle with the native composite's initial
+    /// expensive-lobe quality policy. The policy is part of the replay recipe
+    /// so device replacement recreates both the buffer and its initial upload.
+    pub fn new_with_quality(
+        runtime: &mut RenderRuntime<I>,
+        shading_quality: ShadingQuality,
+    ) -> Result<Self, prism_render_runtime::ReplayFailure> {
+        let bundle = runtime.register_replay("lighting-kernels", move |device, queue| {
+            Ok(build_bundle(device, queue, shading_quality))
         })?;
         Ok(Self {
             bundle,
@@ -4588,6 +4905,7 @@ where
             surface_identity_layout: bundle.surface_identity_layout,
             composite_material_layout: bundle.composite_material_layout,
             composite_bind_group: bundle.composite_bind_group,
+            lobe_sample_budget: bundle.lobe_sample_budget,
             camera_view: bundle.camera_view,
             composite_target_bind_group: None,
             response_output: BufferId::from_parts(0, 0),
@@ -6377,6 +6695,19 @@ fn camera_view_layout(binding: u32) -> BindGroupLayoutEntry {
     }
 }
 
+fn lobe_budget_layout(binding: u32) -> BindGroupLayoutEntry {
+    BindGroupLayoutEntry {
+        binding,
+        visibility: ShaderStages::COMPUTE,
+        ty: BindingType::Buffer {
+            ty: BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: Some(LOBE_SAMPLE_BUDGET_BYTES),
+        },
+        count: None,
+    }
+}
+
 fn buffer_binding(
     binding: u32,
     buffer: prism_render_driver::BufferId,
@@ -6392,7 +6723,11 @@ fn buffer_binding(
     }
 }
 
-fn build_bundle<D: prism_render_driver::RenderDevice>(device: &D) -> LightingGpuBundle {
+fn build_bundle<D: prism_render_driver::RenderDevice, Q: RenderQueue>(
+    device: &D,
+    queue: &Q,
+    shading_quality: ShadingQuality,
+) -> LightingGpuBundle {
     let gi_output = device.create_buffer(&BufferDescriptor {
         label: Some("lighting-gi-output".into()),
         size: OUTPUT_BYTES,
@@ -6411,6 +6746,14 @@ fn build_bundle<D: prism_render_driver::RenderDevice>(device: &D) -> LightingGpu
         usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
+    let lobe_sample_budget = device.create_buffer(&BufferDescriptor {
+        label: Some("lighting-lobe-sample-budget".into()),
+        size: LOBE_SAMPLE_BUDGET_BYTES,
+        usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let lobe_budget = GpuLobeSampleBudget::for_quality(shading_quality);
+    queue.write_buffer(lobe_sample_budget, 0, bytes_of(&lobe_budget));
     let directionals = device.create_buffer(&BufferDescriptor {
         label: Some("lighting-directional-lights".into()),
         size: DIRECTIONAL_BYTES,
@@ -6543,6 +6886,7 @@ fn build_bundle<D: prism_render_driver::RenderDevice>(device: &D) -> LightingGpu
             buffer_binding(3, areas, AREA_BYTES),
             buffer_binding(4, gi_output, OUTPUT_BYTES),
             buffer_binding(5, camera_view, CAMERA_VIEW_BYTES),
+            buffer_binding(6, lobe_sample_budget, LOBE_SAMPLE_BUDGET_BYTES),
         ],
     });
 
@@ -6565,6 +6909,7 @@ fn build_bundle<D: prism_render_driver::RenderDevice>(device: &D) -> LightingGpu
         composite_target_layout,
         surface_identity_layout,
         composite_material_layout,
+        lobe_sample_budget,
         camera_view,
         composite_bind_group,
     }

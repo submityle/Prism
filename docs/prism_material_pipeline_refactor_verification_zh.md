@@ -109,6 +109,14 @@ target/debug/deps/prism_render_scene-52519585a36c04ae shading_resolve_wesl_compi
 
 **当前仍未完成**：完整 default main render pass 的 publication/采样/readback、跨适配器图像 parity，以及需要 direct per-material authored binding 的非-VT 路径仍未闭合。
 
+## 0.5.6 2026-11-10 Native composite canonical family/channel gate
+
+- Native composite 消费侧现在再次校验 `execution_program_index` 必须属于 identity 的 left/right arm，且 selected `program_kind` 必须与该 arm 一致；builtin `MaskBlend` 只接受可由当前 identity ABI 唯一推导的 Lit/Lit `FusedBuiltin` 形状，含 registered arm 的 blend 才进入 composition。失配不再把 NPR/Unlit split-only arm 冒充 fused builtin。
+- `MaskBlend` 的 channel/domain 组合继续按 canonical 16-word response 合同严格匹配（FullRadiance=31、DirectOnly=1、Custom 仅允许 1..31）；当前 Native composite 只接受 dynamic channel mask（kind 5、index 0..3），vertex/UV/region/texture mask 仍 fail-closed。越界或非有限动态 mask 不再 clamp，而是清零 HDR 与 `ResponseOutput`；所有 blended lanes 使用端点保护的线性插值。
+- CPU/source 门禁 `cargo test -p prism_render_app --lib composite_contract_tests -- --nocapture`：**11 passed / 0 failed**，包含新增 admission/mask/插值契约断言。
+- 严格 GPU readback `PRISM_REQUIRE_GPU=1 ... physical_gpu_surface_encode_gbuffer_readback_and_composite_close_the_contract` 在当前环境因没有 adapter 于 fixture 初始化处失败，**未产生 GPU 通过证据**；不是 shader assertion 失败。
+- 该切片仍不等于 P0-material 完成：SurfaceIdentity ABI 没有显式 family word，因此消费侧只能对可由 arm 形状推导的 family 做准入；builtin NPR/Unlit-only MaskBlend、非 dynamic mask、完整默认主帧 golden parity、完整 texture/VT SurfaceData 和跨 adapter/backend 仍未闭合。
+
 ## 0.6 2026-10-21 材质 schema / ABI / authoring 干净构建复验
 
 - 当前工作树下 `cargo test -p prism_material_schema --lib --jobs 1`：**32 passed / 0 failed**。
