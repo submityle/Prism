@@ -244,6 +244,54 @@ fn nodedef_convert_preserves_components_across_equal_width_numeric_types() {
 }
 
 #[test]
+fn nodedef_aliases_bind_to_canonical_pcm_author_nodes() {
+    let document = parse_materialx(
+        r#"<materialx>
+      <nodedef name="ND_plus" node="plus"><input name="a" type="float"/><input name="b" type="float"/><output name="out" type="float"/></nodedef>
+      <nodedef name="ND_mult" node="mult"><input name="a" type="float"/><input name="b" type="float"/><output name="out" type="float"/></nodedef>
+      <nodedef name="ND_blend" node="blend"><input name="a" type="float"/><input name="b" type="float"/><input name="t" type="float"/><output name="out" type="float"/></nodedef>
+      <nodegraph name="g">
+        <plus name="plus" nodedef="ND_plus"><input name="a" type="float" value="1"/><input name="b" type="float" value="2"/></plus>
+        <mult name="mult" nodedef="ND_mult"><input name="a" type="float" value="2"/><input name="b" type="float" value="3"/></mult>
+        <blend name="blend" nodedef="ND_blend"><input name="a" type="float" value="0"/><input name="b" type="float" value="1"/><input name="t" type="float" value="0.25"/></blend>
+      </nodegraph>
+    </materialx>"#,
+    )
+    .expect("authoring aliases satisfy the nodedef contract");
+    let graph = &document.nodegraphs[0];
+    let cases = [
+        ("plus", "org.prism.author_node.materialx.add", "3"),
+        ("mult", "org.prism.author_node.materialx.multiply", "6"),
+        ("blend", "org.prism.author_node.materialx.mix", "0.25"),
+    ];
+    for (node_name, uid, expected) in cases {
+        let node = graph
+            .nodes
+            .iter()
+            .find(|node| node.name == node_name)
+            .expect("alias instance exists");
+        assert_eq!(
+            author_node_manifest(&document, node)
+                .expect("alias binding resolves")
+                .expect("alias has a PCM author-node identity")
+                .uid(),
+            uid
+        );
+        let value = evaluate_connection(
+            &document,
+            graph,
+            &Connection {
+                node: Some(node_name.into()),
+                output: Some("out".into()),
+                nodegraph: None,
+            },
+        )
+        .expect("alias evaluates through its canonical operator");
+        assert_eq!(value.value, expected);
+    }
+}
+
+#[test]
 fn graph_backed_nodedef_keeps_graph_semantics_without_builtin_author_node_alias() {
     let document = parse_materialx(
         r#"<materialx>

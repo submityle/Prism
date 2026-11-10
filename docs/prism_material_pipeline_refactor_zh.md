@@ -9,7 +9,7 @@
 > 核心命题：**没有全局硬顶，不做运行时塌缩，也不做 per-pixel 预算裁剪。模型开放可扩展，每材质按声明静态特化成它确切需要的瓣集与特征——"界"是每材质编译期事实，不是全局天花板。分层在烘焙期解析成同参数化纹理空间混合（层数天然不限）；距离/性能靠纹理预过滤 + 高光抗锯齿 + 静态置换 + 采样缩放，全程无损、确定、跨平台。**
 > 规范参数化：**运行时 über 以 OpenPBR Surface（ASWF/Adobe/Autodesk 2024）为规范核心，Prism über 是 OpenPBR 的真超集**——`Prism über = OpenPBR Surface（全字段） ∪ { NPR_FACE 私有瓣 } ∪ { 开放词汇表后续瓣 }`。现有 7 瓣只是今天未补齐的实现子集；补齐缺口（thin_film 虹彩、coat/fuzz/subsurface 全字段等）是对开放词汇表的**加法扩充**，不是改架构。超集成立的三条硬约束见 §4.5（纯 OpenPBR 子集合规对拍 / 扩展位段隔离 / 向下投影）。NPR_FACE 作为 OpenPBR 之外的 Prism 私有瓣服务 NPR。
 > 四线正交：**PBR / NPR / 混合 / 自定义不是四条管线，而是同一条 OpenPBR über 上的正交响应模式**，由 `axis.rs` 的 `illumination` 轴 + `render_class` + 可选 `custom_program` 钩子选择；共享同一套参数解包、per-tile 分类与降级。
-> 最后更新：2026-10-13（v10 结构性重构 + P2-i 第三类 kind：PCM 能力基座从“升级方向”提升为顶层 §5（“超集”的完整模型）；原 §5–§15 顺延为 §6–§16；原 §16“设计升级方向”收敛为纯可选演进并顺延为 §17；全文章节与交叉引用整体重编号；补记材质 VT 的 source/residency/upload 生命周期已部分接线，但主渲染闭环仍未完成，以及邻页 gutter CPU 地基与其生命周期边界。）
+> 最后更新：2026-11-10（Native composite 当前状态以核验文档 §0.0/§7.19 为准；P2-h 原理化分层 BSDF 核心公式已完成，`reference_pt/openpbr.rs` 已有多瓣响应与混合采样实现，剩余是 adapter/生产链的组合 parity、GPU/backend 与场景级验收；GI evaluator 已进入生产调度但仍是无纹理 builtin Unlit 切片。作者层新增受限 `nodedef` → `author_node` 语义闭环：`plus`/`mult`/`blend` 只作为 `add`/`multiply`/`mix` 的作者语法别名，不产生新的 runtime identity；完整 MaterialX 图、编辑器与 MaterialArtifact 接入仍未完成。）
 
 ---
 
@@ -510,7 +510,7 @@ MaterialX/OpenPBR 的程序化节点（noise/curve/blend）在烘焙期**烘到�
 
 ## 8. 运行层 ABI v6（破坏性，不保留 v4，无硬顶）
 
-> **实现状态注记（2026-10-20）**：当前 `MATERIAL_ABI_VERSION = 6`。8-word 材质纹理行已携带 `texture_id + width/height + page_size + generation`；source snapshot、visibility feedback、bounded page producer、双 slice completion-gated publication、material group 的 page-table/atlas 绑定，以及 shader 的 VT hit/coarse-mip/direct/default fallback 均已有实现。bootstrap/residency 现在按已发布材质实际引用集合裁剪，避免无关 image 抢占 page capacity。仍不能宣称完整 VT 完成：非 bindless authored-texture fallback、source publication 与 material row 的同帧原子握手、跨适配器/主 render pass 图像级门禁仍待完成；旧提案中的 `vt_page_offset/count` 不是当前 ABI 字段。
+> **实现状态注记（2026-11-10）**：当前 `MATERIAL_ABI_VERSION = 6`。8-word 材质纹理行携带 `texture_id + width/height + page_size + generation`；source snapshot、visibility feedback、bounded page producer、双 slice completion-gated publication、material group page-table/atlas 绑定及 shader VT hit/coarse-mip/direct/default fallback 均已有实现。bootstrap/residency 按已发布材质实际引用集合裁剪；publication completion 后同帧重新发布受影响 material rows，确保 row 与 active VT revision 一起可见。portable non-bindless producer 现在接受所有单层 `MaterialVtFormat` 与非默认 source page geometry，选择完整 authored mip 并归一化为 RGBA8 portable tile；多层、无完整 authored mip 或非法 source 仍 fail-closed。仍未闭合：默认主 render pass 全链图像级 parity、跨适配器门禁及 direct per-material authored binding 路径。旧提案中的 `vt_page_offset/count` 不是当前 ABI 字段。
 
 ### 8.1 SpecializationId（去掉 tier，纯正交轴 + 开放 lobe_mask）
 ```
@@ -614,9 +614,10 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   generation 失配、越界索引与 completion/reclaim 契约。默认没有真实 adapter 时安全跳过；
   设置 `PRISM_REQUIRE_GPU=1` 才将 adapter/device/能力不满足升级为失败，用于有真实 GPU 的
   发布验证。它验证的是 Material-VT ABI、消费者与生命周期契约，**不等价于该测试本身证明**
-  主 render pass、residency producer 或完整 atlas 生产链路的端到端硬件门禁；其中
-  Material-VT 页表消费已经在 `shading_resolve` 接线，尚未接入生产 resolve 的是独立 P3
-  shade-cache atlas/page-table。
+  主 render pass、residency producer 或完整 atlas 生产链路的端到端硬件门禁；Material-VT
+  页表消费已在 `shading_resolve` 接线。独立 P3 shade-cache 的 atlas/page-table consumer
+  也已接入 group 8；当前未闭合的是 shade jobs 到 active page store 的生产 publication
+  生命周期，以及默认主 render pass 的端到端硬件 readback/parity。
 
 - **当前工作树的 Material-VT 接线证据（2026-10-13）**：已提交的
   `07cd064cc` 接入材质主 bind group 的 VT 资源绑定，`a51547db6` 接入
@@ -632,7 +633,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   引用，且其 parity 测试仍使用 test-owned bind group；当前已有的 generation/layout 门禁
  只能证明 ABI/搜索契约，不能据此宣称主 `MaterialBindGroup`/resolve 已完成真实 adapter
  端到端硬件验证；这不表示 `shading_resolve` 缺少 Material-VT 页表消费，该消费已经接线。
- 仍未接入生产 resolve 的是独立 P3 shade-cache atlas/page-table。当前已固化下一阶段的真实 ABI 前置契约：producer 必须随每个已发布页提供 per-pixel page index 与包含 atlas origin、chart extent、chart UV bounds、generation/epoch、page size/channel 的 `GpuShadeResolvePage`；resolve 不得从 material UV 或缺少 object/chart 身份的 WorkItem 推断 page。该契约尚未接入 bind group、producer publication 或 shader sampling，因此不能宣称 P3 consumer 已完成。
+独立 P3 shade-cache atlas/page-table 的 resolve consumer 已接入 `shading_resolve` group 8：writer 暴露 lookup/page-table/resolve-page/chart-info/atlas，consumer 依据显式 chart provenance 执行 page-local lookup、mip fallback 与 generation/epoch/channel/atlas 校验。仍未完成的是 shade jobs 到 active page store 的生产 publication 生命周期，以及默认主 render pass 端到端硬件 readback/parity；不能由独立 consumer slice 宣称 P3 shade-cache 系统闭环完成。
   当前已接入主 visibility attachments → readback → typed demand registry 的真实 GPU
   feedback bridge，并由材质 producer 消费；无有效 feedback 时仍保留确定性的受限 bootstrap。
   尚未完成的是把完整主 render pass（而非 production group-1 + test-owned wrapper）纳入
@@ -666,7 +667,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 > 2. **P1 — 全帧质量与性能门禁**：specular AA 图像级门禁、贵瓣预算对画质/成本的影响、SSS/透射质量档、GPU timing 与代表性后端验收。数值正确性和生产全帧接线分别报告。
 > 3. **P2 — Lighting/GI 的权威材质求值**：secondary hit 必须带可验证的 instance/geometry/material generation identity，重建 UV、平滑法线/切线并消费同一材质 ABI；覆盖 Lit、纹理、动态通道与 emissive。当前预烘焙 triangle radiance / untextured Builtin Unlit slice 不算完成。
 > 4. **P3 — 作者链完整性**：完整 MaterialX graph/节点求值与 procedural→VT、`author_node`/nodedef 真正映射和往返、编辑器集成。明确拒绝 unsupported node 是安全行为，不等于支持了完整节点集。
-> 5. **P4 — 扩展 path-traced reference**：作为独立 oracle 与 regression 参考，扩展粗糙漫反射、金属/镜面、透射、SSS、sheen、thin-film、glint 和全场景 parity；它不进入实时运行时依赖，也不替代生产路径验收。
+> 5. **P4 — 完善 path-traced reference parity**：独立 `reference_pt::OpenPbrMaterial` 已覆盖 base/EON、metallic/specular、transmission、coat、sheen、subsurface、thin-film/iridescence、glint 的响应，并有五类 proposal 的混合 `sample/pdf`；后续工作是把这些已实现响应扩展到 adapter 的逐瓣/组合 conformance、真实纹理与材质提取、多 bounce 场景图像 parity、GPU/backend parity。它不进入实时运行时依赖，也不替代生产路径验收。
 > 6. **P5 — 长期能力**：shade-cache 扩展、temporal reuse、spectral rendering、随机单瓣采样与高级压缩/缓存；只有 P0–P2 的生产闭环有证据后再扩张。
 >
 > `M0` 编译、测试与生成物一致性是所有阶段持续有效的准入门禁，不另算一项材质功能。2026-10-21 的本地复验仅通过 schema 32、codegen 4 产品、header ABI 4、authoring 39 项；全量 render-material test 因磁盘不足未执行完成，scene 全帧/跨后端门禁也未执行，因此上述生产阶段仍为进行中。
@@ -693,7 +694,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 | P1-g | 自描述反射瓣 schema：lobe 定义（字段名/位宽/置换 key）数据化，解包/分类/对拍从 schema 生成（§17.5） | 工具链+内部布局 | P1 |
 | P2-f ✅ | 超集合规门禁 + 向下投影导出器（§4.5/§17）：**参数块层 + 响应层均已落地**——独立 oracle（规范逐式转写、与实时零共享）+ **白炉能量门禁覆盖规范 §Testing 全部配置**（principled 8 + Cloth(fuzz) + Subsurface，共 10 个，全部 1.00±2%）+ **真机 GPU 对拍**（`albedo_table_gpu_parity`，4 张表 × 561 采样点）。全部对齐在**语义/标识符/能量不变量**层，不照抄参考计算路径（各向异性宽度映射等仍用引擎统一实现，规范曲线只作对照）。`refracted_coat_dir` 是规范给出的**与 `specular_ior_ratio` 二选一**的等价路径，Prism 选后者，不属缺口 | 新测试+导出路径 | P2 |
 | P2-g | 运行时动态参数通道（wetness/snow/damage/dissolve 等少量动态轴，烘焙静态 über + 运行时解析式调制，§17.1）。**第一片已落地**：header 4 word 动态段 + 四轴解析调制（CPU/WESL 孪生）+ dissolve 覆盖度接进 alpha test / OIT blend + 真机对拍，见 §13.a | header 加动态段 | P2 |
-| P2-h | 原理化分层 BSDF（coat/base 能量耦合 + coat_darkening，§17.2） | 无（改 BSDF+测试） | P2 |
+| P2-h ◐ | 原理化分层 BSDF（coat/base 能量耦合 + coat_darkening，§17.2）：实时 CPU/WESL 与 GPU resolve 有局部实现；独立 path-traced reference 已有多瓣 OpenPBR 响应、路径传输与混合采样，adapter 已能映射多瓣 OpenPBR 输入，并对 EON/clearcoat 受限输入做 CPU 对拍 | 剩余 adapter 的逐瓣/组合 parity、真实材质/纹理提取、GPU/backend 与场景 parity；不是待建基础 reference | P2 |
 | P3-d | 光谱提升（hero-wavelength，仅 RT twin / 离线参考，不进实时主线，§17.3） | 无（RT-only 分支） | P3 |
 | P3-e | 随机单瓣采样（blue-noise，贵瓣按预算随机选瓣 + TAA，§17.4） | 无（pass uniform） | P3 |
 | 开放瓣 | glint / 测量 BRDF·BTF 瓣作为开放词汇表成员落地（§17.6）。**两者均已全链落地**：glint（槽 17，计数式估计量接进 über 高光）与测量 BRDF（槽 18，纹理行 provider + 图集三线性查表，逐光源进 principled 积分器），见 §13.a | 内部 enum 开放化 | P2+ |
@@ -718,7 +719,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 
 - **P2-i 第六类 kind 组：identity-only extensions 声明化（provider / transfer / downgrade / composite + author_node 词表）**（§5.2 / §17.5）
   - **动机**：`PRISM_IDENTITY_ONLY` 里的 provider / transfer / downgrade / composite 仍完全是 `builtin.rs` 手写表；它们没有 header slot，但身份、namespace/vendor/stability、caps、view-dependence 与 promotion 语义和其他 kind 完全相同，不能因为“不占槽”就留在 schema 之外。
-  - **做法**：新增 `IdentityKind`（provider / transfer / downgrade / author_node / composite）与统一的 `[[identity_extension]]` record；`validate()` 让这些行与 lobe/channel/response_mode/cache_aux 共用同一个全局 uid 空间；codegen 产出 `IdentityExtensionLayout` + `SURFACE_IDENTITY_EXTENSIONS`（按 kind、id 排序），author_node 的 kind 词汇与 hook ABI 就位，实例等待 §4 编辑器前端（显式 TODO）。
+  - **做法**：新增 `IdentityKind`（provider / transfer / downgrade / author_node / composite）与统一的 `[[identity_extension]]` record；`validate()` 让这些行与 lobe/channel/response_mode/cache_aux 共用同一个全局 uid 空间；codegen 产出 `IdentityExtensionLayout` + `SURFACE_IDENTITY_EXTENSIONS`（按 kind、id 排序）。`author_node` 的 kind 词汇与 hook ABI 已定义，但实例及语义映射尚未实现，归入 §4 作者链未完成项。
   - **平价门禁**：`pcm_parity` 双向校验 5 条已注册 identity-only 行（2 provider + transfer + downgrade + composite）的 uid、kind、namespace、vendor、stability、requires_caps、view_dependent，并断言它们全部保持 `registry_slot() == None`（identity-only 不得偷占 header 摘要）。
   - **门禁**：`prism_material_schema` **19**；`prism_render_material` 851+2+1+**7**+6；`prism_material_pcm` 28；`prism_render_shading --lib` 3377；`prism_render_scene --lib` 1602；真机 GPU 全包 **72 passed / 2 ignored**。
 
@@ -1024,17 +1025,17 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   - 结果：**specular 组全部补齐**（§4.4 该行转 ✅）。
 
 - **P1-f（第三个 lobe 组）OpenPBR base 组：`base_weight` + `diffuse_roughness` 端到端落地**（§4.4 / §17.2）
-  - 范围：给 über 的 base 层补 `OpenPBR` base 组两项——`base_weight`（缩放整层 base diffuse+specular）与 `diffuse_roughness`（base 漫反射的微观坡度粗糙度，走 Oren-Nayar）。
+  - 范围：给 über 的 base 层补 `OpenPBR` base 组两项——`base_weight`（缩放整层 base diffuse+specular）与 `diffuse_roughness`（base 漫反射的微观坡度粗糙度，走 EON：Fujii Oren-Nayar 加互易多次散射补偿）。
   - **零字长代价**：core 原本有 2 个填充字（`_pad0`/`_pad1`），本项**原地复用**它们，所以 `SURFACE_CORE_WORDS` 仍是 **12**、`SURFACE_MAX_WORDS` 仍是 52——core 从"12 字含 2 填充"变成"12 字全有效"。这是 §4.4"补字段是加法"在 core 上的第一次实证。
-  - **默认即恒等**：`base_weight = 1.0`（乘 1 逐位不变）、`diffuse_roughness = 0.0`（Oren-Nayar 在 σ=0 时 A=1、B=0，因子恰为 1.0，逐位退化为 Lambert）。既有金标准全部保持。
-  - **依据**：Oren-Nayar 走仓库自带 path-traced oracle `pkg/prism_render_architecture/src/reference_pt/oren_nayar.rs` 的 trig-free "qualitative"（Gotanda/Fujii）形式——同样的 A/B 系数（0.33/0.09/0.5/0.45）、同样的 `s = v·l − cos_o·cos_i` 与 Fujii `t` 分母、同样的 `MIN_T` 地板。作者侧 `diffuse_roughness ∈ [0,1]` 到 σ(弧度) 的映射取 `σ = rough · π/2`，这是**显式的单位约定**（文档注明），不是物理断言；σ=0 一定是 Lambert。
+  - **默认即恒等**：`base_weight = 1.0`（乘 1 逐位不变）、`diffuse_roughness = 0.0`（EON 在 σ=0 时补偿精确为零，Fujii 项退化为 Lambert）。既有金标准全部保持。
+  - **依据**：实时侧与独立 path-traced oracle 分别实现同一 OpenPBR EON 方程；reference 侧为 `pkg/prism_render_architecture/src/reference_pt/eon.rs`，包含独立 `Ê_ON`/`⟨Ê_ON⟩` 查表、`EON_comp`、cosine sampling/PDF 与白炉门禁。作者侧 `diffuse_roughness ∈ [0,1]` 到 σ(弧度) 的映射取 `σ = rough · π/2`，这是**显式的单位约定**（文档注明），不是物理断言；σ=0 一定是 Lambert。
   - 代码：schema core 两 pad → 两字段（字长不变）；`GpuSurfaceCore` 同步换位、fat `GpuSurfaceParameters` +2 字段（`_pad_tail` 变 `[f32;3]`，144→176 B 仍 16 字节对齐）；regenerated `material_unpack.wesl`；shade-time `SurfaceSample`（CPU + WESL）+ 桥接；BSDF 双线 **principled**（`lighting.rs` / `brdf.wesl`，含逐位孪生的 `oren_nayar_factor`）。
   - 门禁：`cargo test -p prism_render_shading --lib` **3292 通过**（新增：σ=0 在任意几何上恰为 1.0 且全域有限非负、`base_weight = 0` 正好只剩 emissive、掠射下粗糙腔体回射更强）、`cargo test -p prism_render_scene --lib` **1602 通过**（shader link 48）、`cargo test -p prism_material_schema` 13 通过、`cargo test -p prism_render_material` 826+6+2 全绿、`--features bevy` 编译干净；touched 文件 clippy 无告警。
   - 延伸：**Clearcoat 瓣的 base 层也已消费这两项**（见下一条），所以"有 coat 的材质"同样受 `base_weight` / `diffuse_roughness` 控制。Cloth / Subsurface 是各自的 shading class、有自己的 diffuse law（cloth 的 wrap/subsurface、subsurface 的 wrap+back-transmission），不套 V-cavity matte 模型，故不接 `diffuse_roughness`。
 
 - **P1-f（base 组延伸）把 `base_weight` / `diffuse_roughness` 接进 Clearcoat 瓣的 base 层**（§4.4 / §17.2）
-  - 范围：上一项只让 **principled über base** 消费 base 组；但车漆/漆木这类"base + coat"材质走的是 Clearcoat shading class，其 base 层当时仍不受 `base_weight`/`diffuse_roughness` 控制。本项把同一对参数接进 Clearcoat 瓣的 base 层：`diffuse_roughness` 走同一个 `oren_nayar_factor`（CPU/WESL 逐位孪生），`base_weight` 同样按 `1.0` 恒等缩放。
-  - 代码：`pkg/prism_render_shading/src/clearcoat.rs` 与 `pkg/prism_render_scene/src/shaders/clearcoat.wesl`（后者 import `brdf.wesl` 的 `oren_nayar_factor`）；`lighting.rs::oren_nayar_factor` 提为 `pub(crate)` 供同 crate 复用。
+  - 范围：上一项只让 **principled über base** 消费 base 组；但车漆/漆木这类"base + coat"材质走的是 Clearcoat shading class，其 base 层当时仍不受 `base_weight`/`diffuse_roughness` 控制。本项把同一对参数接进 Clearcoat 瓣的 base 层：`diffuse_roughness` 走同一个 EON（Fujii Oren-Nayar + `EON_comp`）模型，`base_weight` 同样按 `1.0` 恒等缩放。
+  - 代码：`pkg/prism_render_shading/src/clearcoat.rs` 与 `pkg/prism_render_scene/src/shaders/clearcoat.wesl`（后者复用 `brdf.wesl` 的 EON 计算）；实时与 reference 的 `ClearcoatDiffuse` 均按同一 `sigma = rough · π/2` 口径消费。
   - 门禁：`cargo test -p prism_render_shading --lib` **3294 通过**（新增：`base_weight = 0` 且无 coat 时正好只剩 emissive、有 coat 时 coat 高光不受 `base_weight` 影响；掠射下粗糙的**带 coat** base 回射更强）、`cargo test -p prism_render_scene --lib` **1602 通过**（shader link 48）；touched 文件 clippy 无告警。
   - **刻意偏差（模型正确性）**：`base_diffuse_roughness` **不**接进 Cloth / Subsurface——织物与次表面有各自的漫反射律（wrap、wrap + back-transmission），把 V-cavity matte 套上去是**错的模型**，不是缺接。这条偏差在 schema 注释与本文双向注明。
 
@@ -1117,7 +1118,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
     - 顺带修复：专用 clearcoat 瓣 `pkg/prism_render_shading/src/clearcoat.rs::evaluate_clearcoat_direct` 的 base 多散射补偿此前仍是 P0-a 之前的粗糙 `1 - 0.28·rough²` 标量，与升级后的主瓣脱钩；现统一改走 `multiscatter::multiscatter_direct`，恢复「无 coat 时 base == 原理化瓣」不变量（`zero_clearcoat_matches_principled_base` 对拍）。
   - 门禁：`cargo test -p prism_render_shading --lib`（3192 通过，含新增 `clearcoat_two_pass_coupling_identity_and_grazing_darkening`：coat=0 恒等 + 掠射压暗强于正入射，及回绿的 `zero_clearcoat_matches_principled_base`）、`cargo test -p prism_render_scene --lib shading::resolve::shader_tests`（48 通过，编译 brdf.wesl 两程路径）；touched 文件 clippy 干净、已 rustfmt。
   - **后续已落地**：`coat_darkening` 按规范 `general_darkening_formula` 接上（`E_F` 闭式拟合 + `K = lerp(K_s, K_r, r_b)` + `Δ` + `lerp(1, Δ, C·δ)`），CPU 与 WESL 双线同改。本项当年只落地的「两程透射」半边，现已被闭式 slab 透射取代（`t_slab = (1−f_v)(1−f_l)/(1−f_v·f_l)`）。
-  - **本轮 P2-h parity slice**：新增 `pkg/prism_render_shading/src/reference_pt_adapter.rs`。它把已严格证明的 Lambert diffuse/clearcoat `SurfaceSample` 映射到 `reference_pt::Bsdf::ClearcoatDiffuse`，对非零 diffuse roughness、metallic、其它未覆盖 response lobe、coat frame 扩展、非白 `coat_color` 和低 coat roughness 等不等价或尚未严格对拍的输入直接报错，不静默丢字段；测试用生产 `evaluate_clearcoat_direct` 与 reference BRDF 生成固定 4×4 像素数组，对 coat off、darkening=0/1 三组配置做 `compare_pixels`，当前 `max_abs < 3e-5`。该 slice 证明 CPU 生产响应与局部 reference BSDF 的图像级 parity，不宣称 GPU readback 或完整 path-traced scene parity；粗糙 diffuse 的严格 parity 尚未闭合。
+  - **P2-h reference parity 增量（历史快照）**：adapter 将 production `SurfaceSample.base_weight` 作为独立参数写入 `reference_pt::Bsdf::ClearcoatDiffuse`，不再烘进 albedo；reference `ClearcoatDiffuse::new_weighted` 对完整 Oren–Nayar base 响应（含多散射补偿）加权，coat lobe 保持独立。输入校验后支持 diffuse roughness、base weight 和 coat-medium tint；当时 `reference_pt::clearcoat_diffuse` **8 passed**、`reference_pt_adapter` **9 passed**，小图 `compare_pixels` parity 为 `max_abs < 3e-5`。当时关于 metallic/其他响应瓣“未覆盖”的结论已由后续 `OpenPbrMaterial` 与 adapter 多瓣映射取代；coat-frame 扩展仍显式拒绝，且这些 CPU 证据从未宣称 GPU 全材质 readback 或 path-traced 场景图像 parity。
 
 - **P1-e 贵瓣采样数按画质档缩放（SSS / 透射 / 多次散射，ABI 中性 pass uniform）**（§7.2 / §13 表 P1-e）
   - 范围：把 SSS 预积分 / 可分离卷积、屏幕空间透射扩散归一、天空多次散射 LUT 的**采样数**统一由画质档驱动，模型/布局/置换 key 全部不变，采样数以**普通 pass uniform** 上传（非 PSO 置换键），档间切换平滑、无弹跳/瓣塌缩。High 档 = 历史内置采样数，**无视觉回归**。
@@ -1168,18 +1169,18 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   - 门禁：`cargo test -p prism_render_shading --lib glint`（glint CPU 全绿）、`--lib measured_brdf`（18 通过）、`cargo test -p prism_render_scene --lib shading::glint` / `shading::measured_brdf`（link 各 1 通过）；全量 `-p prism_render_shading --lib` 3257 通过。
   - **ABI 接入已具备路径**：`thin_film` 已按"新 lobe = 新 `LobeMask` 位（KHR 低位段）+ 变长字段块 + `prism_unpack_surface` 低位优先聚集"走通（且是规范段新增位、私有瓣走 `EXTENSION_SLOT_BASE = 16` 起的扩展段，由 schema 验证器强制）；开放的 glint / 测量 BRDF 瓣按同一路径接入即可（P2-c）。
 
-**◐ 部分完成（见上表）**：P2-e 的逐区域 illumination 运行时首片已完成，P2-e 剩余为作者侧 `respond_custom` WESL；P3-b~P3-d 仍未开始（**P3-a 已部分完成，见下方审计；P1-b / P1-c / P1-d（引擎侧）/ P1-f / P1-f2 / P1-g / P1-h / P2-g / P2-j 已完成或按表注明部分完成**，见 §13.a；P2-a 的受限 MaterialX parser/runtime adapter 与 P2-b 的 bounded procedural bake 首片已落地，完整节点集、完整 VT 产线、`author_node`/`nodedef` 往返和编辑器集成仍未完成；P2-c MaterialX 往返及 P2-i 的 MaterialX `author_node` 实例仍待编辑器前端提供真实语义；现有 `prism_render_material::bake` 已提供真实的任意深度逐 texel/page layer stack bake，并在 release 构建中对 layers/weights 长度不一致 fail-fast，避免输入截断；P2-i 的其余部分见下方审计）。**P1-a 第一片已完成**（解析式逐像素纹理 LOD：compute resolve 无导数 → 三角形投影解析求 `dUV` 梯度 + 逐贴图取级 + 真机对拍，见 §7.1 / §13.a），余下的是“纹理段全面切到 VT 页引用”。**P2-c 第一片已完成**：**glint 开放瓣全链落地**（schema 槽 17 + 4 word ABI + 计数式无偏估计量接进 über 高光 + shade-time 足印契约 + CPU 集成门禁 + 真机对拍，见 §17.6 / §13.a）；**P2-c 第二片（测量 BRDF·BTF 瓣）已完成**（槽 18 + 纹理行 provider + 图集三线性 + 双线响应 + CPU 端到端门禁，见 §17.6 / §13.a；含真机图集对拍）；P2-c 余下的是 MaterialX 往返（编辑器前端未起）。**P1-h 已完成**（九类 kind 全部迁入 PCM 注册表：`lobe`/`channel`/`response_mode`/`cache_aux` 常驻 64 槽摘要，`provider`/`transfer`/`downgrade`/`composite` 为 identity-only；每类带类型化 hook ABI 与 §17.2 能量策略；能力协商 + header 4 word 摘要 + 单源平价门禁，见 §13.a）——其中 response-mode 的**分类表注册化**仍是唯一动热路径结构的项（P2-j，单独立项）：本项只把 `stylized`/`unlit`/`custom` 三类登记进注册表并与 `Illumination` 双向平价，9-way class 表本身仍在管线构建期写死。channel 一类已登记（`wetness`/`snow`/`damage`/`dissolve`）**且已接进运行期参数通道**（P2-g 全链：header 4 word 动态段 + 四轴解析调制 + dissolve 覆盖度进 alpha test / OIT + 真机对拍，见 §13.a）；`author_node` 因前端尚无可映射的节点定义与运行语义而无实例（kind 与 hook ABI 已就位，不造假条目）。P2-f 的位区隔离 + 向下投影 + **参数块层与响应层合规门禁（独立 oracle + 白炉能量门禁）**已落地；P3-e 的随机单瓣采样数学核 + 孪生已落地，余 pass/TAA 接线（见上「部分完成」）——它的“贵瓣”消费者现在真的存在了（glint），所以接线不再是空转。
+**◐ 部分完成（按 §13.a 当前表为准）**：P2-e 的逐区域 illumination 运行时已完成，剩余仅为作者侧 `respond_custom` WESL；P1-a 的解析 LOD、Material-VT source/residency/publication、兼容 source 的 non-bindless source-backed fallback 与 resolve 采样链已有实现，剩余是默认主 render pass 跨设备图像门禁与生产验收闭环，不能再概括成“纹理段全面切到 VT 页引用”。P3-a 已有 shade-page writer、自动 demand→job 构建和 `shading_resolve` group 8 consumer；剩余是端到端主 render pass publication/readback/parity 与时序/失效闭环，不是“producer、resolve bind group/shader sampling 均缺失”。P3-b 的入射辐照度缓存语义已在独立 GPU slice 落地，完整多光源/GI/SSS/emission 生产接入及主帧门禁仍未完成。其余 P2-a/b/i 作者链、P3-c~e pass/TAA 接线按 §13.a 明确边界推进。
 
 **破坏性说明**：P1-b 一次性弃 v4，不做兼容垫片；旧 `MaterialRecord`/`GpuMaterialHeader`/`lower_standard_material`/所有 `MAX_*` 常量直接改写或删除。
 
-> **汇总口径更正**：本段上方较早的“未开始”总览尚未完全同步（其中 P1-d 引擎侧已完成、P2-a 已部分完成）；进度以本节审计表及逐项实现记录为准。
+> **汇总口径更正**：本节及 §13.a 当前状态表覆盖本文较早的历史快照；旧快照中“未开始”的 P1-d（引擎侧）、P2-a 首片、P1-a VT 消费链、P2-e 区域 illumination 和 P3-a shade-cache consumer 已有后续实现记录。判断完成度时应区分独立切片/局部消费与完整主帧端到端闭环。
 >
 > **P2-a 状态修订（2026-10-16）**：`pkg/prism_render_material_authoring` 已不再是空 crate。当前已实现受限 MaterialX IR、OpenPBR/Standard Surface 到 `prism_render_material::GpuSurfaceParameters` 的 loss-aware adapter，以及显式导出的 `evaluate_connection` 纯数值求值器（add/subtract/multiply/divide/mix/clamp/convert、图引用、graph interface、graph output、跨 graph 递归、环检测、断开/歧义、维度与有限值校验）；不支持的程序化/纹理节点返回 `UnsafeConnection`，不会静默回退。adapter 已真实消费该受限纯表达式子集；新增 `MaterialArchetype` 的 Metal/Skin/Cloth/Glass/Foliage/Toon/CarPaint/Water 八类稳定模板。当前作者层定向测试为 **26 项**（MaterialX 19、evaluator 5、archetype 2）并通过。完整节点图 bake/VT、nested graph instance 外部参数注入、`author_node`/`nodedef` 完整往返和编辑器集成仍未完成，不能将本首片记为完整 P2-a。
 
 
 > **P2-b 状态补记（2026-10-16）**：新增受限 procedural MaterialX 路径：parser 明确允许 `texcoord`/`texcoord2`、`noise`、`curve`/`ramp`、`add`/`plus`、`multiply`/`mult`、`mix`/`blend`，并允许曲线节点的 `points` 属性；`lower_procedural_graph` 将单输出图降低为 runtime `MaterialGraph`，`bake_procedural_graph` 复用生产 `bake_procedural_vt` 输出 `MaterialVtSourceSnapshot`。当前门禁覆盖 deterministic RGBA8 mip-chain / VT source bake，以及 unsupported node 的 fail-closed。仍未完成：完整 MaterialX 节点集、nested graph instance 外部参数注入、方差图烘焙、编辑器 authoring、`author_node`/`nodedef` 往返。
 
-> 本补记和上方 P2-b 状态表覆盖本节更早仍写“P2-b 未开始/仍是 TODO”的历史措辞；后续审计以本补记中的 bounded procedural slice 和明确剩余项为准。
+> 本补记和上方 P2-b 状态表覆盖本节更早将 P2-b 标为未开始的历史措辞；后续审计以本补记中的 bounded procedural slice 和明确剩余项为准。
 
 #### 13.a.1 code-truth 审计（剩余路线图项 · 逐项证据）
 
@@ -1195,21 +1196,21 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 
 | 项 | 状态 | 证据 | 余下 |
 | --- | --- | --- | --- |
-| **P1-a 距离 LOD** | 第一片完成 | `texture_lod.rs`（解析 UV 雅可比 + 逐贴图取级）、`material_sample.wesl::sample_texture_slot(record, uv, lod)`、真机 `texture_lod_gpu_parity` | 纹理段"全面切到 VT 页引用"（今天是 bindless 2D + 显式 LOD） |
+| **P1-a Material-VT** | **生产采样/发布链已接入；系统级验收部分完成** | source capture、按实际材质引用裁剪、residency/atlas upload、completion-gated publication、material-row 同帧重发、单层 source 的格式/geometry 归一化 portable fallback、Material-VT bind group 与 `shading_resolve` sampling 已有实现；解析 UV LOD 与定向 GPU slice 见 §7.1/§13.a | 默认主 render pass 全帧图像 parity、跨设备验收，以及 direct per-material authored binding 路径 |
 | **P1-b** | 完成 | `material_header_abi.rs` 逐字段镜像门禁；§13.a 记录 | — |
 | **P1-c** | 完成 | `bake.rs`（层栈 → 纹理空间混合）、硬顶删除记录 | — |
 | **P1-d 置换治理** | **完成（引擎侧）** | `pipeline_cache.rs`：内容键 + 引用计数 ✔、后台 `PipelineCompiler` worker、ready/pending/waiting/canceled 状态机、全瓣 über fallback、`MAX_IN_FLIGHT_COMPILES` 背压、每帧 `pump_pipeline_compiles` 接线、`prewarm` 批量预热 API；`bin_class` 扩到 19-bit lobe set ✔。真机 cold-compile 测试已落地 | archetype 模板内容/热门 key 集合由 P2-a 编辑器提供（引擎 API 已就位） |
-| **P2-a** | **部分完成（受限作者前端 + runtime adapter）** | `prism_render_material_authoring`：MaterialX 子集 IR、受限纯数值节点图求值、graph interface/output 与跨 graph 递归、OpenPBR/Standard Surface → `GpuSurfaceParameters` 映射、支持/不支持字段报告、八类稳定 archetype 模板；texture/procedural/conditional 节点仍结构化拒绝，反向 `clamp` bounds 返回 `InvalidValue` 而非 panic；`cargo test -p prism_render_material_authoring`：MaterialX 19、evaluator 5、archetype 2，共 26 项通过 | 完整 MaterialX 节点图求值/bake、VT 产线、nested graph instance 外部参数、`author_node`/`nodedef` 完整往返与编辑器集成 |
-| **P2-b** | **部分完成（受限 procedural slice）** | `prism_render_material_authoring` 已提供 MaterialX procedural graph → runtime `MaterialGraph` → `MaterialVtSourceSnapshot` 的 bounded lowering/bake；parser 对已支持类别显式 allowlist，其他节点结构化拒绝 | 完整 MaterialX 节点集、nested graph instance 外部参数、方差图烘焙、编辑器集成与 `author_node`/`nodedef` 往返 |
+| **P2-a** | **部分完成（受限作者前端 + runtime adapter）** | `prism_render_material_authoring`：MaterialX 子集 IR、受限纯数值节点图求值、graph interface/output 与跨 graph 递归、OpenPBR/Standard Surface → `GpuSurfaceParameters` 映射、支持/不支持字段报告、八类稳定 archetype 模板；受限 `nodedef` → PCM `author_node` 映射已覆盖 7 个 canonical operator 及 `plus`/`mult`/`blend` 别名，并由 evaluator identity/value 测试守门；texture/procedural/conditional 节点仍结构化拒绝，反向 `clamp` bounds 返回 `InvalidValue` 而非 panic | 完整 MaterialX 节点图求值/bake、VT 产线、nested graph instance 外部参数、完整 MaterialArtifact/编辑器集成 |
+| **P2-b** | **部分完成（受限 procedural slice）** | `prism_render_material_authoring` 已提供 MaterialX procedural graph → runtime `MaterialGraph` → `MaterialVtSourceSnapshot` 的 bounded lowering/bake；parser 对已支持类别显式 allowlist，其他节点结构化拒绝；受限 author-node alias 语义不另造 runtime identity | 完整 MaterialX 节点集、nested graph instance 外部参数、方差图烘焙、编辑器 authoring 与全量 `author_node`/`nodedef` MaterialArtifact 往返 |
 | **P2-c** | 完成（两个开放瓣） | glint + measured 的 ABI/双线/真机对拍（§17.6、§13.a） | MaterialX `author_node`/`nodedef` 完整往返（编辑器前端仍未完成） |
-| **P2-e 四线正交运行期** | **部分** | `Illumination` 四值 ✔、分类到 `Npr`/`Unlit`/`Custom` ✔、per-tile 9-way 分类 ✔；**逐区域 illumination 运行时首片已落地**：visibility raster 只接受 texture/sampler 的已发布 generation，stale/未发布/越界回 sentinel，并由分类 pass 在 header 声明 feature 时选择 Lit/Stylized；CPU 分类镜像同步（见本轮门禁）| 仅作者侧 `respond_custom` WESL，属编辑器 TODO |
+| **P2-e 四线正交运行期** | **部分** | `Illumination` 四值 ✔、分类到 `Npr`/`Unlit`/`Custom` ✔、per-tile 9-way 分类 ✔；**逐区域 illumination 运行时首片已落地**：visibility raster 只接受 texture/sampler 的已发布 generation，stale/未发布/越界回 sentinel，并由分类 pass 在 header 声明 feature 时选择 Lit/Stylized；CPU 分类镜像同步（见本轮门禁）| 作者侧 `respond_custom` WESL 尚未实现 |
 | **P2-g** | 完成 | header 4 word 动态段 + 四轴解析调制 + dissolve 覆盖度进 alpha/OIT + 真机对拍（§17.1、§13.a） | — |
-| **P2-i 全 kind manifest + codegen** | **非编辑器完成（8 个有实例的 kind 全部声明化）** | `prism_material_schema` 现已覆盖 lobe（含 closure 分类链接）、channel、response_mode、cache_aux 与 identity-only 的 provider/transfer/downgrade/composite：codegen 产出 `SURFACE_LOBE_CLOSURES`、`SURFACE_CHANNELS`、`SURFACE_RESPONSE_MODES`、`SURFACE_CACHE_AUX`、`SURFACE_IDENTITY_EXTENSIONS`；header 常驻非-lobe 槽位致密、identity-only 行零槽，全部与 PCM 目录双向对拍（见 §13.a）。`author_node` 是第 9 类：kind/hook/词表已就位，唯一实例等待 §4 编辑器前端 | **编辑器部分**：author_node 实例 + MaterialX nodedef 往返（架构未起，显式 TODO） |
+| **P2-i 全 kind manifest + codegen** | **非编辑器完成（受限 author_node 实例已落地）** | `prism_material_schema` 现已覆盖 lobe（含 closure 分类链接）、channel、response_mode、cache_aux 与 identity-only 的 provider/transfer/downgrade/composite：codegen 产出 `SURFACE_LOBE_CLOSURES`、`SURFACE_CHANNELS`、`SURFACE_RESPONSE_MODES`、`SURFACE_CACHE_AUX`、`SURFACE_IDENTITY_EXTENSIONS`；header 常驻非-lobe 槽位致密、identity-only 行零槽，全部与 PCM 目录双向对拍（见 §13.a）。第 9 类 `author_node` 已有 7 个受限纯数值 PCM 实例，MaterialX `plus`/`mult`/`blend` 只映射到 canonical identity；本轮 evaluator 测试验证 nodedef、manifest 与数值结果一致 | **编辑器/全量作者部分**：完整 MaterialX 节点词汇、graph/MaterialArtifact 接入、编辑器 authoring |
 | **P2-j** | 完成 | 类表由 PCM 注册表 + lobe 目录派生、穷举平价门禁、WESL `CLASS_*` 平价门禁、类数由表驱动（§5.2、§13.a） | — |
-| **P3-a~d 解耦着色** | **P3-a 逻辑地基、独立 GPU atlas/write protocol、独立 shade page-table snapshot、per-face UV chart contract、真实 texture-space irradiance compute slice、Material-VT source→atlas staging producer、独立 Material-VT GPU resource/lifecycle seam、真实 source→residency→queue upload→completion publish producer，以及材质主 bind group 的 VT 5–8 接线已落地；Material-VT 页表消费已接入 `shading_resolve`；独立 shade-cache resolve consumer 已接入 group 8，但上游自动 producer/publication 尚未完成；主 render pass 可见性反馈与 P3-b~d 未开始** | `shading/texel_cache/` 已提供稳定 texel key、可复现可见性预算、generation/epoch 校验、Stale 生命周期、active/staging 原子页表与不可伪造的 completion proof；`gpu/atlas.wgsl` + `gpu/shade.wgsl` 已分别验证页写入协议与真实三角形 UV→barycentric→法线/方向光 irradiance 写入，包含 stale proof、三角形外 sentinel、atlas clipping 的真实 GPU parity；`gpu/page_table.rs` 以稳定 `page_index` 生成**独立于 Material-VT**的 `(atlas_x, atlas_y, generation, epoch)` shade-page writer ABI，并拒绝普通材质 VT slot 混入；`chart.rs` 直接消费 `RenderShadingGeometry` 的真实三角形 UV，拒绝非有限/退化输入并提供 per-face UV→local texel 映射。`texture_streaming::atlas` 提供逻辑页/存储 tile 分离、3×3 邻页/角页 gutter 构建与 copy-layout contract；`prism_render_material::texture_lod::material_vt_atlas` 现可从完整 mip-chain source snapshot 真实提取固定尺寸页，按驻留邻页构建 gutter，缺邻页执行中心页边缘扩展，并生成 wgpu 256-byte 对齐的 staging rows。`material/virtual_texture/` 现有独立的 32-byte config、专用 page-table/atlas/sampler resource bundle、真实 queue staging write ranges，以及 completion-gated publish/reclaim 生命周期；材质 plugin 已捕获主世界 CPU source，按稳定纹理 ID 生成确定性的受限全源 residency，真实构造 page table 与 gutter tile 并写入 RenderQueue，随后用 completion proof 发布 active snapshot；主材质 bind group 已真实绑定 page table/config/atlas/sampler（5–8），且 `shading_resolve.wesl` 经 `sample_texture_slot`→`material_vt_resolve` 实际消费这组 Material-VT 资源。**独立 P3 shade-cache 的 production writer 与 resolve group 8 consumer 已接线**：consumer 使用显式 chart provenance，按 page-local writer contract 读取 atlas，并执行 generation/epoch/channel/atlas proof；尚未完成自动 object/material/face 可见性 producer、page publication、主 render pass hardware parity，以及 feedback 驱动粗 mip/失效/时序复用。`gi/surface_cache/` 仍是 **Lumen 式世界空间 surfel 辐照度缓存**（另一子系统） | 下一步按 §14.10 接入真实 object/material/face/UV/chart producer 与 page publication，再做主 render pass hardware parity、feedback 驱动粗 mip/fallback、失效/时序复用、LOD 策略 |
+| **P3-a~d 解耦着色** | **P3-a 局部生产切片已接线；完整 shade-cache 闭环未完成** | `shading/texel_cache/` 有稳定 key、预算、generation/epoch 生命周期、active/staging 与 completion proof；GPU writer、自动可见性 demand→page allocation/chart provenance/writer-job 构建、独立 shade page-table，以及 `shading_resolve` group 8 consumer 已落地。Material-VT source→residency→queue upload→completion publication 与主材质 group 5–8、VT sampling 也已接线。两类 cache 使用不同 ABI/资源；已有独立 GPU slice/readback 不等同于完整默认主帧闭环。 | shade jobs 到 active page publication 的生产生命周期、默认主 render pass 端到端 hardware readback/parity、feedback 驱动粗 mip/失效/时序复用；其后再扩展 P3-b~d 的 GI/SSS/emission 等消费和质量门禁 |
 
-> **审计结论（本轮口径）**：**非编辑器**的剩余 = **P1-a 的 VT 切片、P3-a 的真实材质/光照 shade pass 接线（当前仍缺 per-pixel page association、producer publication、resolve bind group/shader sampling）及 P3-b~d**；P2-e 的逐区域 illumination 运行时首片已完成，作者侧 `respond_custom` WESL 仍归编辑器前端。P3-a 已有 CPU 生命周期地基和独立 GPU atlas/write protocol 验证，但尚未接成实际材质/光照渲染闭环，不能宣称完整 GPU shade cache。archetype 热门置换预热、author_node / MaterialX nodedef 完整编辑器往返仍归编辑器前端（不是 runtime authoring 的 graph interface/output 缺失）。
-> 其余路线图项要么已完成（上表），要么按 goal 明确挂在编辑器前端（MaterialX / 节点图 / 作者 WESL）。
+> **审计结论（2026-11-10 增量更正）**：P0-material 的 Native composite 已声明/消费 group 2，读取并解包材质与 execution tables，有限消费 base-weight/metalness/transmission/emission 参数；但仍不是 canonical response，registered kind 2 目前直出 albedo，execution plan 的 blend/mask/domain 语义未消费。生产入口使用带材质 bindings 的 target-aware pass，frame graph 声明四项 buffer reads；内部仍存在不带材质 snapshot 的 target-pass 构造入口，不能把它用于可提交的 lighting graph。allocation byte-generation COW 首片已实现；共同逻辑 registry generation、完整 SurfaceData、canonical resolver 与默认全帧 parity 未完成。P1-a 的 source 捕获、resident upload、completion-gated publication、单层 source 格式/geometry 归一化 portable fallback 与 `shading_resolve` Material-VT 采样已有生产实现；仍缺主帧同代可见性、默认主 render pass 全链图像验收、跨设备图像验收及 direct per-material authored binding。P3-a 的自动 demand→page/job 构建及 group 8 consumer 已接线；仍缺主 render pass 全链 publication/readback/parity，以及 feedback 驱动的粗 mip、失效与时序复用。P3-b 尚未覆盖完整多光源/GI/SSS/emission 生产消费。P2-e 作者侧 custom response WESL、作者图完整节点集、nested graph 外参、编辑器集成与完整 MaterialArtifact 接入仍未实现；受限纯数值 `nodedef` → `author_node` 映射（含 `plus`/`mult`/`blend` canonicalization）已由 evaluator 11 项定向测试守门。
+> snapshot 缺失时不再静默降级，详见核验文档 §7.14。其余路线图项要么已完成（上表），要么按 goal 明确挂在编辑器前端（MaterialX / 节点图 / 作者 WESL）。
 
 ### 13.5 P3 远期：解耦着色 / texel-space shading（性能上限最高，工程最重）
 
@@ -1352,31 +1353,31 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 
 | 阶段 | 内容 | 门禁 |
 |---|---|---|
-| P3-a 地基 | **CPU 逻辑地基、独立 GPU atlas/write protocol、独立 shade page-table snapshot、per-face UV chart contract、邻页 gutter CPU contract、Material-VT source→atlas staging producer、独立 Material-VT GPU resource/lifecycle seam、source→residency→queue upload→completion publish producer 与材质主 bind group 5–8 接线已落地；Material-VT 有效页表消费已接入 `shading_resolve`**：`shading/texel_cache/` 提供稳定 key、请求预算、`Stale`/generation/epoch 状态机、active/staging 页表，以及 `submit_write`→completion proof→`complete_write` 发布协议；旧 active 槽位经 `publish_after` retired，只有 `reclaim_completed` 后才可复用，abort 对已提交写入同样延迟回收；epoch 切换时旧页保留到 publish 并按 GPU timeline 安全退役。`gpu/atlas.wgsl` 的真实 wgpu gate 覆盖多页隔离、越界 invocation、元数据失配与 atlas 边界；无 adapter 时安全跳过，`PRISM_REQUIRE_GPU=1` 时明确失败。`gpu/page_table.rs` 生成的是**独立的 P3 shade-cache page-table writer ABI**，不能当作普通材质 VT page table；`chart.rs` 从 `RenderShadingGeometry` 建立真实 per-face UV→local texel 映射，并拒绝非有限/退化 UV。`texture_streaming::atlas` 提供邻页/角页 gutter 构建与块压缩布局校验，缺邻页时边缘扩展、邻页到达后须重建相邻 tile。`material_vt_atlas` 从完整 mip-chain source snapshot 提取固定逻辑页、按驻留邻页生成实际 gutter，并输出 256-byte 行对齐 staging tile。`material/virtual_texture/` 提供专用 32-byte config、page-table/atlas/sampler resources、真实 queue write ranges 与 completion-gated publication/reclaim；材质 plugin 现在捕获主世界 CPU source，按稳定纹理 ID 和固定 atlas budget 生成确定性全源 residency，真实写入 page table/atlas/config 并在 queue completion 后发布 active snapshot；材质 texture rows 对有完整 source 的图像写入 VT identity，缺失或不兼容 source 明确回退 non-VT。`shading_resolve.wesl` 通过 `sample_texture_slot`→`material_vt_resolve` 读取 Material-VT page table/config/atlas/sampler。**独立 P3 shade-cache 的 resolve consumer 已接线**：production writer 暴露独立 lookup/page-table/resolve-page/chart-info/atlas 资源，`shading_resolve` group 8 执行对象/材质/epoch/face/channel/chart-aware lookup、mip fallback、generation/epoch/atlas 校验，并只替换 diffuse indirect；specular 与视角相关路径仍走原 resolve。**尚未完成**：上游 object/material/face/chart 可见性 producer、自动 page publication、主 render pass 的端到端硬件门禁，以及 feedback 驱动粗 mip/失效/时序复用。 | 当前已覆盖命中/未命中、预算确定性、代际/epoch 隔离、无半写可见、未完成 GPU 写入不可发布、in-flight 槽位不复用、独立 page-table writer ABI、真实 per-face UV chart 校验、atlas write protocol、CPU gutter layout 与 source→atlas staging tile、VT source capture/registry、source→residency producer、真实 RenderQueue upload、completion-gated publish 单测、resolve group 8 的 WESL 编译/链接与独立 consumer contract；完整 upstream producer、自动 publication、主 render pass 硬件 parity、feedback/失效/时序复用仍是后续门禁 |
+| P3-a 地基 | **CPU 逻辑地基、独立 GPU atlas/write protocol、独立 shade page-table snapshot、per-face UV chart contract、邻页 gutter CPU contract、Material-VT source→atlas staging producer、独立 Material-VT GPU resource/lifecycle seam、source→residency→queue upload→completion publish producer 与材质主 bind group 5–8 接线已落地；Material-VT 有效页表消费已接入 `shading_resolve`**：`shading/texel_cache/` 提供稳定 key、请求预算、`Stale`/generation/epoch 状态机、active/staging 页表，以及 `submit_write`→completion proof→`complete_write` 发布协议；旧 active 槽位经 `publish_after` retired，只有 `reclaim_completed` 后才可复用，abort 对已提交写入同样延迟回收；epoch 切换时旧页保留到 publish 并按 GPU timeline 安全退役。`gpu/atlas.wgsl` 的真实 wgpu gate 覆盖多页隔离、越界 invocation、元数据失配与 atlas 边界；无 adapter 时安全跳过，`PRISM_REQUIRE_GPU=1` 时明确失败。`gpu/page_table.rs` 生成的是**独立的 P3 shade-cache page-table writer ABI**，不能当作普通材质 VT page table；`chart.rs` 从 `RenderShadingGeometry` 建立真实 per-face UV→local texel 映射，并拒绝非有限/退化 UV。`texture_streaming::atlas` 提供邻页/角页 gutter 构建与块压缩布局校验，缺邻页时边缘扩展、邻页到达后须重建相邻 tile。`material_vt_atlas` 从完整 mip-chain source snapshot 提取固定逻辑页、按驻留邻页生成实际 gutter，并输出 256-byte 行对齐 staging tile。`material/virtual_texture/` 提供专用 32-byte config、page-table/atlas/sampler resources、真实 queue write ranges 与 completion-gated publication/reclaim；材质 plugin 现在捕获主世界 CPU source，按稳定纹理 ID 和固定 atlas budget 生成确定性全源 residency，真实写入 page table/atlas/config 并在 queue completion 后发布 active snapshot；材质 texture rows 对有完整 source 的图像写入 VT identity，缺失或不兼容 source 明确回退 non-VT。`shading_resolve.wesl` 通过 `sample_texture_slot`→`material_vt_resolve` 读取 Material-VT page table/config/atlas/sampler。**独立 P3 shade-cache 的 resolve consumer 已接线**：production writer 暴露独立 lookup/page-table/resolve-page/chart-info/atlas 资源，自动 demand→page/job builder 生成确定性 page allocation、chart provenance 与 writer jobs；`shading_resolve` group 8 执行对象/材质/epoch/face/channel/chart-aware lookup、mip fallback、generation/epoch/atlas 校验，并只替换 diffuse indirect；specular 与视角相关路径仍走原 resolve。**尚未完成**：shade jobs 到 active page store 的完整生产 publication 生命周期、默认主 render pass 的端到端硬件门禁，以及 feedback 驱动粗 mip/失效/时序复用。Material-VT 与独立 shade-cache 使用不同页表/资源和 writer-consumer ABI，不可互相代替。 | 当前已覆盖命中/未命中、预算确定性、代际/epoch 隔离、无半写可见、未完成 GPU 写入不可发布、in-flight 槽位不复用、独立 page-table writer ABI、真实 per-face UV chart 校验、atlas write protocol、CPU gutter layout 与 source→atlas staging tile、VT source capture/registry、source→residency producer、真实 RenderQueue upload、completion-gated publish 单测、自动 shade demand→page/job 构建、resolve group 8 的 WESL 编译/链接与独立 consumer contract；仍待 active page-store 生产 publication、主 render pass 硬件 parity、feedback/失效/时序复用门禁 |
 | P3-b 视角无关项 | 先缓存 diffuse/SSS/emission/GI 辐照度（PBR+NPR 可缓存项），高光走屏幕空间 split-sum | 与纯屏幕空间抽样对拍误差阈值；furnace 不回归 |
 | P3-c 失效摊销 | generation/epoch 局部失效 + 分帧预算重着 + 时序累积 | 动态光场景帧时稳定、无档跳；staleness 上限 CI |
 | P3-d seam/一致性 | per-face tile + gutter + 无锁双代 + disocclusion 屏幕回退 | seam 视觉零裂；骤转无黑块 CI |
 | P3-e 四线/自定义契约 | NPR ramp 输入缓存、混合逐区域、自定义两段式契约 | 四线各自对拍 + 命中率/预算可观测 |
 | P3-f 内存/压缩（可选） | BC6H 低频页压缩、方向性 SH 高光缓存（高价值材质） | 显存预算内；方向性误差阈值 |
 
-> **2026-10-13 状态修订**：P3-a 表格中的“当前 producer 尚未消费可见性 feedback”是旧审计口径；当前代码已由 `material/virtual_texture/feedback.rs` 从 visibility attachments 做异步 GPU readback、校验 scene/geometry/material generation、执行 UV/导数 demand aggregation，并在 `PrepareResources` 前交给 Material-VT producer。尚未完成的边界是完整主 render pass 端到端硬件门禁，以及独立 P3 shade-cache 的 atlas/page-table 消费，不是 Material-VT feedback bridge 本身。
+> **历史修订记录（2026-10-13，已被后续状态覆盖）**：Material-VT feedback bridge 已从 visibility attachments 做异步 readback、generation 校验和 UV/导数 demand aggregation；之后 shade-cache 也增加了独立 page-table/atlas resolve consumer。当前未闭合边界见本节状态表：生产 page publication 生命周期及默认主 render pass 端到端硬件门禁。
 
-> **P3-a production writer 修订**：`shading/texel_cache/production.rs` 与 `production_resources.rs` 现已接入 render-world extraction、真实 geometry/light 校验、固定容量 GPU shade writer、Core3d 记录节点和 completion 状态机；无显式 `ShadeDispatchInputs` 时保持 `NoInput`，不会猜测场景或伪造页。writer 对多页 chart 按 mip/page 坐标生成 page-local extent 与 UV 矩形，避免完整 chart 被重复写入每个物理页。当前仍未完成的是上游 object/material/face 可见性 producer、自动 shade-page publication 与主 render pass 的完整端到端门禁。
+> **P3-a production writer 历史记录**：writer 已具备 render-world extraction、geometry/light 校验、固定容量 GPU 写入与 completion 状态机；“无显式输入则 NoInput”描述的是该阶段的旧入口。后续自动 producer 修订已把经校验的 visibility demand 转成 page allocation/chart provenance/writer jobs；当前剩余不再是无 producer，而是生产 publication 生命周期及默认主帧端到端门禁，见下条与 §13.a。
 
-> **P3-a 自动 producer 闭环修订（2026-10-15）**：visibility feedback 中已校验的 `ShadeDemandRecord` 现在自动下沉为确定性 page allocation、per-face chart provenance、lookup/page-table/resolve-page metadata 和 directional-light writer jobs；显式 `ShadeDispatchInputs` 仍保持兼容。page-table 新增混合 material epoch 构造，但每条 key/handle 仍必须 epoch 一致并通过 generation/atlas proof；主 render pass group 8 与 writer 共享 page-size/chart/page lookup ABI。该切片未修改 `docs/refactoring-dev/`，主 render pass 真机端到端 parity 仍需独立硬件门禁。
-> **P3-a lookup/transaction 修订（2026-10-13）**：`2e01fd6e0` 增加独立的 key-sorted shade-page lookup buffer（与物理 page table 分离），当前 production writer 同时暴露 atlas/page-table/lookup/resolve-page/chart-info binding；`shading_resolve` group 8 已真实接入 chart/page-size-aware lookup、mip fallback、generation/epoch/atlas proof，并在命中后只替换 diffuse indirect。该绑定是同一 command stream 中 writer→resolve 的 frame-local consumer，不等同于上游 page store 的 completion-gated active publication；自动 producer/publication 与主 render pass hardware parity 仍未完成。
+> **P3-a 自动 producer 修订（2026-10-15，局部接线）**：经校验的 visibility `ShadeDemandRecord` 会生成确定性 page allocation、per-face chart provenance、lookup/page-table/resolve-page metadata 和 directional-light writer jobs；page-table 与 group 8 resolve 共享 page-size/chart/page lookup ABI。此项关闭了“无自动 producer/job builder”的旧缺口，但不等价于 active page store 的完整生产 publication，也不等价于主 render pass 真机 parity。
+> **P3-a lookup/transaction 修订（2026-10-13，历史状态）**：`2e01fd6e0` 增加独立的 key-sorted shade-page lookup buffer（与物理 page table 分离），production writer 暴露 atlas/page-table/lookup/resolve-page/chart-info binding，`shading_resolve` group 8 接入 chart/page-size-aware lookup、mip fallback、generation/epoch/atlas proof，并在命中后只替换 diffuse indirect。此记录最初尚无自动 demand→job 构建；该缺口已由后续修订关闭。当前仍未闭合的是 shade jobs 到 active page store 的完整生产 publication，以及默认主帧硬件 parity，见 §13.a 与本表首行。
 
 > **Atlas layout contract 修订**：`ShadeAtlasLayout` 现在以固定 tile extent 提供 row-major slot→atlas-origin 映射，`ShadePageTableRecord::from_handle` 只能从可寻址的 `ShadePageHandle` 构造 GPU record；越界 slot、零尺寸和不适配 tile 都明确拒绝，避免 producer 手写物理坐标。
 
-> **Shade write transaction 修订**：`begin_shade_writes` 现在把 deterministic budget plan、residency ticket、store allocation、submit、completion proof 和 publish 组织成可回滚事务；prepare/submit 失败会恢复 requested/stale 状态，不会遗留永久 `Writing` 页面。该 API 仍要求上游提供真实 page requests，不会自动猜测 visibility。
+> **Shade write transaction 修订（历史状态）**：`begin_shade_writes` 把 deterministic budget plan、residency ticket、store allocation、submit、completion proof 和 publish 组织成可回滚事务；prepare/submit 失败会恢复 requested/stale 状态，不会遗留永久 `Writing` 页面。此处“仍要求上游提供真实 page requests”描述的是当时的 API 边界；后续已接入 visibility demand→page/job 构建。当前未闭合边界是 active page-store 生产 publication 生命周期，而非 demand/job producer。
 
-> **Visibility demand seam 修订**：`visibility_demand.rs` 现在提供显式 `UV + ddx/ddy + object/material/face + chart extent` 到 `ShadePageRequest` 的确定性转换，沿用 visibility LOD 公式并拒绝非有限输入；它是 producer seam，不代表主 visibility pass 已自动接入。
+> **Visibility demand seam 修订（局部边界）**：`visibility_demand.rs` 提供显式 `UV + ddx/ddy + object/material/face + chart extent` 到 `ShadePageRequest` 的确定性转换，沿用 visibility LOD 公式并拒绝非有限输入。该函数本身是 producer seam；visibility feedback→`ShadeDemandRegistry`→自动 page/job builder 的连接另由后续接线提供。此局部链路不等于 active page store 的完整生产 publication 或主 render pass 端到端验收。
 >
 > **Material-VT feedback 精度修订（2026-10-13）**：`material/virtual_texture/feedback.rs` 现在按 visibility raster 写入的 `pack2x16unorm` barycentric 元数据，先恢复真实屏幕采样点，再复用 `prism_render_visibility` 的 DAIS 透视校正 barycentric 求解，同时得到透视正确的 UV、`ddx/ddy` 与 VT mip/page demand。这样避免把透视三角形误当 affine 三角形而造成错误缺页或过度请求；回归覆盖透视三角形、UV/导数和退化/缺 UV 拒绝路径。该修复只影响反馈 demand，不改变 VT ABI 或主渲染绑定。
 >
 > **P2-e 区域 illumination 修订（2026-10-16）**：逐区域 illumination 运行时首片已接入现有 production path。`MaterialTextureArrays` 只把实际已发布 `GpuImage` 的 generation 写入绑定表；visibility raster 与 `material_sample` 同时校验 texture/sampler index、generation 和 zero/unpublished sentinel，stale/越界/未发布 mask 回 sentinel，并继续扫描后续记录。classification 仅在 header 声明 `REGION_ILLUMINATION` 时消费 `metadata.z` 的 Lit/Stylized 选择，CPU `ShadingWorkPlan` 保持同一 fallback 语义；WESL 编译与定向 generation/分类门禁覆盖上述路径。
 
-> **共享 readback 修订**：Material-VT feedback decode 现在同时填充 `ShadeDemandRegistry`，仅对 Lit/Stylized 的真实可见 face 生成请求；Unlit/Custom 不会伪造 view-independent shade page。该 registry 尚未绕过 `ShadeWriteProducer` 自动提交 GPU 工作。readback 还会校验 offset/row pitch/尺寸乘法与 ID/metadata 范围，截断或错位的 GPU buffer 会丢弃而不触发渲染线程 panic。
+> **共享 readback 修订**：Material-VT feedback decode 同时填充 `ShadeDemandRegistry`，仅对 Lit/Stylized 的真实可见 face 生成请求；Unlit/Custom 不会伪造 view-independent shade page。readback 校验 offset/row pitch/尺寸乘法与 ID/metadata 范围，损坏数据会被丢弃而不触发渲染线程 panic。该 demand 现在有后续自动 page/job 构建消费，剩余 publication/主帧边界见 §13.a。
 
 > **Shade demand provenance 修订**：registry 现在保留 `geometry_index + FaceChart + ShadePageRequest`，后续 job builder 可以使用真实 geometry/chart；directional-light selection 仍是独立显式策略，不会由 feedback 路径猜测。
 
@@ -1411,7 +1412,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 | 破坏性 ABI 迁移面大 | 一次性迁移 + WESL twin 对拍兜底,分阶段 P0→P2 |
 | 解耦着色缓存失效/一致性（P3） | 作为独立子系统推进；首期只缓存视角无关项，高光仍屏幕空间；光照/动态变化触发页重算 + 时序复用兜底 |
 | 运行时动态通道破坏确定性/双线对拍（§17.1） | 动态轴限定为少量解析式调制（无分支爆炸）；调制函数 CPU/WESL 双实现字节对拍；动态段进 ABI 显式声明，不走隐式状态 |
-| 原理化分层 BSDF 与 twin 对不齐（§17.2） | 能量耦合项查表化 + furnace 守恒门禁；coat/base 耦合系数 CPU 金标准先行、WESL twin 对拍 |
+| 原理化分层 BSDF parity 覆盖不足（§17.2） | 扩展 `reference_pt_adapter` 的受支持输入与图像级门禁；不重复实现已落地的 coat/base 能量耦合公式 |
 | 光谱提升实时成本过高（§17.3） | 严格限定 RT twin / 离线参考，不进实时主线；实时仍 RGB，光谱仅作对拍基准与色散高保真分支 |
 | 随机单瓣采样低档噪点（§17.4） | blue-noise + TAA/时序累积；采样档可调；仅对贵瓣启用，廉价瓣仍确定性求和 |
 | OpenPBR 上游演进与扩展位撞车（§4.5） | 规范核心区/扩展区位段隔离；上游新字段只进核心区并过合规门禁；私有瓣永不占核心区位段 |
@@ -1612,13 +1613,13 @@ fn respond_custom(surface: Surface, inc: IncomingRadiance, aux: CustomAux, view:
 
 > 优先级：**高**。覆盖大量实际美术诉求，成本可控（解析调制 + 显式 ABI 段）。
 
-### 17.2 原理化分层 BSDF（coat/base 能量耦合，取代瓣求和）
+### 17.2 原理化分层 BSDF（coat/base 能量耦合，已实现；parity 继续扩展）
 
-现 über 倾向"各瓣独立求值再和"。物理上 **coat 之下的 base 应收到 coat 透射后的能量**（coat 反射掉的不再喂 base），且 coat 吸收会使底色变暗（`coat_darkening`）。纯瓣求和在强 coat/高 IOR 下能量不自洽。
+物理上 **coat 之下的 base 应收到 coat 透射后的能量**（coat 反射掉的不再喂 base），且 coat 吸收会使底色变暗（`coat_darkening`）。本节的实时核心语义已落地，不再是“现有 über 倾向纯瓣求和”的待实现提案。
 
-**升级**：对**分层关系**（coat↔base、fuzz↔base）引入**能量耦合**——按 coat Fresnel 透射率做能量预算，coat 吸收/变暗统一建模。耦合项查表化（类似多散射补偿 §10），进 furnace 守恒门禁 + 双线对拍（P2-h）。这不是加瓣，是"把已有瓣的组合方式从求和升级为分层预算"，仍确定性、仍无硬顶。
+**实现与现存边界**：实时 CPU/WESL 已使用 coat Fresnel 两程/闭式 slab 透射进行 base 能量耦合，并由 `coat_darkening` 统一处理 reflective base 与 transmission substrate；GPU resolve 有定向 readback 证据。path-traced `reference_pt` 已实现独立的 base/EON、metallic/specular、transmission、clearcoat/darkening、sheen、subsurface、thin-film/iridescence、glint 响应，以及 `evaluate_path` 和五类 proposal 的混合 `sample/pdf`；`ReferencePtMaterialAdapter` 在活动瓣不止 clearcoat/diffuse 时会构造 `Bsdf::OpenPbr`，而不是静默退回 Lambert。adapter 的 base weight/roughness/coat-medium tint 与 16×16 小图门禁已通过（核验文档 §7.21），但当前 parity 证据仍集中于 EON/clearcoat direct slice；anisotropy、coat normal/tangent、normal variance、非一 geometry opacity/AO、emission 仍拒绝，纹理/动态通道/真实材质提取、全组合、多 bounce 场景图像与 GPU/backend parity 仍未验收。局部 CPU/GPU 切片不等于全材质生产闭环，不支持输入继续 fail-closed，不能静默丢字段。
 
-> 优先级：**高**。直接提升画质物理正确性，与现 furnace 门禁机制同构、落地路径清晰。
+> 当前状态：核心分层语义已实现；P2-h 剩余是 parity 覆盖和场景级验证，不是待定公式或待建 path-traced reference。
 
 ### 17.3 光谱提升（hero-wavelength，仅 RT twin / 离线参考）
 
@@ -1758,7 +1759,7 @@ schema **只声明布局 + 元数据 + 契约**（在哪、多宽、谁消费、
 
 > 优先级：glint **中**（视觉收益明确）；测量瓣 **中低**（场景特定）；MaterialX 往返 **中**（协作价值，依赖 §4.5 投影）。
 
-**升级优先级小结**：先做 **17.5 自描述 schema**（本轮已深化为 PCM 单一声明源与全链路 codegen，见 §17.5.1–8；工程基建，放大后续所有补瓣效率）、**17.2 原理化分层**（画质正确性，机制同构）、**17.1 运行时动态通道**（覆盖大量美术诉求）；再按需 17.6 glint / 17.3 光谱 RT / 17.4 随机采样。全部保持确定性、可双线对拍、无全局硬顶、无 AI。
+**演进优先级小结**：**17.5 自描述 schema** 已深化为 PCM 单一声明源与全链路 codegen；**17.2 原理化分层**及 **17.1 运行时动态通道**均已有实现切片，不再是待启动项。当前着色系统的主阻塞是 Native 默认 composite 消费 canonical material response（见核验文档 §7.13）；P2-h 剩余的 reference parity 与其他扩展按各自图像/性能门禁推进。17.6 glint、17.3 光谱 RT、17.4 随机采样仍是后续演进方向。
 
 ---
 

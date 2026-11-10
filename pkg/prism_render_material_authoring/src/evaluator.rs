@@ -405,6 +405,7 @@ fn eval_author_node(
 }
 
 fn evaluate_operator(category: &str, values: &[TypedValue]) -> Result<TypedValue, AuthoringError> {
+    let category = crate::author_node::canonical_category(category).unwrap_or(category);
     match category {
         "convert" => values
             .into_iter()

@@ -28,6 +28,22 @@ pub fn author_node_manifest(
     resolve(document, node).map(|binding| binding.map(|(_, builtin)| builtin.manifest()))
 }
 
+/// Normalize the bounded MaterialX operator vocabulary to its stable PCM
+/// identity. Aliases are authoring syntax only and must never create a second
+/// runtime extension identity.
+pub(crate) fn canonical_category(category: &str) -> Option<&'static str> {
+    match category {
+        "add" | "plus" => Some("add"),
+        "clamp" => Some("clamp"),
+        "convert" => Some("convert"),
+        "divide" => Some("divide"),
+        "mix" | "blend" => Some("mix"),
+        "multiply" | "mult" => Some("multiply"),
+        "subtract" => Some("subtract"),
+        _ => None,
+    }
+}
+
 pub(crate) fn resolve<'a>(
     document: &'a Document,
     node: &Node,
@@ -53,7 +69,7 @@ pub(crate) fn resolve<'a>(
                 format!("node '{}' references unknown nodedef '{name}'", node.name),
             )
         })?;
-    let builtin = builtin_author_node(&definition.category).ok_or_else(|| {
+    let canonical = canonical_category(&definition.category).ok_or_else(|| {
         error(
             DiagnosticCode::UnsupportedMaterial,
             format!(
@@ -62,7 +78,13 @@ pub(crate) fn resolve<'a>(
             ),
         )
     })?;
-    validate_schema_binding(&definition.category, builtin)?;
+    let builtin = builtin_author_node(canonical).ok_or_else(|| {
+        error(
+            DiagnosticCode::InvalidReference,
+            format!("author_node category '{canonical}' is absent from the PCM catalogue"),
+        )
+    })?;
+    validate_schema_binding(canonical, builtin)?;
     Ok(Some((definition, builtin)))
 }
 
@@ -90,8 +112,14 @@ pub(crate) fn validate_document(document: &Document) -> Result<(), AuthoringErro
         {
             continue;
         }
-        if let Some(builtin) = builtin_author_node(&definition.category) {
-            validate_schema_binding(&definition.category, builtin)?;
+        if let Some(canonical) = canonical_category(&definition.category) {
+            let builtin = builtin_author_node(canonical).ok_or_else(|| {
+                error(
+                    DiagnosticCode::InvalidReference,
+                    format!("author_node category '{canonical}' is absent from the PCM catalogue"),
+                )
+            })?;
+            validate_schema_binding(canonical, builtin)?;
             validate_operator_signature(definition)?;
         }
     }
@@ -317,11 +345,28 @@ fn validate_instance(node: &Node, definition: &NodeDef) -> Result<(), AuthoringE
 }
 
 fn validate_operator_signature(definition: &NodeDef) -> Result<(), AuthoringError> {
-    let expected_inputs = match definition.category.as_str() {
+    let category = canonical_category(&definition.category).ok_or_else(|| {
+        error(
+            DiagnosticCode::UnsupportedMaterial,
+            format!(
+                "nodedef '{}' category '{}' has no bounded author-node contract",
+                definition.name, definition.category
+            ),
+        )
+    })?;
+    let expected_inputs = match category {
         "convert" => 1,
         "add" | "subtract" | "multiply" | "divide" => 2,
         "mix" | "clamp" => 3,
-        _ => unreachable!("resolve accepted only executable PCM author nodes"),
+        _ => {
+            return Err(error(
+                DiagnosticCode::UnsupportedMaterial,
+                format!(
+                    "nodedef '{}' category '{}' has no bounded author-node contract",
+                    definition.name, definition.category
+                ),
+            ))
+        }
     };
     if definition.inputs.len() != expected_inputs {
         return Err(error(
@@ -356,7 +401,7 @@ fn validate_operator_signature(definition: &NodeDef) -> Result<(), AuthoringErro
         .type_name
         .as_deref()
         .expect("nodedef output type");
-    match definition.category.as_str() {
+    match category {
         "convert" => {
             let input = input_type(0);
             let input_width = numeric_width(input);
@@ -385,7 +430,15 @@ fn validate_operator_signature(definition: &NodeDef) -> Result<(), AuthoringErro
             require_type_match("clamp high type", input_type(2), "float")?;
             require_type_match("clamp output type", output_type, input_type(0))?;
         }
-        _ => unreachable!(),
+        _ => {
+            return Err(error(
+                DiagnosticCode::UnsupportedMaterial,
+                format!(
+                    "nodedef '{}' category '{}' has no bounded author-node contract",
+                    definition.name, definition.category
+                ),
+            ))
+        }
     }
     Ok(())
 }
