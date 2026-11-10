@@ -171,7 +171,7 @@ impl FrameGraphStages {
 
 /// The reserved native surface draw contract is installed only for the
 /// SurfaceEncodeProvider by queue_stage. Neither lighting availability nor an
-/// arbitrary group-0 binding implies this six-target raster contract. Custom
+/// arbitrary group-0 binding implies this five-plus-five-target raster contract. Custom
 /// single-HDR providers use MESH_UNBOUND (or their own draw contract).
 fn uses_surface_gbuffer(item: &PhaseItem, functions: &DrawFunctions) -> bool {
     item.dynamic_bind_group_contracts(functions)
@@ -300,7 +300,7 @@ pub fn extract_frame_graph_texture_imports(main: &mut World, render: &mut World)
 
 /// Builds the frame graph: clear the target, then record the queued draws.
 ///
-/// Native opaque surfaces write the six-target GBuffer independently of lighting
+/// Native opaque surfaces write the five-plus-five-target GBuffer independently of lighting
 /// availability. Single-HDR providers write the frame target after composite
 /// (when present), followed by the remaining phases in [`RenderPhase::ORDER`].
 /// A buffer an item binds must be *declared* by
@@ -707,9 +707,9 @@ fn append_target_graph(
     let (surface_queues, hdr_queues) = split_surface_opaque(queues, functions);
     // GBuffer is cleared every frame, even when the last native draw disappears.
     // Without a composite, HDR needs its own initializer as well.
-    let scene_passes = 1
+    let scene_passes = 2
         + u32::from(lighting.is_none())
-        + u32::from(!surface_queues.phase(RenderPhase::Opaque).is_empty())
+        + 2 * u32::from(!surface_queues.phase(RenderPhase::Opaque).is_empty())
         + RenderPhase::ORDER
             .into_iter()
             .filter(|phase| !hdr_queues.phase(*phase).is_empty())
@@ -897,6 +897,75 @@ fn append_target_graph(
             array_layers: 1,
         },
     );
+    let mut surface_material_a = graph.import_texture(
+        "prism-render-app-gbuffer-surface-material-a",
+        TextureDesc::color(target.surface_material_a_format())
+            .with_size(prism_render_graph::SizeClass::absolute_2d(
+                target.viewport().width,
+                target.viewport().height,
+            ))
+            .with_usage(
+                TextureUsages::COPY_SRC
+                    .union(TextureUsages::COPY_DST)
+                    .union(TextureUsages::TEXTURE_BINDING),
+            ),
+        ImportedTexture {
+            texture: target.surface_material_a_texture(),
+            default_view: target.surface_material_a_view(),
+            entry_state: TextureState::initial(),
+            exit_state: TextureState::shader_read(
+                prism_render_driver::PipelineStages::COMPUTE_SHADER,
+            ),
+            mip_levels: 1,
+            array_layers: 1,
+        },
+    );
+    let mut surface_material_b = graph.import_texture(
+        "prism-render-app-gbuffer-surface-material-b",
+        TextureDesc::color(target.surface_material_b_format())
+            .with_size(prism_render_graph::SizeClass::absolute_2d(
+                target.viewport().width,
+                target.viewport().height,
+            ))
+            .with_usage(
+                TextureUsages::COPY_SRC
+                    .union(TextureUsages::COPY_DST)
+                    .union(TextureUsages::TEXTURE_BINDING),
+            ),
+        ImportedTexture {
+            texture: target.surface_material_b_texture(),
+            default_view: target.surface_material_b_view(),
+            entry_state: TextureState::initial(),
+            exit_state: TextureState::shader_read(
+                prism_render_driver::PipelineStages::COMPUTE_SHADER,
+            ),
+            mip_levels: 1,
+            array_layers: 1,
+        },
+    );
+    let mut surface_material_c = graph.import_texture(
+        "prism-render-app-gbuffer-surface-material-c",
+        TextureDesc::color(target.surface_material_c_format())
+            .with_size(prism_render_graph::SizeClass::absolute_2d(
+                target.viewport().width,
+                target.viewport().height,
+            ))
+            .with_usage(
+                TextureUsages::COPY_SRC
+                    .union(TextureUsages::COPY_DST)
+                    .union(TextureUsages::TEXTURE_BINDING),
+            ),
+        ImportedTexture {
+            texture: target.surface_material_c_texture(),
+            default_view: target.surface_material_c_view(),
+            entry_state: TextureState::initial(),
+            exit_state: TextureState::shader_read(
+                prism_render_driver::PipelineStages::COMPUTE_SHADER,
+            ),
+            mip_levels: 1,
+            array_layers: 1,
+        },
+    );
     buffers.require(
         target.surface_identity_buffer(),
         BufferDesc::new(target.surface_identity_size_bytes(), BufferUsages::STORAGE),
@@ -1025,6 +1094,9 @@ fn append_target_graph(
     external_texture_handles.insert(target.normal_view(), normal);
     external_texture_handles.insert(target.albedo_view(), albedo);
     external_texture_handles.insert(target.surface_id_view(), surface_id);
+    external_texture_handles.insert(target.surface_material_a_view(), surface_material_a);
+    external_texture_handles.insert(target.surface_material_b_view(), surface_material_b);
+    external_texture_handles.insert(target.surface_material_c_view(), surface_material_c);
     external_texture_handles.insert(target.taa_motion_view(), motion);
     external_texture_handles.insert(target.taa_reactive_view(), reactive);
     external_texture_handles.insert(target.depth_view(), depth);
@@ -1048,37 +1120,47 @@ fn append_target_graph(
     }
 
     // Clear outputs in separate passes: the scene-linear HDR target is 8 B per
-    // sample while the compact GBuffer is exactly 32 B per sample, so they may
-    // not share one color-attachment set on devices with the WebGPU minimum
+    // sample, while the ten logical GBuffer planes must be split into the
+    // same five-plus-five attachment groups used by the draw passes. This keeps
+    // every physical raster pass below the WebGPU minimum
     // `maxColorAttachmentBytesPerSample` limit.
-    {
-        graph.add_raster_pass(
-            "prism-render-app-clear-gbuffer",
-            PassFlags::SIDE_EFFECT,
-            |builder| {
-                position_x = clear_color_or_write(builder, position_x, clear, Color::TRANSPARENT);
-                position_y = clear_color_or_write(builder, position_y, clear, Color::TRANSPARENT);
-                position_z = clear_color_or_write(builder, position_z, clear, Color::TRANSPARENT);
-                // Alpha is surface coverage, not an opaque background. Clear
-                // explicitly rather than relying on the generic color policy.
-                normal = clear_color_or_write(builder, normal, clear, Color::TRANSPARENT);
-                albedo = clear_color_or_write(builder, albedo, clear, Color::TRANSPARENT);
-                surface_id = clear_color_or_write(builder, surface_id, clear, Color::TRANSPARENT);
-                surface_data =
-                    clear_color_or_write(builder, surface_data, clear, Color::TRANSPARENT);
-                depth = match clear {
-                    ClearMode::ColorAndDepth | ClearMode::DepthOnly => {
-                        builder.depth_attachment(depth)
-                    }
-                    ClearMode::None => builder.depth_attachment_load(depth, DepthLoadOp::Load),
-                    ClearMode::Inherit => {
-                        unreachable!("clear mode is resolved before graph building")
-                    }
-                };
-                |_ctx| {}
-            },
-        );
-    }
+    graph.add_raster_pass(
+        "prism-render-app-clear-gbuffer-geometry",
+        PassFlags::SIDE_EFFECT,
+        |builder| {
+            position_x = clear_color_or_write(builder, position_x, clear, Color::TRANSPARENT);
+            position_y = clear_color_or_write(builder, position_y, clear, Color::TRANSPARENT);
+            position_z = clear_color_or_write(builder, position_z, clear, Color::TRANSPARENT);
+            // The encoded normal is also the coverage marker: [0, 0] is the
+            // clear value and is outside the valid octahedral unit-normal
+            // encoding. Clear it explicitly with the other GBuffer planes.
+            normal = clear_color_or_write(builder, normal, clear, Color::TRANSPARENT);
+            albedo = clear_color_or_write(builder, albedo, clear, Color::TRANSPARENT);
+            depth = match clear {
+                ClearMode::ColorAndDepth | ClearMode::DepthOnly => builder.depth_attachment(depth),
+                ClearMode::None => builder.depth_attachment_load(depth, DepthLoadOp::Load),
+                ClearMode::Inherit => {
+                    unreachable!("clear mode is resolved before graph building")
+                }
+            };
+            |_ctx| {}
+        },
+    );
+    graph.add_raster_pass(
+        "prism-render-app-clear-gbuffer-material",
+        PassFlags::SIDE_EFFECT,
+        |builder| {
+            surface_id = clear_color_or_write(builder, surface_id, clear, Color::TRANSPARENT);
+            surface_data = clear_color_or_write(builder, surface_data, clear, Color::TRANSPARENT);
+            surface_material_a =
+                clear_color_or_write(builder, surface_material_a, clear, Color::TRANSPARENT);
+            surface_material_b =
+                clear_color_or_write(builder, surface_material_b, clear, Color::TRANSPARENT);
+            surface_material_c =
+                clear_color_or_write(builder, surface_material_c, clear, Color::TRANSPARENT);
+            |_ctx| {}
+        },
+    );
     if lighting.is_none() {
         graph.add_raster_pass(
             "prism-render-app-clear-color",
@@ -1144,6 +1226,12 @@ fn append_target_graph(
                 }
             }
         }
+        let secondary_vertex_reads = vertex_reads.clone();
+        let secondary_index_reads = index_reads.clone();
+        let secondary_indirect_reads = indirect_reads.clone();
+        let secondary_uniform_reads = uniform_reads.clone();
+        let secondary_storage_reads = storage_reads.clone();
+        let secondary_sampled_texture_reads = sampled_texture_reads.clone();
         graph.add_raster_pass(
             format!("prism-render-app-{phase:?}"),
             PassFlags::SIDE_EFFECT,
@@ -1153,8 +1241,6 @@ fn append_target_graph(
                 position_z = builder.color_attachment(position_z);
                 normal = builder.color_attachment(normal);
                 albedo = builder.color_attachment(albedo);
-                surface_id = builder.color_attachment(surface_id);
-                surface_data = builder.color_attachment(surface_data);
                 depth = builder.depth_attachment(depth);
                 for handle in &vertex_reads {
                     let _ = builder.read_vertex(*handle);
@@ -1177,6 +1263,39 @@ fn append_target_graph(
                 let queues = queues.clone();
                 let functions = functions.clone();
                 move |ctx| queues.record(phase, ctx, &functions)
+            },
+        );
+        graph.add_raster_pass(
+            format!("prism-render-app-{phase:?}-surface-material"),
+            PassFlags::SIDE_EFFECT,
+            |builder| {
+                surface_id = builder.color_attachment(surface_id);
+                surface_data = builder.color_attachment(surface_data);
+                surface_material_a = builder.color_attachment(surface_material_a);
+                surface_material_b = builder.color_attachment(surface_material_b);
+                surface_material_c = builder.color_attachment(surface_material_c);
+                depth = builder.depth_attachment_load(depth, DepthLoadOp::Load);
+                for handle in &secondary_vertex_reads {
+                    let _ = builder.read_vertex(*handle);
+                }
+                for handle in &secondary_index_reads {
+                    let _ = builder.read_index(*handle);
+                }
+                for handle in &secondary_indirect_reads {
+                    let _ = builder.read_indirect(*handle);
+                }
+                for handle in &secondary_uniform_reads {
+                    let _ = builder.read_uniform(*handle);
+                }
+                for handle in &secondary_storage_reads {
+                    let _ = builder.read_storage_buffer(*handle);
+                }
+                for handle in &secondary_sampled_texture_reads {
+                    let _ = builder.read_texture(*handle);
+                }
+                let queues = queues.clone();
+                let functions = functions.clone();
+                move |ctx| queues.record_secondary(phase, ctx, &functions)
             },
         );
     }
@@ -1451,6 +1570,9 @@ fn append_target_graph(
         external_texture_handles.insert(target.albedo_view(), albedo);
         external_texture_handles.insert(target.surface_id_view(), surface_id);
         external_texture_handles.insert(target.surface_data_view(), surface_data);
+        external_texture_handles.insert(target.surface_material_a_view(), surface_material_a);
+        external_texture_handles.insert(target.surface_material_b_view(), surface_material_b);
+        external_texture_handles.insert(target.surface_material_c_view(), surface_material_c);
         external_texture_handles.insert(target.taa_motion_view(), motion);
         external_texture_handles.insert(target.taa_reactive_view(), reactive);
         external_texture_handles.insert(target.depth_view(), depth);
@@ -1659,6 +1781,9 @@ fn append_target_graph(
             albedo = builder.sample(albedo);
             surface_id = builder.sample(surface_id);
             surface_data = builder.sample(surface_data);
+            surface_material_a = builder.sample(surface_material_a);
+            surface_material_b = builder.sample(surface_material_b);
+            surface_material_c = builder.sample(surface_material_c);
             let _surface_identity = builder.read_storage_buffer(surface_identity);
             let _gi = builder.read_storage_buffer(gi_output);
             let _params = builder.read_uniform(params);
@@ -1803,6 +1928,9 @@ fn append_target_graph(
     external_texture_handles.insert(target.albedo_view(), albedo);
     external_texture_handles.insert(target.surface_id_view(), surface_id);
     external_texture_handles.insert(target.surface_data_view(), surface_data);
+    external_texture_handles.insert(target.surface_material_a_view(), surface_material_a);
+    external_texture_handles.insert(target.surface_material_b_view(), surface_material_b);
+    external_texture_handles.insert(target.surface_material_c_view(), surface_material_c);
     external_texture_handles.insert(target.taa_motion_view(), motion);
     external_texture_handles.insert(target.taa_reactive_view(), reactive);
     external_texture_handles.insert(target.depth_view(), depth);
@@ -2166,7 +2294,7 @@ mod tests {
         target: &RenderTarget,
         plan: &ExecutionPlan,
         handles: &BTreeMap<TextureViewId, TextureHandle>,
-    ) -> [ResourceIndex; 7] {
+    ) -> [ResourceIndex; 10] {
         // f32 XYZ and full u32 identity remain independent planes. Coverage is
         // stored in normal alpha (f16), not the lossy/clamped sRGB8 albedo.
         let formats = [
@@ -2177,6 +2305,9 @@ mod tests {
             target.albedo_format(),
             target.surface_id_format(),
             target.surface_data_format(),
+            target.surface_material_a_format(),
+            target.surface_material_b_format(),
+            target.surface_material_c_format(),
         ];
         assert_eq!(
             formats,
@@ -2188,6 +2319,9 @@ mod tests {
                 TextureFormat::Rgba8UnormSrgb,
                 TextureFormat::R32Uint,
                 TextureFormat::Rgba16Float,
+                TextureFormat::Rgba16Float,
+                TextureFormat::Rgba16Float,
+                TextureFormat::R32Uint,
             ]
         );
         assert_eq!(target.format(), TextureFormat::Rgba16Float);
@@ -2199,6 +2333,9 @@ mod tests {
             target.albedo_view(),
             target.surface_id_view(),
             target.surface_data_view(),
+            target.surface_material_a_view(),
+            target.surface_material_b_view(),
+            target.surface_material_c_view(),
         ]
         .map(|view| handles[&view].resource());
         assert_eq!(
@@ -2206,29 +2343,30 @@ mod tests {
             crate::forward_lit::SURFACE_GBUFFER_TARGET_COUNT,
             "frame graph GBuffer attachment count must match the surface shader ABI"
         );
+        let geometry =
+            gbuffer[..crate::forward_lit::SURFACE_GEOMETRY_TARGET_FORMATS.len()].to_vec();
+        let material =
+            gbuffer[crate::forward_lit::SURFACE_GEOMETRY_TARGET_FORMATS.len()..].to_vec();
         let hdr = handles[&target.view()].resource();
         let depth = handles[&target.depth_view()].resource();
-        let mut gbuffer_clears = 0;
+        let mut geometry_clears = 0;
+        let mut material_clears = 0;
         let mut hdr_clears = 0;
         for attachments in &plan.attachments {
             let raster = attachments
                 .as_ref()
                 .expect("no-lighting scene passes are raster");
             let resources: Vec<_> = raster.colors.iter().map(|a| a.resource).collect();
-            if resources.as_slice() == gbuffer.as_slice() {
-                assert_eq!(
-                    raster.colors.len(),
-                    crate::forward_lit::SURFACE_GBUFFER_TARGET_COUNT,
-                    "opaque raster attachment count must match SurfaceEncodeProvider"
-                );
-            }
             assert!(
-                resources.as_slice() == gbuffer.as_slice() || resources == [hdr],
-                "GBuffer and HDR must never share an attachment set"
+                resources.as_slice() == geometry.as_slice()
+                    || resources.as_slice() == material.as_slice()
+                    || resources == [hdr],
+                "split GBuffer and HDR must never share an attachment set"
             );
             // Keep the concrete format accounting beside the ABI assertion:
             // WebGPU charges sRGB8 RGBA 8 attachment bytes, not its 4 storage
-            // bytes. Seven GBuffer targets cost 4+4+4+8+8+4+8 = 40; HDR costs 8.
+            // bytes. The geometry recipe costs 28, material costs 32, and HDR
+            // costs 8 bytes/sample.
             let bytes: u32 = raster
                 .colors
                 .iter()
@@ -2236,27 +2374,27 @@ mod tests {
                     if attachment.resource == hdr {
                         8
                     } else {
-                        [4, 4, 4, 8, 8, 4, 8][gbuffer
+                        [4, 4, 4, 8, 8, 4, 8, 8, 8, 4][gbuffer
                             .iter()
                             .position(|resource| *resource == attachment.resource)
                             .unwrap()]
                     }
                 })
                 .sum();
-            assert!(bytes <= 40);
+            assert!(bytes <= 32);
             assert!(raster.colors.iter().all(|a| a.store == StoreOp::Store));
             if raster
                 .colors
                 .iter()
                 .all(|a| matches!(a.load, LoadOp::Clear(_)))
             {
-                if resources.as_slice() == gbuffer.as_slice() {
-                    gbuffer_clears += 1;
+                if resources.as_slice() == geometry.as_slice() {
+                    geometry_clears += 1;
                     for (index, attachment) in raster.colors.iter().enumerate() {
                         assert_eq!(
                             attachment.load,
                             LoadOp::Clear(Color::TRANSPARENT),
-                            "all seven GBuffer planes must be initialized to zero; only normal alpha carries coverage"
+                            "all geometry GBuffer planes must be initialized to zero; only normal alpha carries coverage"
                         );
                     }
                     let attachment = raster.depth.unwrap();
@@ -2264,6 +2402,15 @@ mod tests {
                     assert!(attachment.writes);
                     assert_eq!(attachment.depth_load, DepthLoadOp::Clear(0.0));
                     assert_eq!(attachment.depth_store, StoreOp::Store);
+                } else if resources.as_slice() == material.as_slice() {
+                    material_clears += 1;
+                    assert!(
+                        raster.depth.is_none(),
+                        "material clear must not touch depth"
+                    );
+                    assert!(raster.colors.iter().all(|attachment| {
+                        attachment.load == LoadOp::Clear(Color::TRANSPARENT)
+                    }));
                 } else {
                     hdr_clears += 1;
                     assert_eq!(
@@ -2276,7 +2423,9 @@ mod tests {
                         "HDR clear must not clear shared depth twice"
                     );
                 }
-            } else {
+            } else if resources.as_slice() == geometry.as_slice()
+                || resources.as_slice() == material.as_slice()
+            {
                 assert!(raster.colors.iter().all(|a| a.load == LoadOp::Load));
                 let attachment = raster.depth.unwrap();
                 assert_eq!(attachment.resource, depth);
@@ -2289,8 +2438,12 @@ mod tests {
             }
         }
         assert_eq!(
-            gbuffer_clears, 1,
-            "reset coverage even when no surface remains"
+            geometry_clears, 1,
+            "reset geometry GBuffer even when no surface remains"
+        );
+        assert_eq!(
+            material_clears, 1,
+            "reset material GBuffer even when no surface remains"
         );
         assert_eq!(
             hdr_clears, 1,
@@ -2300,18 +2453,18 @@ mod tests {
     }
 
     #[test]
-    fn no_lighting_empty_frame_clears_seven_gbuffer_attachments_and_hdr_separately() {
+    fn no_lighting_empty_frame_clears_ten_gbuffer_attachments_and_hdr_separately() {
         let device = null_device();
         let target = RenderTarget::new(&device, Extent3d::new_2d(16, 8));
         let (plan, handles) =
             compile_without_lighting(&target, &RenderQueues::new(), &canonical::registry());
-        assert_eq!(plan.order.len(), 2);
+        assert_eq!(plan.order.len(), 3);
         assert_no_lighting_attachment_contract(&target, &plan, &handles);
         target.destroy(&device);
     }
 
     #[test]
-    fn no_lighting_surface_draw_keeps_six_attachments_and_loads_zero_coverage_clear() {
+    fn no_lighting_surface_draw_keeps_split_attachments_and_loads_zero_coverage_clear() {
         let device = null_device();
         let target = RenderTarget::new(&device, Extent3d::new_2d(16, 8));
         let mut functions = canonical::registry();
@@ -2330,29 +2483,65 @@ mod tests {
                 },
             );
             let (plan, handles) = compile_without_lighting(&target, &queues, &functions);
-            assert_eq!(plan.order.len(), 3);
+            assert_eq!(plan.order.len(), 5);
             let gbuffer = assert_no_lighting_attachment_contract(&target, &plan, &handles);
-            let passes: Vec<_> = plan
+            let geometry_passes: Vec<_> = plan
                 .attachments
                 .iter()
                 .flatten()
                 .filter(|raster| {
-                    raster.colors.len() == crate::forward_lit::SURFACE_GBUFFER_TARGET_COUNT
+                    raster.colors.iter().map(|a| a.resource).collect::<Vec<_>>()
+                        == gbuffer[..crate::forward_lit::SURFACE_GEOMETRY_TARGET_FORMATS.len()]
+                            .to_vec()
                 })
                 .collect();
-            assert_eq!(passes.len(), 2);
-            assert_eq!(passes[0].colors[3].load, LoadOp::Clear(Color::TRANSPARENT));
-            for (clear, draw) in passes[0].colors.iter().zip(&passes[1].colors) {
+            let material_passes: Vec<_> = plan
+                .attachments
+                .iter()
+                .flatten()
+                .filter(|raster| {
+                    raster.colors.iter().map(|a| a.resource).collect::<Vec<_>>()
+                        == gbuffer[crate::forward_lit::SURFACE_GEOMETRY_TARGET_FORMATS.len()..]
+                            .to_vec()
+                })
+                .collect();
+            assert_eq!(geometry_passes.len(), 2);
+            assert_eq!(material_passes.len(), 2);
+            assert_eq!(
+                geometry_passes[0].colors[3].load,
+                LoadOp::Clear(Color::TRANSPARENT)
+            );
+            for (clear, draw) in geometry_passes[0]
+                .colors
+                .iter()
+                .zip(&geometry_passes[1].colors)
+            {
+                assert_eq!(draw.load, LoadOp::Load);
+                assert_eq!(draw.output_version, clear.output_version + 1);
+            }
+            for (clear, draw) in material_passes[0]
+                .colors
+                .iter()
+                .zip(&material_passes[1].colors)
+            {
                 assert_eq!(draw.load, LoadOp::Load);
                 assert_eq!(draw.output_version, clear.output_version + 1);
             }
             assert_eq!(
-                passes[1]
+                geometry_passes[1]
                     .colors
                     .iter()
                     .map(|a| a.resource)
                     .collect::<Vec<_>>(),
-                gbuffer
+                gbuffer[..crate::forward_lit::SURFACE_GEOMETRY_TARGET_FORMATS.len()].to_vec()
+            );
+            assert_eq!(
+                material_passes[1]
+                    .colors
+                    .iter()
+                    .map(|a| a.resource)
+                    .collect::<Vec<_>>(),
+                gbuffer[crate::forward_lit::SURFACE_GEOMETRY_TARGET_FORMATS.len()..].to_vec()
             );
         }
         target.destroy(&device);
@@ -2411,7 +2600,7 @@ mod tests {
                     );
                 }
                 let (plan, handles) = compile_without_lighting(&target, &queues, &functions);
-                assert_eq!(plan.order.len(), 3 + usize::from(mixed));
+                assert_eq!(plan.order.len(), 4 + 2 * usize::from(mixed));
                 assert_no_lighting_attachment_contract(&target, &plan, &handles);
                 let hdr_resource = handles[&target.view()].resource();
                 let hdr_passes: Vec<_> = plan
@@ -2435,7 +2624,7 @@ mod tests {
                         .position(|raster| {
                             raster.as_ref().is_some_and(|raster| {
                                 raster.colors.len()
-                                    == crate::forward_lit::SURFACE_GBUFFER_TARGET_COUNT
+                                    == crate::forward_lit::SURFACE_GEOMETRY_TARGET_FORMATS.len()
                                     && raster.colors[0].load == LoadOp::Load
                             })
                         })
@@ -2531,7 +2720,7 @@ mod tests {
                 None,
                 &imports,
             );
-        assert_eq!(handles.len(), 12, "eleven builtins plus one owner import");
+        assert_eq!(handles.len(), 15, "fourteen builtins plus one owner import");
         assert!(handles.contains_key(&external_view));
         assert!(handles.contains_key(&target.depth_view()));
         assert!(graph.compile().is_ok());
@@ -2588,7 +2777,7 @@ mod tests {
             .iter()
             .position(|attachments| {
                 attachments.as_ref().is_some_and(|raster| {
-                    raster.colors.len() == crate::forward_lit::SURFACE_GBUFFER_TARGET_COUNT
+                    raster.colors.len() == crate::forward_lit::SURFACE_GEOMETRY_TARGET_FORMATS.len()
                         && raster.colors[0].load == LoadOp::Load
                 })
             })

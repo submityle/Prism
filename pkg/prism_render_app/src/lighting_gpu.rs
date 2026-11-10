@@ -449,6 +449,33 @@ var hdr_target: texture_storage_2d<rgba16float, write>;
 var<storage, read_write> response_outputs: array<CompositeResponseOutput>;
 @group(1) @binding(9)
 var surface_data_gbuffer: texture_2d<f32>;
+@group(1) @binding(10)
+var sampled_material_a_gbuffer: texture_2d<f32>;
+@group(1) @binding(11)
+var sampled_material_b_gbuffer: texture_2d<f32>;
+@group(1) @binding(12)
+var sampled_material_c_gbuffer: texture_2d<u32>;
+
+fn composite_unpack_material_c(encoded: u32) -> vec4<f32> {
+    return vec4<f32>(
+        f32(encoded & 0xffu) / 255.0,
+        f32((encoded >> 8u) & 0xffu) / 255.0,
+        f32((encoded >> 16u) & 0xffu) / 255.0,
+        f32((encoded >> 24u) & 0xffu) / 255.0,
+    );
+}
+
+fn composite_decode_oct_normal(encoded: vec2<f32>) -> vec3<f32> {
+    let p = encoded * 2.0 - vec2<f32>(1.0);
+    var n = vec3<f32>(p.x, p.y, 1.0 - abs(p.x) - abs(p.y));
+    if (n.z < 0.0) {
+        let reflected = (1.0 - abs(n.yx))
+            * vec2<f32>(select(-1.0, 1.0, n.x >= 0.0), select(-1.0, 1.0, n.y >= 0.0));
+        n.x = reflected.x;
+        n.y = reflected.y;
+    }
+    return normalize_or(n, vec3<f32>(0.0, 1.0, 0.0));
+}
 
 fn composite_basis_tangent(normal_input: vec3<f32>) -> vec3<f32> {
     let normal = normalize_or(normal_input, vec3<f32>(0.0, 1.0, 0.0));
@@ -814,6 +841,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let normal_input = normal_sample.xyz;
     let sampled_base_color = textureLoad(albedo_gbuffer, pixel, 0).xyz;
     let surface_data = textureLoad(surface_data_gbuffer, pixel, 0);
+    let sampled_material_a = textureLoad(sampled_material_a_gbuffer, pixel, 0);
+    let sampled_material_b = textureLoad(sampled_material_b_gbuffer, pixel, 0);
+    let sampled_material_c = composite_unpack_material_c(
+        textureLoad(sampled_material_c_gbuffer, pixel, 0).x,
+    );
     if (!finite(material.surface.base_weight) || !finite(material.surface.base_metalness) ||
         !finite(material.surface.transmission_weight) || !finite(material.surface.emission_luminance) ||
         !finite(camera_view.position.x) || !finite(camera_view.position.y) ||
@@ -828,7 +860,14 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         !finite(sampled_base_color.x) || !finite(sampled_base_color.y) ||
         !finite(sampled_base_color.z) || !finite(surface_data.x) ||
         !finite(surface_data.y) || !finite(surface_data.z) ||
-        !finite(surface_data.w) || surface_data.w <= 0.0) {
+        !finite(surface_data.w) || surface_data.w <= 0.0 ||
+        !finite(sampled_material_a.x) || !finite(sampled_material_a.y) ||
+        !finite(sampled_material_a.z) || !finite(sampled_material_a.w) ||
+        !finite(sampled_material_b.x) || !finite(sampled_material_b.y) ||
+        !finite(sampled_material_b.z) || !finite(sampled_material_b.w) ||
+        !finite(sampled_material_c.x) || !finite(sampled_material_c.y) ||
+        !finite(sampled_material_c.z) || !finite(sampled_material_c.w) ||
+        sampled_material_c.w <= 0.0) {
         textureStore(hdr_target, pixel, vec4<f32>(0.0));
         return;
     }
@@ -839,6 +878,14 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     // all other OpenPBR parameters still come from the validated material row.
     var surface = composite_surface_sample(material.surface);
     surface.base_color = sampled_base_color;
+    surface.emissive = sampled_material_a.xyz * material.surface.emission_luminance;
+    surface.metallic = sampled_material_a.w;
+    surface.perceptual_roughness = sampled_material_b.x;
+    surface.ambient_occlusion = sampled_material_b.y;
+    surface.clearcoat = sampled_material_b.z;
+    surface.normal_variance = sampled_material_b.w;
+    surface.clearcoat_roughness = sampled_material_c.z;
+    surface.coat_normal = composite_decode_oct_normal(sampled_material_c.xy);
     let tangent_reference = composite_basis_tangent(normal);
     let tangent_bitangent = composite_basis_bitangent(normal, tangent_reference);
     let tangent_angle = surface_data.z;
@@ -1176,7 +1223,11 @@ fn composite_evaluate_native_registered(
 /// position `R32Float` x/y/z, normal `Rgba16Float` (alpha carries binary
 /// coverage), sRGB albedo `Rgba8UnormSrgb`, surface id `R32Uint`, and HDR
 /// output `Rgba16Float`. SurfaceData is an additional `Rgba16Float` plane
-/// carrying UV, footprint, and tangent orientation.
+/// carrying UV, footprint, and tangent orientation. Two more `Rgba16Float`
+/// planes carry sampled emissive/metallic and roughness/occlusion/coat/
+/// normal-variance channels; C is a packed `R32Uint` word carrying
+/// oct-encoded coat normal, coat roughness, and an opaque validity marker as
+/// four UNORM8 lanes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct LightingCompositeTarget {
     pub position_x_view: TextureViewId,
@@ -1186,6 +1237,9 @@ pub(crate) struct LightingCompositeTarget {
     pub albedo_view: TextureViewId,
     pub surface_id_view: TextureViewId,
     pub surface_data_view: TextureViewId,
+    pub sampled_material_a_view: TextureViewId,
+    pub sampled_material_b_view: TextureViewId,
+    pub sampled_material_c_view: TextureViewId,
     pub surface_identity_buffer: BufferId,
     pub surface_identity_size_bytes: u64,
     pub hdr_target_view: TextureViewId,
@@ -1279,6 +1333,9 @@ fn validate_composite_target(
         target.albedo_view,
         target.surface_id_view,
         target.surface_data_view,
+        target.sampled_material_a_view,
+        target.sampled_material_b_view,
+        target.sampled_material_c_view,
         target.hdr_target_view,
     ];
     for (index, view) in views.iter().copied().enumerate() {
@@ -1317,6 +1374,18 @@ fn composite_target_layout_descriptor() -> BindGroupLayoutDescriptor {
             storage_texture_layout(7, COMPOSITE_HDR_FORMAT),
             storage_layout(8, COMPOSITE_RESPONSE_BYTES_PER_PIXEL, false),
             texture_layout(9, COMPOSITE_SURFACE_DATA_FORMAT.sample_type()),
+            texture_layout(
+                10,
+                crate::target::SURFACE_MATERIAL_A_GBUFFER_FORMAT.sample_type(),
+            ),
+            texture_layout(
+                11,
+                crate::target::SURFACE_MATERIAL_B_GBUFFER_FORMAT.sample_type(),
+            ),
+            texture_layout(
+                12,
+                crate::target::SURFACE_MATERIAL_C_GBUFFER_FORMAT.sample_type(),
+            ),
         ],
     }
 }
@@ -1463,6 +1532,9 @@ mod composite_contract_tests {
             albedo_view: TextureViewId::from_parts(5, 1),
             surface_id_view: TextureViewId::from_parts(7, 1),
             surface_data_view: TextureViewId::from_parts(11, 1),
+            sampled_material_a_view: TextureViewId::from_parts(12, 1),
+            sampled_material_b_view: TextureViewId::from_parts(13, 1),
+            sampled_material_c_view: TextureViewId::from_parts(14, 1),
             surface_identity_buffer: BufferId::from_parts(9, 1),
             surface_identity_size_bytes: 1920 * 1080 * SURFACE_IDENTITY_BYTES_PER_PIXEL,
             hdr_target_view: TextureViewId::from_parts(8, 1),
@@ -1483,13 +1555,16 @@ mod composite_contract_tests {
             COMPOSITE_ALBEDO_FORMAT,
             COMPOSITE_SURFACE_ID_FORMAT,
             COMPOSITE_SURFACE_DATA_FORMAT,
+            crate::target::SURFACE_MATERIAL_A_GBUFFER_FORMAT,
+            crate::target::SURFACE_MATERIAL_B_GBUFFER_FORMAT,
+            crate::target::SURFACE_MATERIAL_C_GBUFFER_FORMAT,
         ];
         assert_eq!(
             formats
                 .iter()
                 .map(|format| format.bytes_per_texel())
                 .sum::<u32>(),
-            36
+            56
         );
         // WebGPU target pixel byte cost is NOT the stored texel size:
         // rgba8unorm(-srgb) costs 8, not 4. The actual GPU pipeline/pass tests
@@ -1500,11 +1575,12 @@ mod composite_contract_tests {
                 TextureFormat::R32Float => 4,
                 TextureFormat::Rgba16Float => 8,
                 TextureFormat::Rgba8UnormSrgb => 8,
+                TextureFormat::Rgba8Unorm => 4,
                 TextureFormat::R32Uint => 4,
                 _ => unreachable!("unexpected GBuffer format"),
             })
             .sum::<u32>();
-        assert_eq!(bytes_per_sample, 40);
+        assert_eq!(bytes_per_sample, 60);
     }
 
     #[test]
@@ -1531,10 +1607,11 @@ mod composite_contract_tests {
 
     #[test]
     fn composite_target_rejects_view_aliasing() {
-        for left in 0..8 {
-            for right in left + 1..8 {
-                let mut views =
-                    core::array::from_fn::<_, 8, _>(|i| TextureViewId::from_parts(i as u32 + 1, 1));
+        for left in 0..11 {
+            for right in left + 1..11 {
+                let mut views = core::array::from_fn::<_, 11, _>(|i| {
+                    TextureViewId::from_parts(i as u32 + 1, 1)
+                });
                 views[right] = views[left];
                 let aliased = LightingCompositeTarget {
                     position_x_view: views[0],
@@ -1544,7 +1621,10 @@ mod composite_contract_tests {
                     albedo_view: views[4],
                     surface_id_view: views[5],
                     surface_data_view: views[6],
-                    hdr_target_view: views[7],
+                    sampled_material_a_view: views[7],
+                    sampled_material_b_view: views[8],
+                    sampled_material_c_view: views[9],
+                    hdr_target_view: views[10],
                     ..target()
                 };
                 assert_eq!(
@@ -1600,7 +1680,7 @@ mod composite_contract_tests {
                 .iter()
                 .map(|entry| entry.binding)
                 .collect::<Vec<_>>(),
-            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
         );
         assert!(target_layout
             .entries
@@ -1786,6 +1866,31 @@ mod composite_contract_tests {
         assert!(super::NATIVE_REGISTERED_ADAPTER_WGSL.contains("program_id: u32,"));
         assert!(super::NATIVE_REGISTERED_ADAPTER_WGSL.contains("        program_id,\n"));
     }
+
+    #[test]
+    fn composite_consumes_native_sampled_material_planes() {
+        let shader = LIGHTING_COMPOSITE_WGSL;
+        for declaration in [
+            "@group(1) @binding(10)",
+            "@group(1) @binding(11)",
+            "@group(1) @binding(12)",
+            "surface.emissive = sampled_material_a.xyz * material.surface.emission_luminance",
+            "surface.metallic = sampled_material_a.w",
+            "surface.perceptual_roughness = sampled_material_b.x",
+            "surface.ambient_occlusion = sampled_material_b.y",
+            "surface.clearcoat = sampled_material_b.z",
+            "surface.normal_variance = sampled_material_b.w",
+            "surface.clearcoat_roughness = sampled_material_c.z",
+            "surface.coat_normal = composite_decode_oct_normal(sampled_material_c.xy)",
+            "sampled_material_c.w <= 0.0",
+            "composite_unpack_material_c",
+        ] {
+            assert!(
+                shader.contains(declaration),
+                "missing Native sampled channel consumer: {declaration}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1794,6 +1899,7 @@ mod gbuffer_gpu_contract_tests {
     use crate::forward_lit::{
         SurfaceEncodeProvider, SurfaceFrame, SurfaceMaterial, SurfaceResourceSet,
     };
+    use crate::mesh_pipeline::MeshPipelineProvider;
     use prism_render_architecture::ray_scene::{RayHitAttributeRecord, RayHitIdentity};
     use prism_render_driver::{
         self as rhi, CommandEncoder, ComputeCommand, Extent3d, RenderCommand, SamplerDescriptor,
@@ -2186,6 +2292,28 @@ return RegisteredResponse(
                 .flat_map(u16::to_le_bytes)
                 .collect::<Vec<_>>(),
         );
+        // The composite treats sampled material planes as a real producer
+        // contract. Keep this direct-response probe explicit instead of
+        // relying on newly allocated zeroed textures, especially for C's
+        // validity marker.
+        write(
+            target.surface_material_a_texture(),
+            &[0_u16, 0, 0, 0]
+                .into_iter()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        );
+        write(
+            target.surface_material_b_texture(),
+            &[0x34cd_u16, 0x3c00, 0, 0]
+                .into_iter()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        );
+        write(
+            target.surface_material_c_texture(),
+            &0xff008080_u32.to_le_bytes(),
+        );
 
         let mut encoder = CommandEncoder::new();
         encoder.push_compute_pass(None, composite_commands(pass));
@@ -2342,6 +2470,9 @@ return RegisteredResponse(
 @group(1) @binding(3) var normal: texture_2d<f32>;
 @group(1) @binding(4) var albedo: texture_2d<f32>;
 @group(1) @binding(5) var surface_id: texture_2d<u32>;
+@group(1) @binding(10) var sampled_material_a: texture_2d<f32>;
+@group(1) @binding(11) var sampled_material_b: texture_2d<f32>;
+@group(1) @binding(12) var sampled_material_c: texture_2d<u32>;
 struct SurfaceIdentityProbe {
     material_index: u32,
     generation: u32,
@@ -2371,10 +2502,13 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let n = textureLoad(normal, p, 0);
     let position = vec3<f32>(textureLoad(px, p, 0).x,
         textureLoad(py, p, 0).x, textureLoad(pz, p, 0).x);
-    let base = (id.y * extent.x + id.x) * 3u;
+    let base = (id.y * extent.x + id.x) * 6u;
     output[base] = vec4<u32>(bitcast<vec3<u32>>(position), bitcast<u32>(n.w));
     output[base + 1u] = vec4<u32>(bitcast<vec3<u32>>(n.xyz), textureLoad(surface_id, p, 0).x);
     output[base + 2u] = bitcast<vec4<u32>>(textureLoad(albedo, p, 0));
+    output[base + 3u] = bitcast<vec4<u32>>(textureLoad(sampled_material_a, p, 0));
+    output[base + 4u] = bitcast<vec4<u32>>(textureLoad(sampled_material_b, p, 0));
+    output[base + 5u] = vec4<u32>(textureLoad(sampled_material_c, p, 0).x, 0u, 0u, 0u);
 }
 "#;
 
@@ -2419,11 +2553,16 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             sample_count: 1,
             topology: rhi::PrimitiveTopology::TriangleList,
         };
-        let mut descriptor = provider
+        let mut geometry_descriptor = provider
             .try_descriptor(&key, &[vertex_layout.clone()])
             .unwrap();
-        descriptor.vertex.buffers = vec![vertex_layout];
-        let pipeline = device.create_render_pipeline(&descriptor);
+        geometry_descriptor.vertex.buffers = vec![vertex_layout.clone()];
+        let geometry_pipeline = device.create_render_pipeline(&geometry_descriptor);
+        let mut material_descriptor = provider
+            .secondary_descriptor(&key)
+            .expect("surface encode must publish the material attachment pipeline");
+        material_descriptor.vertex.buffers = vec![vertex_layout];
+        let material_pipeline = device.create_render_pipeline(&material_descriptor);
         // All components exceed finite binary16 range; z also has fractional
         // bits. An f16 intermediate or component swizzle cannot pass readback.
         let origin = [131_072.0_f32, -262_144.0, 1_048_576.25];
@@ -2526,7 +2665,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                 })
                 .unwrap(),
         );
-        let probe_bytes = u64::from(WIDTH * HEIGHT) * 48;
+        let probe_bytes = u64::from(WIDTH * HEIGHT) * 96;
         let probe = device.create_buffer(&BufferDescriptor::new(
             probe_bytes,
             BufferUsages::STORAGE | BufferUsages::COPY_SRC,
@@ -2555,14 +2694,13 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         let mut encoder = CommandEncoder::new();
         encoder.push_render_pass(
             rhi::RenderPassDescriptor {
-                label: Some("gbuffer-contract-raster".into()),
+                label: Some("gbuffer-contract-geometry-raster".into()),
                 color_attachments: [
                     target.position_x_view(),
                     target.position_y_view(),
                     target.position_z_view(),
                     target.normal_view(),
                     target.albedo_view(),
-                    target.surface_id_view(),
                 ]
                 .into_iter()
                 .map(|view| {
@@ -2577,7 +2715,53 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                 depth_stencil_attachment: None,
             },
             vec![
-                RenderCommand::SetPipeline(pipeline),
+                RenderCommand::SetPipeline(geometry_pipeline),
+                RenderCommand::SetBindGroup {
+                    index: 0,
+                    bind_group: group,
+                    dynamic_offsets: vec![0, 0],
+                },
+                RenderCommand::SetBindGroup {
+                    index: 1,
+                    bind_group: vt_group,
+                    dynamic_offsets: vec![],
+                },
+                RenderCommand::SetVertexBuffer {
+                    slot: 0,
+                    buffer: vertex,
+                    offset: 0,
+                    size: None,
+                },
+                RenderCommand::Draw {
+                    vertices: 0..6,
+                    instances: 0..1,
+                },
+            ],
+        );
+        encoder.push_render_pass(
+            rhi::RenderPassDescriptor {
+                label: Some("gbuffer-contract-material-raster".into()),
+                color_attachments: [
+                    target.surface_id_view(),
+                    target.surface_data_view(),
+                    target.surface_material_a_view(),
+                    target.surface_material_b_view(),
+                    target.surface_material_c_view(),
+                ]
+                .into_iter()
+                .map(|view| {
+                    Some(rhi::ColorAttachment {
+                        view,
+                        resolve_target: None,
+                        load: rhi::LoadOp::Clear(rhi::Color::TRANSPARENT),
+                        store: rhi::StoreOp::Store,
+                    })
+                })
+                .collect(),
+                depth_stencil_attachment: None,
+            },
+            vec![
+                RenderCommand::SetPipeline(material_pipeline),
                 RenderCommand::SetBindGroup {
                     index: 0,
                     bind_group: group,
@@ -2678,7 +2862,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             for y in 0..HEIGHT {
                 for x in 0..WIDTH {
                     let index = (y * WIDTH + x) as usize;
-                    let sample = &words[index * 12..(index + 1) * 12];
+                    let sample = &words[index * 24..(index + 1) * 24];
                     let response = &response_words[index * 16..(index + 1) * 16];
                     let covered = (2..=6).contains(&x) && (2..=4).contains(&y);
                     assert_eq!(
@@ -2715,6 +2899,32 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                         assert!((f32::from_bits(sample[4 + channel]) - expected).abs() <= 0.0005);
                     }
                     assert_eq!(sample[7], surface_id, "canonical header row identity");
+                    // The neutral OpenPBR emission color is white; its zero
+                    // luminance keeps the default material non-emissive.
+                    for channel in 12..15 {
+                        assert_eq!(f32::from_bits(sample[channel]), 1.0);
+                    }
+                    assert_eq!(f32::from_bits(sample[15]), 0.0, "sampled metallic");
+                    // RGBA16Float stores the authored roughness with half-float
+                    // quantization; validate the format error, not f32 identity.
+                    assert!(
+                        (f32::from_bits(sample[16]) - 0.3).abs() <= 0.001,
+                        "sampled roughness"
+                    );
+                    assert_eq!(f32::from_bits(sample[17]), 1.0, "sampled occlusion");
+                    assert_eq!(f32::from_bits(sample[18]), 0.0, "sampled coat");
+                    assert_eq!(f32::from_bits(sample[19]), 0.0, "sampled normal variance");
+                    // The default clearcoat normal is the geometry normal
+                    // [0.6, 0.8, 0.0], quantized into four UNORM8 lanes in
+                    // the R32Uint C plane and decoded by textureLoad.
+                    let packed_c = sample[20];
+                    assert_eq!(packed_c & 0xff, 182, "sampled coat normal x");
+                    assert_eq!((packed_c >> 8) & 0xff, 200, "sampled coat normal y");
+                    assert_eq!((packed_c >> 16) & 0xff, 0, "sampled clearcoat roughness");
+                    assert_eq!((packed_c >> 24) & 0xff, 255, "sampled material C validity");
+                    assert_eq!(sample[21], 0);
+                    assert_eq!(sample[22], 0);
+                    assert_eq!(sample[23], 0);
                     let mut linear_albedo = [0.0; 3];
                     for channel in 0..3 {
                         let linear = albedo[channel].clamp(0.0, 1.0);
@@ -2825,7 +3035,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         let center = ((HEIGHT / 2) * WIDTH + WIDTH / 2) as usize;
         let center_word = |word: usize| {
             u32::from_le_bytes(
-                valid_probe[center * 48 + word * 4..center * 48 + (word + 1) * 4]
+                valid_probe[center * 96 + word * 4..center * 96 + (word + 1) * 4]
                     .try_into()
                     .unwrap(),
             )
@@ -2852,6 +3062,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         // This exercises the real identity reconstruction and Native composite
         // path; it is not a source-string or synthetic response check.
         let (npr_header, npr_heap) = canonical_npr_surface(transparent_albedo, 1.0);
+        let physical_heap_words = npr_heap.len() as u32;
         let npr_identity = SurfaceMaterial {
             index: 1,
             generation: npr_header.generation,
@@ -3034,7 +3245,17 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                 "offset" => header.parameter_offset = u32::MAX,
                 "heap_end" => header.parameter_offset = heap.len() as u32,
                 "past_heap_end" => header.parameter_offset = heap.len() as u32 + 1,
-                "heap_one_word_short" => header.parameter_offset += 1,
+                // This fixture's storage buffer is large enough for the NPR
+                // variant, while the current row is Lit. Exercise the GPU
+                // binding's physical tail; the CPU fail-closed validator
+                // separately covers a logical heap shorter than that binding.
+                "heap_one_word_short" => {
+                    let packed_words = header.parameter_size / 4;
+                    header.parameter_offset = physical_heap_words
+                        .checked_sub(packed_words)
+                        .expect("fixture physical heap must fit the Lit block")
+                        + 1;
+                }
                 // Keep the known mask, exact packed size and in-range heap
                 // untouched: only the unknown-bit guard can reject this row.
                 "unknown_lobe_with_valid_size" => header.lobe_mask |= unknown_lobe_bit,
@@ -3083,8 +3304,13 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             );
         }
 
-        // Origin is a valid covered position; id zero is valid too. Coverage,
-        // GI count bounds and finite checks must be independent of both values.
+        // Origin is a valid covered position; id zero is valid too. Populate
+        // every fixture header row so ids 0..=2 exercise valid material rows,
+        // while the later large ids still test the bounds guard.
+        queue.write_buffer(headers, 0, cast_slice(&[valid_header; 4]));
+
+        // Coverage, GI count bounds and finite checks must be independent of
+        // both position and material-id values.
         let cases = [
             (false, 0, [0.0; 3]),
             (true, 0, [0.0; 3]),
@@ -3131,11 +3357,51 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                     .collect::<Vec<_>>(),
             );
             upload(target.surface_id_texture(), &id.to_le_bytes());
+            // The composite contract rejects missing SurfaceData and sampled
+            // material planes independently of coverage. Keep these inputs
+            // valid so this loop isolates coverage and material-id bounds.
+            upload(
+                target.surface_data_texture(),
+                &[0_u16, 0, 0, 0x3c00]
+                    .into_iter()
+                    .flat_map(u16::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            );
+            upload(
+                target.surface_material_a_texture(),
+                &[0_u16, 0, 0, 0]
+                    .into_iter()
+                    .flat_map(u16::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            );
+            upload(
+                target.surface_material_b_texture(),
+                &[0x34cd_u16, 0x3c00, 0, 0]
+                    .into_iter()
+                    .flat_map(u16::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            );
+            upload(
+                target.surface_material_c_texture(),
+                &0xff008080_u32.to_le_bytes(),
+            );
         }
         let mut composite = CommandEncoder::new();
         composite.push_compute_pass(None, composite_commands(f.pass));
         queue.submit(&[composite.finish()]);
         assert!(queue.wait_idle());
+        let boundary_identity = queue
+            .read_buffer(target.surface_identity_buffer(), 4 * 64)
+            .expect("boundary identity readback must complete");
+        let boundary_ids = boundary_identity
+            .chunks_exact(64)
+            .map(|row| u32::from_le_bytes(row[0..4].try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            boundary_ids,
+            vec![u32::MAX, 0, 1, 2],
+            "identity prepass must preserve valid zero-based rows and reject clear"
+        );
         let hdr = queue
             .read_texture_rgba16f(target.texture(), WIDTH, HEIGHT)
             .expect("lighting composite HDR readback must complete");
@@ -3432,6 +3698,18 @@ impl LightingGpuPass {
                     resource: BindingResource::TextureView(target.surface_data_view),
                 },
                 BindGroupEntry {
+                    binding: 10,
+                    resource: BindingResource::TextureView(target.sampled_material_a_view),
+                },
+                BindGroupEntry {
+                    binding: 11,
+                    resource: BindingResource::TextureView(target.sampled_material_b_view),
+                },
+                BindGroupEntry {
+                    binding: 12,
+                    resource: BindingResource::TextureView(target.sampled_material_c_view),
+                },
+                BindGroupEntry {
                     binding: 6,
                     resource: BindingResource::Buffer {
                         buffer: target.surface_identity_buffer,
@@ -3557,6 +3835,9 @@ struct CompositeTargetKey {
     albedo_view: TextureViewId,
     surface_id_view: TextureViewId,
     surface_data_view: TextureViewId,
+    sampled_material_a_view: TextureViewId,
+    sampled_material_b_view: TextureViewId,
+    sampled_material_c_view: TextureViewId,
     surface_identity_buffer: BufferId,
     hdr_target_view: TextureViewId,
     width: u32,
@@ -3573,6 +3854,9 @@ impl From<&RenderTarget> for CompositeTargetKey {
             albedo_view: target.albedo_view(),
             surface_id_view: target.surface_id_view(),
             surface_data_view: target.surface_data_view(),
+            sampled_material_a_view: target.surface_material_a_view(),
+            sampled_material_b_view: target.surface_material_b_view(),
+            sampled_material_c_view: target.surface_material_c_view(),
             surface_identity_buffer: target.surface_identity_buffer(),
             hdr_target_view: target.view(),
             width: target.viewport().extent().width,
@@ -4431,6 +4715,9 @@ where
                         albedo_view: key.albedo_view,
                         surface_id_view: key.surface_id_view,
                         surface_data_view: key.surface_data_view,
+                        sampled_material_a_view: key.sampled_material_a_view,
+                        sampled_material_b_view: key.sampled_material_b_view,
+                        sampled_material_c_view: key.sampled_material_c_view,
                         surface_identity_buffer: key.surface_identity_buffer,
                         surface_identity_size_bytes: target.surface_identity_size_bytes(),
                         hdr_target_view: key.hdr_target_view,
@@ -4539,6 +4826,9 @@ where
                     albedo_view: key.albedo_view,
                     surface_id_view: key.surface_id_view,
                     surface_data_view: key.surface_data_view,
+                    sampled_material_a_view: key.sampled_material_a_view,
+                    sampled_material_b_view: key.sampled_material_b_view,
+                    sampled_material_c_view: key.sampled_material_c_view,
                     surface_identity_buffer: key.surface_identity_buffer,
                     surface_identity_size_bytes: target.surface_identity_size_bytes(),
                     hdr_target_view: key.hdr_target_view,

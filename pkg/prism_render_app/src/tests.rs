@@ -2274,6 +2274,53 @@ pub(super) fn write_lighting_test_gbuffer_pixel(
         .flat_map(u16::to_le_bytes)
         .collect::<Vec<_>>();
     upload(target.surface_data_texture(), &surface_data);
+
+    // Keep the sampled-material planes populated like the neutral material
+    // producer. C is Rgba8Unorm, so its alpha also proves that the plane was
+    // written rather than merely being a zero-initialized attachment.
+    let half_rgba = |values: [f32; 4]| {
+        values
+            .into_iter()
+            .flat_map(|value| {
+                prism_render_architecture::particle::half_float_f16::f32_to_f16_bits(value)
+                    .to_le_bytes()
+            })
+            .collect::<Vec<_>>()
+    };
+    upload(
+        target.surface_material_a_texture(),
+        &half_rgba([0.0, 0.0, 0.0, 0.0]),
+    );
+    upload(
+        target.surface_material_b_texture(),
+        &half_rgba([0.3, 1.0, 0.0, 0.0]),
+    );
+
+    let length = surface
+        .normal
+        .iter()
+        .map(|component| component * component)
+        .sum::<f32>()
+        .sqrt();
+    let normal = if length > 1.0e-12 {
+        surface.normal.map(|component| component / length)
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    let l1 = (normal[0].abs() + normal[1].abs() + normal[2].abs()).max(1.0e-8);
+    let mut oct = [normal[0] / l1, normal[1] / l1];
+    if normal[2] < 0.0 {
+        oct = [
+            (1.0 - oct[1].abs()) * if oct[0] >= 0.0 { 1.0 } else { -1.0 },
+            (1.0 - oct[0].abs()) * if oct[1] >= 0.0 { 1.0 } else { -1.0 },
+        ];
+    }
+    let sampled_material_c =
+        (u32::from(((oct[0] * 0.5 + 0.5) * 255.0).round() as u8)
+            | (u32::from(((oct[1] * 0.5 + 0.5) * 255.0).round() as u8) << 8)
+            | (255_u32 << 24))
+        .to_le_bytes();
+    upload(target.surface_material_c_texture(), &sampled_material_c);
     surface
 }
 

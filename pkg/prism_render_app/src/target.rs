@@ -2,8 +2,9 @@
 
 use prism_ecs::prelude::Resource;
 use prism_render_driver::{
-    Extent3d, FrameSync, Instance, RenderDevice, TextureDescriptor, TextureFormat, TextureId,
-    TextureUsages, TextureViewDescriptor, TextureViewId,
+    BufferDescriptor, BufferId, BufferUsages, Extent3d, FrameSync, Instance, RenderDevice,
+    TextureDescriptor, TextureFormat, TextureId, TextureUsages, TextureViewDescriptor,
+    TextureViewId,
 };
 use prism_render_runtime::RenderRuntime;
 use std::collections::BTreeMap;
@@ -46,6 +47,38 @@ pub(crate) const POSITION_Z_GBUFFER_FORMAT: TextureFormat =
 /// The stable surface identifier format required by the lighting composite.
 pub(crate) const SURFACE_ID_GBUFFER_FORMAT: TextureFormat =
     crate::lighting_gpu::COMPOSITE_SURFACE_ID_FORMAT;
+/// Per-pixel canonical UV/footprint/tangent-angle input consumed by Native
+/// composite. It is kept separate from albedo so the texture-row result and
+/// the surface coordinate contract cannot alias one another.
+pub(crate) const SURFACE_DATA_GBUFFER_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
+/// Sampled non-base material channels: emissive RGB and metallic.
+pub(crate) const SURFACE_MATERIAL_A_GBUFFER_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
+/// Sampled non-base material channels: roughness, occlusion, coat, and normal variance.
+pub(crate) const SURFACE_MATERIAL_B_GBUFFER_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
+/// Sampled clearcoat normal/roughness/validity, packed as four UNORM8 lanes
+/// in one `R32Uint` word. `Rgba8Unorm` has an 8-byte WebGPU render-target
+/// pixel cost despite its 4-byte texel size, so the integer word is required
+/// to keep the material raster pass within the baseline 32-byte budget.
+pub(crate) const SURFACE_MATERIAL_C_GBUFFER_FORMAT: TextureFormat = TextureFormat::R32Uint;
+
+/// Bytes per pixel in the post-raster surface identity tuple. The tuple keeps
+/// the complete verified execution metadata needed by the composite without
+/// adding another storage-buffer binding: material identity, both response
+/// endpoints, channel/mask/domain metadata, stable program ids, and the GI
+/// lighting-surface mapping are all sixteen 32-bit words.
+pub(crate) const SURFACE_IDENTITY_BYTES_PER_PIXEL: u64 = 64;
+/// Screen-space motion produced by the camera-local temporal input pass.
+/// `Rgba16Float` is a baseline storage-texture format; `Rg16Float` is not
+/// guaranteed storage-writable without adapter-specific format features.
+pub(crate) const TAA_MOTION_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
+/// Conservative temporal rejection mask produced alongside motion.
+/// `R32Float` is baseline storage-writable, unlike `R8Unorm`.
+pub(crate) const TAA_REACTIVE_FORMAT: TextureFormat = TextureFormat::R32Float;
+
+/// Usage contract shared by the temporal-input producer and TAA resolve.
+pub(crate) const TAA_TEMPORAL_INPUT_USAGES: TextureUsages = TextureUsages::STORAGE_BINDING
+    .union(TextureUsages::TEXTURE_BINDING)
+    .union(TextureUsages::COPY_SRC);
 
 /// The usages required by every persistent GBuffer plane.
 pub(crate) const GBUFFER_USAGES: TextureUsages = TextureUsages::RENDER_ATTACHMENT
@@ -88,6 +121,29 @@ pub struct RenderTarget {
     surface_id_texture: TextureId,
     surface_id_view: TextureViewId,
     surface_id_format: TextureFormat,
+    surface_data_texture: TextureId,
+    surface_data_view: TextureViewId,
+    surface_data_format: TextureFormat,
+    /// Per-pixel sampled material channels produced by the surface raster.
+    surface_material_a_texture: TextureId,
+    surface_material_a_view: TextureViewId,
+    surface_material_a_format: TextureFormat,
+    surface_material_b_texture: TextureId,
+    surface_material_b_view: TextureViewId,
+    surface_material_b_format: TextureFormat,
+    surface_material_c_texture: TextureId,
+    surface_material_c_view: TextureViewId,
+    surface_material_c_format: TextureFormat,
+    /// Per-pixel material identity produced after opaque raster and consumed by
+    /// the Native composite. This is a storage buffer rather than another MRT
+    /// plane so the attachment byte budget remains unchanged.
+    surface_identity_buffer: BufferId,
+    taa_motion_texture: TextureId,
+    taa_motion_view: TextureViewId,
+    taa_motion_format: TextureFormat,
+    taa_reactive_texture: TextureId,
+    taa_reactive_view: TextureViewId,
+    taa_reactive_format: TextureFormat,
     depth_texture: TextureId,
     depth_view: TextureViewId,
     depth_format: TextureFormat,
@@ -143,6 +199,19 @@ impl RenderTarget {
             albedo_view: None,
             surface_id_texture: None,
             surface_id_view: None,
+            surface_data_texture: None,
+            surface_data_view: None,
+            surface_material_a_texture: None,
+            surface_material_a_view: None,
+            surface_material_b_texture: None,
+            surface_material_b_view: None,
+            surface_material_c_texture: None,
+            surface_material_c_view: None,
+            surface_identity_buffer: None,
+            taa_motion_texture: None,
+            taa_motion_view: None,
+            taa_reactive_texture: None,
+            taa_reactive_view: None,
             depth_texture: None,
             depth_view: None,
         };
@@ -214,6 +283,80 @@ impl RenderTarget {
             device.create_texture_view(surface_id_texture, &TextureViewDescriptor::default());
         pending.surface_id_view = Some(surface_id_view);
 
+        let surface_data_texture = device.create_texture(&TextureDescriptor::new_2d(
+            viewport.extent(),
+            SURFACE_DATA_GBUFFER_FORMAT,
+            GBUFFER_USAGES,
+        ));
+        pending.surface_data_texture = Some(surface_data_texture);
+        let surface_data_view =
+            device.create_texture_view(surface_data_texture, &TextureViewDescriptor::default());
+        pending.surface_data_view = Some(surface_data_view);
+
+        let surface_material_a_texture = device.create_texture(&TextureDescriptor::new_2d(
+            viewport.extent(),
+            SURFACE_MATERIAL_A_GBUFFER_FORMAT,
+            GBUFFER_USAGES,
+        ));
+        pending.surface_material_a_texture = Some(surface_material_a_texture);
+        let surface_material_a_view = device.create_texture_view(
+            surface_material_a_texture,
+            &TextureViewDescriptor::default(),
+        );
+        pending.surface_material_a_view = Some(surface_material_a_view);
+
+        let surface_material_b_texture = device.create_texture(&TextureDescriptor::new_2d(
+            viewport.extent(),
+            SURFACE_MATERIAL_B_GBUFFER_FORMAT,
+            GBUFFER_USAGES,
+        ));
+        pending.surface_material_b_texture = Some(surface_material_b_texture);
+        let surface_material_b_view = device.create_texture_view(
+            surface_material_b_texture,
+            &TextureViewDescriptor::default(),
+        );
+        pending.surface_material_b_view = Some(surface_material_b_view);
+
+        let surface_material_c_texture = device.create_texture(&TextureDescriptor::new_2d(
+            viewport.extent(),
+            SURFACE_MATERIAL_C_GBUFFER_FORMAT,
+            GBUFFER_USAGES,
+        ));
+        pending.surface_material_c_texture = Some(surface_material_c_texture);
+        let surface_material_c_view = device.create_texture_view(
+            surface_material_c_texture,
+            &TextureViewDescriptor::default(),
+        );
+        pending.surface_material_c_view = Some(surface_material_c_view);
+
+        let surface_identity_buffer = device.create_buffer(&BufferDescriptor::new(
+            u64::from(viewport.extent().width)
+                .checked_mul(u64::from(viewport.extent().height))
+                .and_then(|pixels| pixels.checked_mul(SURFACE_IDENTITY_BYTES_PER_PIXEL))
+                .expect("surface identity allocation size must fit u64"),
+            BufferUsages::STORAGE.union(BufferUsages::COPY_SRC),
+        ));
+        pending.surface_identity_buffer = Some(surface_identity_buffer);
+
+        let taa_motion_texture = device.create_texture(&TextureDescriptor::new_2d(
+            viewport.extent(),
+            TAA_MOTION_FORMAT,
+            TAA_TEMPORAL_INPUT_USAGES,
+        ));
+        pending.taa_motion_texture = Some(taa_motion_texture);
+        let taa_motion_view =
+            device.create_texture_view(taa_motion_texture, &TextureViewDescriptor::default());
+        pending.taa_motion_view = Some(taa_motion_view);
+        let taa_reactive_texture = device.create_texture(&TextureDescriptor::new_2d(
+            viewport.extent(),
+            TAA_REACTIVE_FORMAT,
+            TAA_TEMPORAL_INPUT_USAGES,
+        ));
+        pending.taa_reactive_texture = Some(taa_reactive_texture);
+        let taa_reactive_view =
+            device.create_texture_view(taa_reactive_texture, &TextureViewDescriptor::default());
+        pending.taa_reactive_view = Some(taa_reactive_view);
+
         let depth_format = crate::RENDER_DEPTH_FORMAT;
         let depth_texture = device.create_texture(&TextureDescriptor::new_2d(
             viewport.extent(),
@@ -239,6 +382,19 @@ impl RenderTarget {
         pending.albedo_view = None;
         pending.surface_id_texture = None;
         pending.surface_id_view = None;
+        pending.surface_data_texture = None;
+        pending.surface_data_view = None;
+        pending.surface_material_a_texture = None;
+        pending.surface_material_a_view = None;
+        pending.surface_material_b_texture = None;
+        pending.surface_material_b_view = None;
+        pending.surface_material_c_texture = None;
+        pending.surface_material_c_view = None;
+        pending.surface_identity_buffer = None;
+        pending.taa_motion_texture = None;
+        pending.taa_motion_view = None;
+        pending.taa_reactive_texture = None;
+        pending.taa_reactive_view = None;
         pending.depth_texture = None;
         pending.depth_view = None;
         Self {
@@ -263,6 +419,25 @@ impl RenderTarget {
             surface_id_texture,
             surface_id_view,
             surface_id_format: SURFACE_ID_GBUFFER_FORMAT,
+            surface_data_texture,
+            surface_data_view,
+            surface_data_format: SURFACE_DATA_GBUFFER_FORMAT,
+            surface_material_a_texture,
+            surface_material_a_view,
+            surface_material_a_format: SURFACE_MATERIAL_A_GBUFFER_FORMAT,
+            surface_material_b_texture,
+            surface_material_b_view,
+            surface_material_b_format: SURFACE_MATERIAL_B_GBUFFER_FORMAT,
+            surface_material_c_texture,
+            surface_material_c_view,
+            surface_material_c_format: SURFACE_MATERIAL_C_GBUFFER_FORMAT,
+            surface_identity_buffer,
+            taa_motion_texture,
+            taa_motion_view,
+            taa_motion_format: TAA_MOTION_FORMAT,
+            taa_reactive_texture,
+            taa_reactive_view,
+            taa_reactive_format: TAA_REACTIVE_FORMAT,
             depth_texture,
             depth_view,
             depth_format,
@@ -307,6 +482,19 @@ impl RenderTarget {
         device.destroy_texture(self.albedo_texture);
         device.destroy_texture_view(self.surface_id_view);
         device.destroy_texture(self.surface_id_texture);
+        device.destroy_texture_view(self.surface_data_view);
+        device.destroy_texture(self.surface_data_texture);
+        device.destroy_texture_view(self.surface_material_a_view);
+        device.destroy_texture(self.surface_material_a_texture);
+        device.destroy_texture_view(self.surface_material_b_view);
+        device.destroy_texture(self.surface_material_b_texture);
+        device.destroy_texture_view(self.surface_material_c_view);
+        device.destroy_texture(self.surface_material_c_texture);
+        device.destroy_buffer(self.surface_identity_buffer);
+        device.destroy_texture_view(self.taa_motion_view);
+        device.destroy_texture(self.taa_motion_texture);
+        device.destroy_texture_view(self.taa_reactive_view);
+        device.destroy_texture(self.taa_reactive_texture);
         device.destroy_texture_view(self.depth_view);
         device.destroy_texture(self.depth_texture);
     }
@@ -445,6 +633,135 @@ impl RenderTarget {
         self.surface_id_format
     }
 
+    /// The RHI texture holding canonical per-pixel surface coordinates and
+    /// tangent-space reconstruction inputs.
+    #[must_use]
+    pub fn surface_data_texture(&self) -> TextureId {
+        self.surface_data_texture
+    }
+
+    /// The default view of the canonical per-pixel surface-data texture.
+    #[must_use]
+    pub fn surface_data_view(&self) -> TextureViewId {
+        self.surface_data_view
+    }
+
+    /// The surface-data plane's texel format.
+    #[must_use]
+    pub fn surface_data_format(&self) -> TextureFormat {
+        self.surface_data_format
+    }
+
+    pub fn surface_material_a_texture(&self) -> TextureId {
+        self.surface_material_a_texture
+    }
+
+    pub fn surface_material_a_view(&self) -> TextureViewId {
+        self.surface_material_a_view
+    }
+
+    pub fn surface_material_a_format(&self) -> TextureFormat {
+        self.surface_material_a_format
+    }
+
+    pub fn surface_material_b_texture(&self) -> TextureId {
+        self.surface_material_b_texture
+    }
+
+    pub fn surface_material_b_view(&self) -> TextureViewId {
+        self.surface_material_b_view
+    }
+
+    pub fn surface_material_b_format(&self) -> TextureFormat {
+        self.surface_material_b_format
+    }
+
+    pub fn surface_material_c_texture(&self) -> TextureId {
+        self.surface_material_c_texture
+    }
+
+    pub fn surface_material_c_view(&self) -> TextureViewId {
+        self.surface_material_c_view
+    }
+
+    pub fn surface_material_c_format(&self) -> TextureFormat {
+        self.surface_material_c_format
+    }
+
+    /// The storage buffer holding one identity tuple per target pixel.
+    #[must_use]
+    pub fn surface_identity_buffer(&self) -> BufferId {
+        self.surface_identity_buffer
+    }
+
+    /// The exact byte size of the per-pixel identity buffer.
+    #[must_use]
+    pub fn surface_identity_size_bytes(&self) -> u64 {
+        u64::from(self.viewport.extent().width)
+            .checked_mul(u64::from(self.viewport.extent().height))
+            .and_then(|pixels| pixels.checked_mul(SURFACE_IDENTITY_BYTES_PER_PIXEL))
+            .expect("surface identity allocation size must fit u64")
+    }
+
+    /// The camera-local temporal motion texture.
+    #[must_use]
+    pub fn taa_motion_texture(&self) -> TextureId {
+        self.taa_motion_texture
+    }
+    /// The default view of the camera-local temporal motion texture.
+    #[must_use]
+    pub fn taa_motion_view(&self) -> TextureViewId {
+        self.taa_motion_view
+    }
+    /// The camera-local temporal motion format.
+    #[must_use]
+    pub fn taa_motion_format(&self) -> TextureFormat {
+        self.taa_motion_format
+    }
+
+    /// Imports the camera-local motion target with its producer-ready usage.
+    pub(crate) fn taa_motion_import(&self) -> prism_render_graph::ImportedTexture {
+        prism_render_graph::ImportedTexture {
+            texture: self.taa_motion_texture,
+            default_view: self.taa_motion_view,
+            entry_state: prism_render_driver::TextureState::initial(),
+            exit_state: prism_render_driver::TextureState::storage_write(
+                prism_render_driver::PipelineStages::COMPUTE_SHADER,
+            ),
+            mip_levels: 1,
+            array_layers: 1,
+        }
+    }
+    /// The camera-local reactive mask texture.
+    #[must_use]
+    pub fn taa_reactive_texture(&self) -> TextureId {
+        self.taa_reactive_texture
+    }
+    /// The default view of the camera-local reactive mask texture.
+    #[must_use]
+    pub fn taa_reactive_view(&self) -> TextureViewId {
+        self.taa_reactive_view
+    }
+    /// The camera-local reactive mask format.
+    #[must_use]
+    pub fn taa_reactive_format(&self) -> TextureFormat {
+        self.taa_reactive_format
+    }
+
+    /// Imports the camera-local reactive target with its producer-ready usage.
+    pub(crate) fn taa_reactive_import(&self) -> prism_render_graph::ImportedTexture {
+        prism_render_graph::ImportedTexture {
+            texture: self.taa_reactive_texture,
+            default_view: self.taa_reactive_view,
+            entry_state: prism_render_driver::TextureState::initial(),
+            exit_state: prism_render_driver::TextureState::storage_write(
+                prism_render_driver::PipelineStages::COMPUTE_SHADER,
+            ),
+            mip_levels: 1,
+            array_layers: 1,
+        }
+    }
+
     /// The RHI texture holding the frame's depth.
     #[must_use]
     pub fn depth_texture(&self) -> TextureId {
@@ -480,6 +797,19 @@ struct TargetAllocation<'a, D: RenderDevice> {
     albedo_view: Option<TextureViewId>,
     surface_id_texture: Option<TextureId>,
     surface_id_view: Option<TextureViewId>,
+    surface_data_texture: Option<TextureId>,
+    surface_data_view: Option<TextureViewId>,
+    surface_material_a_texture: Option<TextureId>,
+    surface_material_a_view: Option<TextureViewId>,
+    surface_material_b_texture: Option<TextureId>,
+    surface_material_b_view: Option<TextureViewId>,
+    surface_material_c_texture: Option<TextureId>,
+    surface_material_c_view: Option<TextureViewId>,
+    surface_identity_buffer: Option<BufferId>,
+    taa_motion_texture: Option<TextureId>,
+    taa_motion_view: Option<TextureViewId>,
+    taa_reactive_texture: Option<TextureId>,
+    taa_reactive_view: Option<TextureViewId>,
     depth_texture: Option<TextureId>,
     depth_view: Option<TextureViewId>,
 }
@@ -508,6 +838,45 @@ impl<D: RenderDevice> Drop for TargetAllocation<'_, D> {
             self.device.destroy_texture_view(id);
         }
         if let Some(id) = self.surface_id_texture {
+            self.device.destroy_texture(id);
+        }
+        if let Some(id) = self.surface_data_view {
+            self.device.destroy_texture_view(id);
+        }
+        if let Some(id) = self.surface_data_texture {
+            self.device.destroy_texture(id);
+        }
+        if let Some(id) = self.surface_material_a_view {
+            self.device.destroy_texture_view(id);
+        }
+        if let Some(id) = self.surface_material_a_texture {
+            self.device.destroy_texture(id);
+        }
+        if let Some(id) = self.surface_material_b_view {
+            self.device.destroy_texture_view(id);
+        }
+        if let Some(id) = self.surface_material_b_texture {
+            self.device.destroy_texture(id);
+        }
+        if let Some(id) = self.surface_material_c_view {
+            self.device.destroy_texture_view(id);
+        }
+        if let Some(id) = self.surface_material_c_texture {
+            self.device.destroy_texture(id);
+        }
+        if let Some(id) = self.surface_identity_buffer {
+            self.device.destroy_buffer(id);
+        }
+        if let Some(id) = self.taa_motion_view {
+            self.device.destroy_texture_view(id);
+        }
+        if let Some(id) = self.taa_motion_texture {
+            self.device.destroy_texture(id);
+        }
+        if let Some(id) = self.taa_reactive_view {
+            self.device.destroy_texture_view(id);
+        }
+        if let Some(id) = self.taa_reactive_texture {
             self.device.destroy_texture(id);
         }
         if let Some(id) = self.normal_view {
@@ -921,7 +1290,10 @@ impl<D: RenderDevice> TextureTargetRegistry<D> {
     pub fn get(&self, handle: TextureTargetHandle) -> Option<&RenderTarget> {
         let owner = self.active.get(&handle.id)?;
         (self.current_generation(handle.id) == Some(handle.generation)
-            && owner.device_generation == handle.device_generation)
+            && owner.device_generation == handle.device_generation
+            && handle.id <= u64::from(u32::MAX)
+            && handle.generation <= u64::from(u32::MAX)
+            && handle.route_id() != 0)
             .then_some(&owner.target)
     }
 
@@ -1024,7 +1396,8 @@ impl<D: RenderDevice> TextureTargetRegistry<D> {
     ) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
         let owner = self.active.get(&handle.id)?;
         (self.current_generation(handle.id) == Some(handle.generation)
-            && owner.device_generation == handle.device_generation)
+            && owner.device_generation == handle.device_generation
+            && handle.route_id() != 0)
             .then(|| owner.external_owner.as_ref().map(Arc::clone))
             .flatten()
     }
@@ -1208,6 +1581,24 @@ mod tests {
         }
 
         target.destroy(&device);
+    }
+
+    #[test]
+    fn temporal_inputs_use_baseline_storage_formats_and_producer_consumer_usages() {
+        let device = null_device();
+        let target = RenderTarget::new(&device, Extent3d::new_2d(32, 16));
+        let required = TextureUsages::STORAGE_BINDING
+            .union(TextureUsages::TEXTURE_BINDING)
+            .union(TextureUsages::COPY_SRC);
+
+        // These formats are in WebGPU's baseline storage-texture set. Keep
+        // this ABI in sync with TAA_TEMPORAL_INPUT_WGSL and the resolve inputs.
+        assert_eq!(target.taa_motion_format(), TextureFormat::Rgba16Float);
+        assert_eq!(target.taa_reactive_format(), TextureFormat::R32Float);
+        assert_eq!(TAA_TEMPORAL_INPUT_USAGES, required);
+        assert!(TAA_TEMPORAL_INPUT_USAGES.contains(TextureUsages::STORAGE_BINDING));
+        assert!(TAA_TEMPORAL_INPUT_USAGES.contains(TextureUsages::TEXTURE_BINDING));
+        assert!(TAA_TEMPORAL_INPUT_USAGES.contains(TextureUsages::COPY_SRC));
     }
 
     #[test]
