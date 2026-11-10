@@ -7,18 +7,25 @@ use bevy_shader::{
     Shader, ShaderCache, ShaderCacheError, ShaderCacheSource, ShaderDefVal, ValidateShader,
 };
 use prism_render_material::{
+    shaders::{
+        MATERIAL_SAMPLE_SHADER_SOURCE, MATERIAL_SHADER_SOURCE, MATERIAL_UNPACK_SHADER_SOURCE,
+        MATERIAL_VIRTUAL_TEXTURE_SHADER_SOURCE,
+    },
     GpuMaterialHeader, GpuSurfaceParameters, LobeMask, SurfaceParameterBlock,
 };
 use prism_render_shading::{
     reference_pt_adapter::ReferencePtMaterialAdapter, GpuShadingPrimitive, GpuShadingVertex,
     SurfaceSample,
 };
+use std::mem::size_of;
 use wgpu::util::DeviceExt;
 
 const EDGE: u32 = 4;
 const PIXELS: usize = 16;
 const ROW_BYTES: u32 = 256;
-const GEOMETRY_OPACITY: f32 = 0.375;
+// The reference adapter intentionally accepts only opaque geometry; keep the
+// GPU fixture inside that declared representable domain.
+const GEOMETRY_OPACITY: f32 = 1.0;
 const GENERATION: u32 = 7;
 const CAMERA: [f32; 3] = [0.0, 2.0, 2.0];
 const NORMAL: [f32; 3] = [0.0, 1.0, 0.0];
@@ -67,26 +74,41 @@ fn production_wgsl() -> String {
     let mut tag = 0x5052_4953_4d5f_5032_485f_4750_5500_0000u128;
     macro_rules! register {
         ($name:literal) => {{
+            register!(
+                include_str!(concat!("../src/shaders/", $name, ".wesl")),
+                concat!("embedded://prism_render_scene/shaders/", $name, ".wesl")
+            );
+        }};
+        ($source:expr, $path:expr) => {{
             tag += 1;
             cache.set_shader(
                 AssetId::Uuid {
                     uuid: Uuid::from_u128(tag),
                 },
-                Shader::from_wesl(
-                    include_str!(concat!("../src/shaders/", $name, ".wesl")),
-                    concat!("embedded://prism_render_scene/shaders/", $name, ".wesl"),
-                ),
+                Shader::from_wesl($source, $path),
             );
         }};
     }
     register!("tangent");
-    register!("material_sample");
-    register!("material_virtual_texture");
+    register!(
+        MATERIAL_SAMPLE_SHADER_SOURCE,
+        "embedded://prism_render_material/shaders/material_sample.wesl"
+    );
+    register!(
+        MATERIAL_VIRTUAL_TEXTURE_SHADER_SOURCE,
+        "embedded://prism_render_material/shaders/material_virtual_texture.wesl"
+    );
     register!("surface");
     register!("lighting");
     register!("brdf");
-    register!("material");
-    register!("material_unpack");
+    register!(
+        MATERIAL_SHADER_SOURCE,
+        "embedded://prism_render_material/shaders/material.wesl"
+    );
+    register!(
+        MATERIAL_UNPACK_SHADER_SOURCE,
+        "embedded://prism_render_material/shaders/material_unpack.wesl"
+    );
     register!("gpu_scene");
     register!("cloth");
     register!("subsurface");
@@ -432,6 +454,11 @@ fn production_layout_entries() -> [Vec<wgpu::BindGroupLayoutEntry>; 8] {
             (6, storage(true)),
             (7, sampled(true, D::D2Array)),
             (8, filtering),
+            // Scene-local UV transform/context rows used by shading_resolve
+            // before material texture folding. Keep this mirror in lockstep
+            // with the production group-1 ABI even when the fixture has no
+            // texture records.
+            (13, storage(true)),
         ],
         (0..11).map(|binding| (binding, storage(true))).collect(),
         (0..3).map(|binding| (binding, storage(true))).collect(),
@@ -476,12 +503,47 @@ fn production_layout_entries() -> [Vec<wgpu::BindGroupLayoutEntry>; 8] {
     })
 }
 
+fn gpu_surface_parameters(surface: SurfaceSample) -> GpuSurfaceParameters {
+    GpuSurfaceParameters {
+        base_color: [
+            surface.base_color[0],
+            surface.base_color[1],
+            surface.base_color[2],
+            1.0,
+        ],
+        base_metalness: surface.metallic,
+        specular_roughness: surface.perceptual_roughness,
+        specular_weight: surface.specular_weight,
+        base_weight: surface.base_weight,
+        base_diffuse_roughness: surface.diffuse_roughness,
+        specular_color: [
+            surface.specular_color[0],
+            surface.specular_color[1],
+            surface.specular_color[2],
+            1.0,
+        ],
+        specular_ior: surface.specular_ior,
+        thin_walled: surface.thin_walled,
+        geometry_opacity: surface.geometry_opacity,
+        coat_weight: surface.clearcoat,
+        coat_roughness: surface.clearcoat_roughness,
+        coat_ior: surface.coat_ior,
+        coat_color: [
+            surface.coat_color[0],
+            surface.coat_color[1],
+            surface.coat_color[2],
+            1.0,
+        ],
+        coat_darkening: surface.coat_darkening,
+        ..Default::default()
+    }
+}
+
 fn run_case(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     pipeline: &wgpu::ComputePipeline,
-    coat: f32,
-    darkening: f32,
+    fixture: SurfaceSample,
 ) -> Vec<[f32; 4]> {
     use wgpu::{TextureFormat as F, TextureViewDimension as D};
     let ids = texture(device, F::Rgba32Uint, 1, false);
@@ -523,26 +585,7 @@ fn run_case(
         (17, zero(device, PIXELS * 16, false)),
     ]);
 
-    let fixture = fixture_surface(coat, darkening);
-    let params = GpuSurfaceParameters {
-        base_color: [
-            fixture.base_color[0],
-            fixture.base_color[1],
-            fixture.base_color[2],
-            1.0,
-        ],
-        base_metalness: 0.0,
-        specular_weight: 0.0,
-        base_weight: 1.0,
-        base_diffuse_roughness: 0.0,
-        coat_weight: fixture.clearcoat,
-        coat_roughness: fixture.clearcoat_roughness,
-        coat_ior: fixture.coat_ior,
-        coat_color: [1.0; 4],
-        coat_darkening: fixture.coat_darkening,
-        geometry_opacity: fixture.geometry_opacity,
-        ..Default::default()
-    };
+    let params = gpu_surface_parameters(fixture);
     let mask = LobeMask::CLEARCOAT;
     let words = SurfaceParameterBlock::from_full(&params, mask).pack();
     let header = GpuMaterialHeader {
@@ -560,6 +603,7 @@ fn run_case(
         (6, zero(device, 32, false)),
         (7, sampled(device, F::Rgba16Float, D::D2Array)),
         (8, sampler(device, true)),
+        (13, zero(device, 64, false)),
     ];
     let work: Vec<[u32; 8]> = (0..PIXELS as u32)
         .map(|i| [i, 0, 0, 0, 0, u32::MAX, u32::MAX, u32::MAX])
@@ -775,7 +819,9 @@ fn run_case(
             assert_eq!(
                 f32::from_bits(word(offset + 15 * 4)),
                 GEOMETRY_OPACITY,
-                "coat={coat} darkening={darkening} pixel={pixel} arm={arm} opacity"
+                "coat={} darkening={} pixel={pixel} arm={arm} opacity",
+                fixture.clearcoat,
+                fixture.coat_darkening,
             );
         }
         let offset = (image_bytes + 2 * response_bytes) as usize + pixel * 16;
@@ -796,18 +842,24 @@ fn run_case(
             let right = f32::from_bits(word(right_offset + word_index * 4));
             assert!(
                 left.is_finite() && left >= 0.0,
-                "coat={coat} darkening={darkening} pixel={pixel} left response[{word_index}]={left}"
+                "coat={} darkening={} pixel={pixel} left response[{word_index}]={left}",
+                fixture.clearcoat,
+                fixture.coat_darkening,
             );
             assert_eq!(
                 right.to_bits(),
                 left.to_bits(),
-                "coat={coat} darkening={darkening} pixel={pixel} right response[{word_index}] diverged"
+                "coat={} darkening={} pixel={pixel} right response[{word_index}] diverged",
+                fixture.clearcoat,
+                fixture.coat_darkening,
             );
             if (3..15).contains(&word_index) {
                 assert_eq!(
                     left,
                     0.0,
-                    "coat={coat} darkening={darkening} pixel={pixel} unexpected non-direct response[{word_index}]"
+                    "coat={} darkening={} pixel={pixel} unexpected non-direct response[{word_index}]",
+                    fixture.clearcoat,
+                    fixture.coat_darkening,
                 );
             }
         }
@@ -887,7 +939,7 @@ fn production_shading_resolve_readback_matches_reference_pt_clearcoat() {
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("full production resolve pipeline layout"),
         bind_group_layouts: &layout_refs,
-        immediate_size: std::mem::size_of::<Params>() as u32,
+        immediate_size: size_of::<Params>() as u32,
     });
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("full eight-group production resolve"),
@@ -898,11 +950,32 @@ fn production_shading_resolve_readback_matches_reference_pt_clearcoat() {
         cache: None,
     });
     let light = normalize([0.35, 0.85, 0.25]);
+    // These are the same deliberately supported clearcoat/diffuse domain as
+    // the CPU adapter matrix: no realtime BSDF is reused as an oracle, and no
+    // material is allowed to fall through to the neutral/default surface.
+    let fixtures = [
+        fixture_surface(0.0, 0.0),
+        fixture_surface(1.0, 0.0),
+        fixture_surface(1.0, 1.0),
+        SurfaceSample {
+            base_color: [0.72, 0.18, 0.09],
+            base_weight: 0.61,
+            diffuse_roughness: 0.67,
+            specular_weight: 0.0,
+            clearcoat: 0.31,
+            clearcoat_roughness: 0.19,
+            coat_ior: 1.37,
+            coat_color: [0.86, 0.94, 0.67],
+            coat_darkening: 0.28,
+            geometry_opacity: GEOMETRY_OPACITY,
+            ..Default::default()
+        },
+    ];
     let mut images = Vec::new();
-    for (coat, darkening) in [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)] {
-        let reference = ReferencePtMaterialAdapter::from_surface(fixture_surface(coat, darkening))
-            .expect("representable Lambert plus white coat");
-        let actual = run_case(&device, &queue, &pipeline, coat, darkening);
+    for (case_index, fixture) in fixtures.into_iter().enumerate() {
+        let reference = ReferencePtMaterialAdapter::from_surface(fixture)
+            .expect("representable clearcoat/diffuse fixture");
+        let actual = run_case(&device, &queue, &pipeline, fixture);
         assert_eq!(actual.len(), PIXELS);
         let mut max_abs = 0.0f32;
         let mut reference_first = [0.0; 3];
@@ -936,10 +1009,10 @@ fn production_shading_resolve_readback_matches_reference_pt_clearcoat() {
                 max_abs = max_abs.max((rgba[channel] - expected[channel]).abs());
                 let tolerance = 5.0e-4 + 1.0e-3 * expected[channel].abs();
                 assert!((rgba[channel] - expected[channel]).abs() <= tolerance,
-                    "coat={coat} darkening={darkening} pixel={i} channel={channel}: GPU={rgba:?} reference={expected:?}");
+                    "case={case_index} pixel={i} channel={channel}: GPU={rgba:?} reference={expected:?}");
             }
         }
-        eprintln!("P2-h REAL GPU READBACK coat={coat} darkening={darkening}: 16/16 HDR + both response arms + composition controls written, opacity={GEOMETRY_OPACITY}, first={:?}, reference_first={reference_first:?}, max_abs={max_abs:.8}", actual[0]);
+        eprintln!("P2-h REAL GPU READBACK case={case_index}: 16/16 HDR + both response arms + composition controls written, opacity={GEOMETRY_OPACITY}, first={:?}, reference_first={reference_first:?}, max_abs={max_abs:.8}", actual[0]);
         images.push(actual);
     }
     // Passing three isolated comparisons must also prove the controls changed output.
