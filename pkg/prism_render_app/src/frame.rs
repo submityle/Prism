@@ -528,6 +528,14 @@ impl FrameGraphBuffers {
             ] {
                 self.require(buffer, BufferDesc::new(size, BufferUsages::STORAGE));
             }
+            let resources = pass.composite_material_resources();
+            for (buffer, size) in [
+                (resources.texture_rows, resources.texture_rows_size_bytes),
+                (resources.vt_page_table, resources.vt_page_table_size_bytes),
+                (resources.vt_config, resources.vt_config_size_bytes),
+            ] {
+                self.require(buffer, BufferDesc::new(size, BufferUsages::STORAGE));
+            }
         }
         if let Some(trace) = trace {
             for buffer in [
@@ -541,8 +549,10 @@ impl FrameGraphBuffers {
                 trace.surfaces,
                 trace.material_headers,
                 trace.material_parameters,
+                trace.material_texture_rows,
                 trace.execution_plans,
                 trace.execution_programs,
+                trace.vt_config,
                 trace.material_evaluations,
             ]
             .into_iter()
@@ -551,6 +561,12 @@ impl FrameGraphBuffers {
                 self.require(
                     buffer.id,
                     BufferDesc::new(buffer.size_bytes, BufferUsages::STORAGE),
+                );
+            }
+            if let Some(buffer) = trace.vt_page_table {
+                self.require(
+                    buffer.id,
+                    BufferDesc::new(buffer.size_bytes.max(16), BufferUsages::STORAGE),
                 );
             }
             for (buffer, usage) in [
@@ -1472,6 +1488,7 @@ fn append_target_graph(
         if let (
             Some(material_headers),
             Some(material_parameters),
+            Some(material_texture_rows),
             Some(execution_plans),
             Some(execution_programs),
             Some(evaluator_config),
@@ -1479,6 +1496,7 @@ fn append_target_graph(
         ) = (
             trace.material_headers,
             trace.material_parameters,
+            trace.material_texture_rows,
             trace.execution_plans,
             trace.execution_programs,
             trace.evaluator_config,
@@ -1496,6 +1514,12 @@ fn append_target_graph(
                 BufferDesc::new(material_parameters.size_bytes, BufferUsages::STORAGE),
                 material_parameters.id,
             );
+            let material_texture_rows = buffers.import(
+                graph,
+                "prism-lighting-native-material-texture-rows",
+                BufferDesc::new(material_texture_rows.size_bytes, BufferUsages::STORAGE),
+                material_texture_rows.id,
+            );
             let execution_plans = buffers.import(
                 graph,
                 "prism-lighting-native-material-execution-plans",
@@ -1508,6 +1532,22 @@ fn append_target_graph(
                 BufferDesc::new(execution_programs.size_bytes, BufferUsages::STORAGE),
                 execution_programs.id,
             );
+            let vt_page_table = trace.vt_page_table.map(|vt_page_table| {
+                buffers.import(
+                    graph,
+                    "prism-lighting-native-material-vt-page-table",
+                    BufferDesc::new(vt_page_table.size_bytes, BufferUsages::STORAGE),
+                    vt_page_table.id,
+                )
+            });
+            let vt_config = trace.vt_config.map(|vt_config| {
+                buffers.import(
+                    graph,
+                    "prism-lighting-native-material-vt-config",
+                    BufferDesc::new(vt_config.size_bytes, BufferUsages::STORAGE),
+                    vt_config.id,
+                )
+            });
             let evaluator_config = buffers.import(
                 graph,
                 "prism-lighting-native-material-evaluator-config",
@@ -1529,10 +1569,26 @@ fn append_target_graph(
                     |builder| {
                         let _hits = builder.read_storage_buffer(hits);
                         let _attributes = builder.read_storage_buffer(attributes);
+                        let _rays = builder.read_storage_buffer(rays);
                         let _material_headers = builder.read_storage_buffer(material_headers);
                         let _material_parameters = builder.read_storage_buffer(material_parameters);
+                        let _material_texture_rows = builder.read_storage_buffer(material_texture_rows);
                         let _execution_plans = builder.read_storage_buffer(execution_plans);
                         let _execution_programs = builder.read_storage_buffer(execution_programs);
+                        if let Some(vt_page_table) = vt_page_table {
+                            let _vt_page_table = builder.read_storage_buffer(vt_page_table);
+                        }
+                        if let Some(vt_config) = vt_config {
+                            let _vt_config = builder.read_storage_buffer(vt_config);
+                        }
+                        if let Some(vt_atlas_view) = trace.vt_atlas_view {
+                            if let Some(vt_atlas) = external_texture_handles
+                                .iter()
+                                .find_map(|(view, handle)| (*view == vt_atlas_view).then_some(*handle))
+                            {
+                                let _vt_atlas = builder.read_texture(vt_atlas);
+                            }
+                        }
                         let _evaluator_config = builder.read_uniform(evaluator_config);
                         evaluation_buffer = builder.write_storage_buffer(evaluation_buffer);
                         move |context| trace.record_evaluator_graph(context)
@@ -1777,6 +1833,38 @@ fn append_target_graph(
     });
     let [material_headers, material_parameters, _material_plans, _material_programs] =
         material_reads;
+    let material_resources = lighting.composite_material_resources();
+    let material_texture_rows = buffers.import(
+        graph,
+        "prism-material-texture-rows",
+        BufferDesc::new(
+            material_resources.texture_rows_size_bytes,
+            BufferUsages::STORAGE,
+        ),
+        material_resources.texture_rows,
+    );
+    let vt_page_table = buffers.import(
+        graph,
+        "prism-material-vt-page-table",
+        BufferDesc::new(
+            material_resources.vt_page_table_size_bytes,
+            BufferUsages::STORAGE,
+        ),
+        material_resources.vt_page_table,
+    );
+    let vt_config = buffers.import(
+        graph,
+        "prism-material-vt-config",
+        BufferDesc::new(material_resources.vt_config_size_bytes, BufferUsages::STORAGE),
+        material_resources.vt_config,
+    );
+    let vt_atlas = external_texture_handles.get(&material_resources.vt_atlas_view).copied();
+    if material_resources.device_generation != 0 {
+        assert!(
+            vt_atlas.is_some(),
+            "published material VT atlas must be imported before composite"
+        );
+    }
     if let (Some(trace), Some(hits), Some((trace_triangles, trace_attributes, trace_rays)), true) =
         (trace, trace_hits, trace_inputs, lighting.run_gi)
         && let (
@@ -1884,6 +1972,12 @@ fn append_target_graph(
             let _areas = builder.read_storage_buffer(areas);
             let _headers = builder.read_storage_buffer(material_headers);
             let _parameters = builder.read_storage_buffer(material_parameters);
+            let _texture_rows = builder.read_storage_buffer(material_texture_rows);
+            let _vt_page_table = builder.read_storage_buffer(vt_page_table);
+            let _vt_config = builder.read_storage_buffer(vt_config);
+            if let Some(vt_atlas) = vt_atlas {
+                let _vt_atlas = builder.read_texture(vt_atlas);
+            }
             response_output = builder.write_storage_buffer(response_output);
             color = builder.write_storage_texture(color);
             move |context| {

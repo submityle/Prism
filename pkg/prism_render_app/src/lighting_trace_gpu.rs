@@ -511,6 +511,9 @@ pub struct NativeGiMaterialEvaluatorInput {
     pub execution_plans: TraceGraphBuffer,
     /// Response-program table storage buffer and logical byte range.
     pub execution_programs: TraceGraphBuffer,
+    /// Exact validated registered-response link section for this execution
+    /// table. Builtin-only tables still carry the empty finite dispatch.
+    pub registered_response_wgsl: Arc<str>,
     /// The exact VT lease, when the material snapshot names one.
     pub vt: Option<NativeGiMaterialEvaluatorVtInput>,
 }
@@ -523,7 +526,9 @@ impl NativeGiMaterialEvaluatorInput {
         let execution = bundle.execution();
         let epoch = material.material_epoch();
         let vt_generation = material.vt_publication_generation();
-        let vt = bundle.vt().map(NativeGiMaterialEvaluatorVtInput::from_lease);
+        let vt = bundle
+            .vt()
+            .map(NativeGiMaterialEvaluatorVtInput::from_lease);
         Self {
             config: NativeGiMaterialEvaluatorConfig {
                 abi_version: NATIVE_GI_MATERIAL_EVALUATOR_ABI_VERSION,
@@ -538,7 +543,9 @@ impl NativeGiMaterialEvaluatorInput {
                 execution_plan_count: execution.plan_rows().len() as u32,
                 execution_program_count: execution.program_rows().len() as u32,
                 texture_slot_count: 0,
-                vt_page_table_word_count: vt.as_ref().map_or(0, |_| 1),
+                // The lease exposes the canonical sentinel-sized page-table
+                // allocation used by the material VT ABI: one 16-byte entry.
+                vt_page_table_word_count: vt.as_ref().map_or(0, |_| 4),
                 flags: 0,
                 _padding: [0; 2],
             },
@@ -565,6 +572,7 @@ impl NativeGiMaterialEvaluatorInput {
                 id: execution.program_buffer(),
                 size_bytes: execution.program_rows().len() as u64 * 20,
             },
+            registered_response_wgsl: Arc::<str>::from(execution.registered_response_wgsl()),
             vt,
         }
     }
@@ -1447,6 +1455,9 @@ pub struct LightingTraceGpu {
     evaluator_pipeline_layout: rhi::PipelineLayoutId,
     evaluator_shader: rhi::ShaderModuleId,
     evaluator_pipeline: rhi::ComputePipelineId,
+    evaluator_link_source: Arc<str>,
+    retired_evaluator_shaders: Vec<rhi::ShaderModuleId>,
+    retired_evaluator_pipelines: Vec<rhi::ComputePipelineId>,
     material_candidate_layout: rhi::BindGroupLayoutId,
     material_candidate_pipeline_layout: rhi::PipelineLayoutId,
     material_candidate_shader: rhi::ShaderModuleId,
@@ -1464,7 +1475,7 @@ pub struct LightingTraceGpu {
     retired_material_candidate_bind_groups: Vec<rhi::BindGroupId>,
     evaluator_config: Option<ResidentBuffer>,
     evaluations: Option<ResidentBuffer>,
-    evaluator_bind_group: Option<(rhi::BindGroupId, [rhi::BufferId; 4])>,
+    evaluator_bind_group: Option<(rhi::BindGroupId, [rhi::BufferId; 5])>,
     retired_evaluator_bind_groups: Vec<rhi::BindGroupId>,
     evaluator_vt_bind_group: Option<(
         rhi::BindGroupId,
@@ -1593,14 +1604,26 @@ impl LightingTraceGpu {
                     binding: 2,
                     visibility: rhi::ShaderStages::COMPUTE,
                     ty: rhi::BindingType::Buffer {
-                        ty: rhi::BufferBindingType::Uniform,
+                        ty: rhi::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
-                        min_binding_size: Some(NATIVE_GI_MATERIAL_EVALUATOR_CONFIG_WORDS as u64 * 4),
+                        min_binding_size: None,
                     },
                     count: None,
                 },
                 rhi::BindGroupLayoutEntry {
                     binding: 3,
+                    visibility: rhi::ShaderStages::COMPUTE,
+                    ty: rhi::BindingType::Buffer {
+                        ty: rhi::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: Some(
+                            NATIVE_GI_MATERIAL_EVALUATOR_CONFIG_WORDS as u64 * 4,
+                        ),
+                    },
+                    count: None,
+                },
+                rhi::BindGroupLayoutEntry {
+                    binding: 4,
                     visibility: rhi::ShaderStages::COMPUTE,
                     ty: rhi::BindingType::Buffer {
                         ty: rhi::BufferBindingType::Storage { read_only: false },
@@ -1611,34 +1634,35 @@ impl LightingTraceGpu {
                 },
             ],
         });
-        let evaluator_vt_layout = device.create_bind_group_layout(&rhi::BindGroupLayoutDescriptor {
-            label: Some("native-gi-material-evaluator-vt-layout".into()),
-            entries: (0..9)
-                .map(|binding| rhi::BindGroupLayoutEntry {
-                    binding,
-                    visibility: rhi::ShaderStages::COMPUTE,
-                    ty: match binding {
-                        7 => rhi::BindingType::Texture {
-                            sample_type: rhi::TextureSampleType::Float,
-                            view_dimension: rhi::TextureViewDimension::D2Array,
-                            multisampled: false,
+        let evaluator_vt_layout =
+            device.create_bind_group_layout(&rhi::BindGroupLayoutDescriptor {
+                label: Some("native-gi-material-evaluator-vt-layout".into()),
+                entries: (0..9)
+                    .map(|binding| rhi::BindGroupLayoutEntry {
+                        binding,
+                        visibility: rhi::ShaderStages::COMPUTE,
+                        ty: match binding {
+                            7 => rhi::BindingType::Texture {
+                                sample_type: rhi::TextureSampleType::Float,
+                                view_dimension: rhi::TextureViewDimension::D2Array,
+                                multisampled: false,
+                            },
+                            8 => rhi::BindingType::Sampler(rhi::SamplerBindingType::Filtering),
+                            6 => rhi::BindingType::Buffer {
+                                ty: rhi::BufferBindingType::Storage { read_only: true },
+                                has_dynamic_offset: false,
+                                min_binding_size: Some(32),
+                            },
+                            _ => rhi::BindingType::Buffer {
+                                ty: rhi::BufferBindingType::Storage { read_only: true },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
                         },
-                        8 => rhi::BindingType::Sampler(rhi::SamplerBindingType::Filtering),
-                        6 => rhi::BindingType::Buffer {
-                            ty: rhi::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: Some(32),
-                        },
-                        _ => rhi::BindingType::Buffer {
-                            ty: rhi::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                    },
-                    count: None,
-                })
-                .collect(),
-        });
+                        count: None,
+                    })
+                    .collect(),
+            });
         let evaluator_pipeline_layout =
             device.create_pipeline_layout(&rhi::PipelineLayoutDescriptor {
                 label: Some("native-gi-material-evaluator-pipeline-layout".into()),
@@ -1658,14 +1682,10 @@ impl LightingTraceGpu {
             module: evaluator_shader,
             entry_point: "main".into(),
         });
-        let evaluator_dummy_vt_page_table = device.create_buffer(&rhi::BufferDescriptor::new(
-            16,
-            rhi::BufferUsages::STORAGE,
-        ));
-        let evaluator_dummy_vt_config = device.create_buffer(&rhi::BufferDescriptor::new(
-            32,
-            rhi::BufferUsages::STORAGE,
-        ));
+        let evaluator_dummy_vt_page_table =
+            device.create_buffer(&rhi::BufferDescriptor::new(16, rhi::BufferUsages::STORAGE));
+        let evaluator_dummy_vt_config =
+            device.create_buffer(&rhi::BufferDescriptor::new(32, rhi::BufferUsages::STORAGE));
         let evaluator_dummy_vt_atlas = device.create_texture(&rhi::TextureDescriptor {
             label: Some("native-gi-evaluator-disabled-vt-atlas".into()),
             size: rhi::Extent3d {
@@ -1736,6 +1756,9 @@ impl LightingTraceGpu {
             evaluator_pipeline_layout,
             evaluator_shader,
             evaluator_pipeline,
+            evaluator_link_source: Arc::<str>::from(""),
+            retired_evaluator_shaders: Vec::new(),
+            retired_evaluator_pipelines: Vec::new(),
             material_candidate_layout,
             material_candidate_pipeline_layout,
             material_candidate_shader,
@@ -1770,6 +1793,42 @@ impl LightingTraceGpu {
             allocations: 0,
             scene_uploads: 0,
         }
+    }
+
+    fn ensure_evaluator_pipeline(&mut self, response_link: &str) {
+        let requested = Arc::<str>::from(response_link);
+        if self.evaluator_link_source.as_ref() == requested.as_ref() {
+            return;
+        }
+        let source = if response_link.trim().is_empty() {
+            include_str!(concat!(
+                env!("OUT_DIR"),
+                "/native_gi_material_evaluator.wgsl"
+            ))
+            .to_owned()
+        } else {
+            native_registered_evaluator_shader_source(response_link)
+        };
+        let shader = self
+            .device
+            .create_shader_module(&rhi::ShaderModuleDescriptor {
+                label: Some("native-gi-material-evaluator-linked".into()),
+                source: rhi::ShaderSource::Wgsl(Cow::Owned(source)),
+            });
+        let pipeline = self
+            .device
+            .create_compute_pipeline(&rhi::ComputePipelineDescriptor {
+                label: Some("native-gi-material-evaluator-linked".into()),
+                layout: Some(self.evaluator_pipeline_layout),
+                module: shader,
+                entry_point: "main".into(),
+            });
+        self.retired_evaluator_shaders.push(self.evaluator_shader);
+        self.retired_evaluator_pipelines
+            .push(self.evaluator_pipeline);
+        self.evaluator_shader = shader;
+        self.evaluator_pipeline = pipeline;
+        self.evaluator_link_source = requested;
     }
 
     /// Reports the actual resident upload capacities and allocation count.
@@ -1843,6 +1902,7 @@ impl LightingTraceGpu {
         ];
         if let Some(evaluator) = material_evaluator.as_ref() {
             evaluator.clone().validate()?;
+            self.ensure_evaluator_pipeline(&evaluator.registered_response_wgsl);
         }
         if candidate_target.is_some() {
             scene.validate_secondary_attributes()?;
@@ -2078,12 +2138,13 @@ impl LightingTraceGpu {
             evaluation_buffer,
             evaluator_config_buffer,
         ) {
-            let buffers = [output, attribute_buffer, config, evaluations];
+            let buffers = [output, attribute_buffer, ray_buffer, config, evaluations];
             let sizes = [
                 output_size_bytes,
                 self.attributes
                     .expect("attribute buffer was ensured")
                     .capacity_bytes,
+                self.rays.expect("ray buffer was ensured").capacity_bytes,
                 (NATIVE_GI_MATERIAL_EVALUATOR_CONFIG_WORDS * 4) as u64,
                 self.evaluations
                     .expect("evaluation buffer was ensured")
@@ -2124,7 +2185,7 @@ impl LightingTraceGpu {
                 evaluator.material_texture_rows.size_bytes,
                 evaluator.execution_plans.size_bytes,
                 evaluator.execution_programs.size_bytes,
-                0,
+                16,
                 32,
             ];
             let (atlas_view, sampler) = evaluator.vt.as_ref().map_or(
@@ -2150,12 +2211,8 @@ impl LightingTraceGpu {
                         atlas_view,
                         sampler,
                     );
-                    self.evaluator_vt_bind_group = Some((
-                        group,
-                        material_group_buffers,
-                        atlas_view,
-                        sampler,
-                    ));
+                    self.evaluator_vt_bind_group =
+                        Some((group, material_group_buffers, atlas_view, sampler));
                     group
                 }
             } else {
@@ -2165,22 +2222,14 @@ impl LightingTraceGpu {
                     atlas_view,
                     sampler,
                 );
-                self.evaluator_vt_bind_group = Some((
-                    group,
-                    material_group_buffers,
-                    atlas_view,
-                    sampler,
-                ));
+                self.evaluator_vt_bind_group =
+                    Some((group, material_group_buffers, atlas_view, sampler));
                 group
             };
             if let Some(vt) = evaluator.vt.as_ref() {
-                if self
-                    .evaluator_vt_leases
-                    .as_ref()
-                    .is_none_or(|current| {
-                        current.publication_generation() != vt.publication_generation
-                    })
-                {
+                if self.evaluator_vt_leases.as_ref().is_none_or(|current| {
+                    current.publication_generation() != vt.publication_generation
+                }) {
                     if let Some(previous) = self.evaluator_vt_leases.take() {
                         self.retired_evaluator_vt_leases.push(previous);
                     }
@@ -2304,7 +2353,7 @@ impl LightingTraceGpu {
             vt_page_table: material_evaluator.as_ref().and_then(|evaluator| {
                 evaluator.vt.as_ref().map(|vt| TraceGraphBuffer {
                     id: vt.page_table,
-                    size_bytes: 0,
+                    size_bytes: 16,
                 })
             }),
             vt_config: material_evaluator.as_ref().and_then(|evaluator| {
@@ -2388,8 +2437,8 @@ impl LightingTraceGpu {
 
     fn create_evaluator_bind_group(
         &self,
-        buffers: [rhi::BufferId; 4],
-        sizes: [u64; 4],
+        buffers: [rhi::BufferId; 5],
+        sizes: [u64; 5],
     ) -> rhi::BindGroupId {
         self.device.create_bind_group(&rhi::BindGroupDescriptor {
             label: Some("native-gi-material-evaluator-bind-group".into()),
@@ -2551,18 +2600,23 @@ impl Drop for LightingTraceGpu {
         self.device
             .destroy_texture_view(self.evaluator_dummy_vt_atlas_view);
         self.device.destroy_texture(self.evaluator_dummy_vt_atlas);
-        self.device
-            .destroy_sampler(self.evaluator_dummy_vt_sampler);
+        self.device.destroy_sampler(self.evaluator_dummy_vt_sampler);
         self.device.destroy_compute_pipeline(self.pipeline);
         self.device
             .destroy_compute_pipeline(self.candidate_pipeline);
         self.device
             .destroy_compute_pipeline(self.evaluator_pipeline);
+        for pipeline in self.retired_evaluator_pipelines.drain(..) {
+            self.device.destroy_compute_pipeline(pipeline);
+        }
         self.device
             .destroy_compute_pipeline(self.material_candidate_pipeline);
         self.device.destroy_shader_module(self.shader);
         self.device.destroy_shader_module(self.candidate_shader);
         self.device.destroy_shader_module(self.evaluator_shader);
+        for shader in self.retired_evaluator_shaders.drain(..) {
+            self.device.destroy_shader_module(shader);
+        }
         self.device
             .destroy_shader_module(self.material_candidate_shader);
         self.device.destroy_pipeline_layout(self.pipeline_layout);
@@ -2902,6 +2956,45 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
  c.position_source_pdf=vec4<f32>(p,f(rays[rb+8u])); c.normal_target_pdf=vec4<f32>(n,target_density); c.radiance_selection_u01=vec4<f32>(le,c.radiance_selection_u01.w); c.visibility_padding=vec4<f32>(1.0,0.0,0.0,0.0); candidates[base]=c;
 }
 "#;
+
+fn native_registered_evaluator_shader_source(response_link: &str) -> String {
+    let generated = include_str!(concat!(
+        env!("OUT_DIR"),
+        "/native_gi_material_evaluator.wgsl"
+    ));
+    let generated = remove_wgsl_function(generated, "prism_native_registered_evaluate")
+        .expect("native evaluator must contain the fail-closed registered stub");
+    let linked = response_link
+        .strip_prefix(prism_render_material::response_source::RESPONSE_FUNCTION_ABI)
+        .unwrap_or(response_link);
+    format!("{generated}\n{linked}")
+}
+
+fn remove_wgsl_function(source: &str, name: &str) -> Option<String> {
+    let marker = format!("fn {name}(");
+    let start = source.find(&marker)?;
+    let body_start = source[start..].find('{')? + start;
+    let mut depth = 0usize;
+    let mut end = None;
+    for (offset, byte) in source.as_bytes()[body_start..].iter().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    end = Some(body_start + offset + 1);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let end = end?;
+    let mut output = String::with_capacity(source.len() - (end - start));
+    output.push_str(&source[..start]);
+    output.push_str(&source[end..]);
+    Some(output)
+}
 
 fn material_candidate_shader_source() -> String {
     let mut source = CANDIDATE_WGSL.replace(

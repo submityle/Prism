@@ -19,7 +19,7 @@ pub const NATIVE_GI_MATERIAL_EVALUATOR_ABI_VERSION: u32 = 1;
 /// Number of words in [`NativeGiMaterialEvaluatorConfig`].
 pub const NATIVE_GI_MATERIAL_EVALUATOR_CONFIG_WORDS: usize = 16;
 /// Number of words in one per-hit evaluator result.
-pub const NATIVE_GI_MATERIAL_EVALUATION_WORDS: usize = 16;
+pub const NATIVE_GI_MATERIAL_EVALUATION_WORDS: usize = 20;
 /// Byte stride of one per-hit evaluator result.
 pub const NATIVE_GI_MATERIAL_EVALUATION_BYTES: u64 =
     (NATIVE_GI_MATERIAL_EVALUATION_WORDS * core::mem::size_of::<u32>()) as u64;
@@ -54,9 +54,11 @@ pub const NATIVE_GI_TRACE_HITS_BINDING: u32 = 0;
 /// Per-dispatch hit-attribute input binding.
 pub const NATIVE_GI_HIT_ATTRIBUTES_BINDING: u32 = 1;
 /// Per-dispatch evaluator configuration binding.
-pub const NATIVE_GI_EVALUATOR_CONFIG_BINDING: u32 = 2;
+pub const NATIVE_GI_EVALUATOR_CONFIG_BINDING: u32 = 3;
 /// Per-hit material-evaluator output binding.
-pub const NATIVE_GI_EVALUATIONS_BINDING: u32 = 3;
+pub const NATIVE_GI_EVALUATIONS_BINDING: u32 = 4;
+/// Per-dispatch packed trace-ray input binding.
+pub const NATIVE_GI_TRACE_RAYS_BINDING: u32 = 2;
 /// Direct-image heap names remain exported for the architecture module's
 /// public surface, but this ABI has no such bindings. A non-VT authored row is
 /// rejected before an image index can be consumed.
@@ -213,6 +215,14 @@ pub struct NativeGiMaterialEvaluationRecord {
     pub execution_permutation_low: u32,
     /// Verified permutation index, high word.
     pub execution_permutation_high: u32,
+    /// Response-program kind proven by the execution row.
+    pub response_kind: u32,
+    /// Execution-family proof for the evaluated arm.
+    pub execution_family: u32,
+    /// Mask/blend proof: the accepted plan's blended channel mask.
+    pub blended_channels: u32,
+    /// Response source proof: builtin or registered stable program id.
+    pub response_program_id: u32,
 }
 
 impl NativeGiMaterialEvaluationRecord {
@@ -253,6 +263,9 @@ impl NativeGiMaterialEvaluationRecord {
         if self.instance_id == u32::MAX
             || self.geometry_id == u32::MAX
             || !self.snapshot().is_complete()
+            || self.response_kind > 3
+            || self.execution_family > 2
+            || self.response_program_id == u32::MAX
         {
             return Err(NativeGiMaterialEvaluationError::MissingSnapshotProof);
         }
@@ -350,6 +363,10 @@ mod tests {
             execution_package_index: 3,
             execution_permutation_low: 4,
             execution_permutation_high: 0,
+            response_kind: 2,
+            execution_family: 0,
+            blended_channels: 0,
+            response_program_id: 2,
         }
     }
 
@@ -452,6 +469,10 @@ mod tests {
             execution_package_index: 12,
             execution_permutation_low: 13,
             execution_permutation_high: 14,
+            response_kind: 2,
+            execution_family: 0,
+            blended_channels: 0,
+            response_program_id: 2,
         };
         assert_eq!(result.validate(), Ok(()));
         result.valid = 0;
