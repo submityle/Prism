@@ -543,8 +543,10 @@ impl NativeGiMaterialEvaluatorInput {
                 execution_plan_count: execution.plan_rows().len() as u32,
                 execution_program_count: execution.program_rows().len() as u32,
                 texture_slot_count: 0,
-                // The lease exposes the canonical sentinel-sized page-table
-                // allocation used by the material VT ABI: one 16-byte entry.
+                // The page table is bound as the whole storage allocation. The
+                // shader clips its binary search to config.entry_count and the
+                // runtime-array length, so this field is only the ABI's
+                // non-empty VT proof rather than a binding-size clamp.
                 vt_page_table_word_count: vt.as_ref().map_or(0, |_| 4),
                 flags: 0,
                 _padding: [0; 2],
@@ -581,9 +583,30 @@ impl NativeGiMaterialEvaluatorInput {
         self.config
             .validate()
             .map_err(|_| TraceGpuError::InvalidMaterialEvaluator)?;
+        let required_header_bytes = u64::from(self.config.material_header_count)
+            .checked_mul(
+                core::mem::size_of::<prism_render_material::GpuMaterialHeader>() as u64,
+            )
+            .ok_or(TraceGpuError::BufferSizeOverflow)?;
+        let required_parameter_bytes = u64::from(self.config.parameter_word_count)
+            .checked_mul(4)
+            .ok_or(TraceGpuError::BufferSizeOverflow)?;
         let required_texture_bytes = u64::from(self.config.texture_row_count)
             .checked_mul(core::mem::size_of::<prism_render_material::GpuMaterialTexture>() as u64)
             .ok_or(TraceGpuError::BufferSizeOverflow)?;
+        let required_plan_bytes = u64::from(self.config.execution_plan_count)
+            .checked_mul(prism_render_material::EXECUTION_PLAN_ROW_WORDS as u64 * 4)
+            .ok_or(TraceGpuError::BufferSizeOverflow)?;
+        let required_program_bytes = u64::from(self.config.execution_program_count)
+            .checked_mul(5 * 4)
+            .ok_or(TraceGpuError::BufferSizeOverflow)?;
+        if self.material_headers.size_bytes < required_header_bytes
+            || self.material_parameters.size_bytes < required_parameter_bytes
+            || self.execution_plans.size_bytes < required_plan_bytes
+            || self.execution_programs.size_bytes < required_program_bytes
+        {
+            return Err(TraceGpuError::InvalidMaterialEvaluator);
+        }
         if self.material_texture_rows.size_bytes < required_texture_bytes {
             return Err(TraceGpuError::InvalidMaterialTextureRows);
         }
@@ -591,9 +614,15 @@ impl NativeGiMaterialEvaluatorInput {
             Some(vt) => {
                 let generation = (self.config.vt_generation_low as u64)
                     | ((self.config.vt_generation_high as u64) << 32);
-                if self.config.vt_page_table_word_count == 0
+                if self.config.vt_page_table_word_count < 4
+                    || (self.config.vt_page_table_word_count & 3) != 0
                     || generation == 0
                     || vt.publication_generation != generation
+                    || vt.page_table != vt.lease.page_table()
+                    || vt.config != vt.lease.config()
+                    || vt.atlas_view != vt.lease.atlas_view()
+                    || vt.sampler != vt.lease.sampler()
+                    || vt.publication_generation != vt.lease.publication_generation()
                 {
                     return Err(TraceGpuError::InvalidMaterialVtResources);
                 }
@@ -1657,7 +1686,7 @@ impl LightingTraceGpu {
                                 ty: rhi::BufferBindingType::Storage { read_only: true },
                                 has_dynamic_offset: false,
                                 min_binding_size: None,
-                            },
+                            }
                         },
                         count: None,
                     })
@@ -1714,12 +1743,20 @@ impl LightingTraceGpu {
                     .map(|binding| rhi::BindGroupLayoutEntry {
                         binding,
                         visibility: rhi::ShaderStages::COMPUTE,
-                        ty: rhi::BindingType::Buffer {
-                            ty: rhi::BufferBindingType::Storage {
-                                read_only: binding != 7,
-                            },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
+                        ty: if binding == 6 {
+                            rhi::BindingType::Buffer {
+                                ty: rhi::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: Some(32),
+                            }
+                        } else {
+                            rhi::BindingType::Buffer {
+                                ty: rhi::BufferBindingType::Storage {
+                                    read_only: binding != 7,
+                                },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            }
                         },
                         count: None,
                     })
@@ -2185,7 +2222,10 @@ impl LightingTraceGpu {
                 evaluator.material_texture_rows.size_bytes,
                 evaluator.execution_plans.size_bytes,
                 evaluator.execution_programs.size_bytes,
-                16,
+                // Zero means `size: None` in create_evaluator_material_bind_group:
+                // bind the complete published page-table allocation rather
+                // than truncating it to the first entry.
+                0,
                 32,
             ];
             let (atlas_view, sampler) = evaluator.vt.as_ref().map_or(
@@ -3276,6 +3316,405 @@ mod tests {
                 ),
             ],
         );
+    }
+
+    #[test]
+    fn evaluator_vt_page_table_binding_uses_the_full_storage_allocation() {
+        let (device, _) = descriptor_device();
+        let trace = LightingTraceGpu::new(device.clone());
+        let buffers = std::array::from_fn(|_| {
+            device.create_buffer(&BufferDescriptor::new(64, BufferUsages::STORAGE))
+        });
+        let group = trace.create_evaluator_material_bind_group(
+            buffers,
+            [32, 32, 32, 32, 32, 0, 32],
+            trace.evaluator_dummy_vt_atlas_view,
+            trace.evaluator_dummy_vt_sampler,
+        );
+        let groups = device.groups.lock().unwrap();
+        let descriptor = groups
+            .iter()
+            .find(|group| group.label.as_deref() == Some("native-gi-material-evaluator-material-bind-group"))
+            .expect("evaluator material bind group was recorded");
+        assert_eq!(descriptor.entries[5].resource, rhi::BindingResource::Buffer {
+            buffer: buffers[5],
+            offset: 0,
+            size: None,
+        });
+        assert_eq!(descriptor.entries[6].resource, rhi::BindingResource::Buffer {
+            buffer: buffers[6],
+            offset: 0,
+            size: Some(32),
+        });
+        assert_eq!(descriptor.entries[7].resource, rhi::BindingResource::TextureView(
+            trace.evaluator_dummy_vt_atlas_view
+        ));
+        assert_eq!(descriptor.entries[8].resource, rhi::BindingResource::Sampler(
+            trace.evaluator_dummy_vt_sampler
+        ));
+        drop(groups);
+        drop(trace);
+        device.destroy_bind_group(group);
+        for buffer in buffers {
+            device.destroy_buffer(buffer);
+        }
+        assert_eq!(device.inner.live_resource_count(), 0);
+    }
+
+    #[test]
+    fn hardware_material_evaluator_vt_sample_matches_cpu_oracle() {
+        let (device, queue) = match WgpuInstance::new().request_default_hardware_device() {
+            Ok(pair) => pair,
+            Err(HardwareDeviceError::NoAdapter) => {
+                assert!(
+                    !require_hardware_gpu(),
+                    "PRISM_REQUIRE_GPU=1 but no physical adapter was found"
+                );
+                eprintln!("SKIPPED evaluator GPU parity: no adapter");
+                return;
+            }
+            Err(HardwareDeviceError::NonHardware(evidence)) => {
+                assert!(
+                    !require_hardware_gpu(),
+                    "PRISM_REQUIRE_GPU=1 requires physical GPU: {evidence}"
+                );
+                eprintln!("SKIPPED evaluator GPU parity: {evidence}");
+                return;
+            }
+            Err(HardwareDeviceError::Device(error)) => {
+                panic!("hardware GPU device creation failed: {error}")
+            }
+        };
+        let device = Arc::new(device);
+        let trace_device: Arc<dyn RenderDevice + Send + Sync> = device.clone();
+
+        let bvh = Bvh::build(&[Triangle::new(
+            [-1.0, -1.0, -1.0],
+            [1.0, -1.0, -1.0],
+            [0.0, 1.0, -1.0],
+            19,
+        )]);
+        let packed = GpuBvhBuffers::from_bvh(&bvh)
+            .with_hit_attributes(vec![RayHitAttributeRecord::new(
+                prism_render_architecture::ray_scene::RayHitIdentity::new(1, 19, 7)
+                    .with_material_proof(0, 11, 23, [0, 0, 0, 0, 0]),
+                [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+                [[0.0, 0.0, 1.0]; 3],
+            )])
+            .expect("evaluator fixture attributes match the triangle");
+        let scene = PackedTraceScene::from(&packed);
+        let rays = [TraceRay {
+            origin: [0.0, 0.0, 0.0],
+            t_min: 0.001,
+            direction: [0.0, 0.0, -1.0],
+            t_max: 10.0,
+            direction_pdf: 1.0,
+            selection_u01: 0.5,
+        }];
+
+        let mut material = prism_render_material::fallback_material_record(
+            prism_render_architecture::abi::GenerationalHandle::new(0, 7),
+            11,
+        );
+        material.closure_mask = 0;
+        material.textures = vec![prism_render_material::GpuMaterialTexture::with_virtual_texture(
+            0, 1, 0, 0, 8, 64, 64, 64,
+        )];
+        let mut header = material.header(0, 0, 23);
+        header.execution_plan_index = 0;
+        header.execution_program_index = 0;
+        header.execution_package_index = 0;
+        header.execution_permutation_low = 0;
+        header.execution_permutation_high = 0;
+        let packed_parameters = material.packed_parameters().pack();
+
+        let headers = device.create_buffer(&BufferDescriptor::new(
+            core::mem::size_of_val(&header) as u64,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        ));
+        let parameters = device.create_buffer(&BufferDescriptor::new(
+            (packed_parameters.len() * 4) as u64,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        ));
+        let texture_rows = device.create_buffer(&BufferDescriptor::new(
+            core::mem::size_of_val(&material.textures[0]) as u64,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        ));
+        let plans = device.create_buffer(&BufferDescriptor::new(
+            8 * 4,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        ));
+        let programs = device.create_buffer(&BufferDescriptor::new(
+            5 * 4,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        ));
+        let page_table = device.create_buffer(&BufferDescriptor::new(
+            8 * 4,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        ));
+        let vt_config = device.create_buffer(&BufferDescriptor::new(
+            8 * 4,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        ));
+        queue.write_buffer(headers, 0, bytemuck::bytes_of(&header));
+        queue.write_buffer(parameters, 0, bytemuck::cast_slice(&packed_parameters));
+        queue.write_buffer(
+            texture_rows,
+            0,
+            bytemuck::bytes_of(&material.textures[0]),
+        );
+        queue.write_buffer(plans, 0, bytemuck::cast_slice(&[
+            0_u32,
+            u32::MAX,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ]));
+        queue.write_buffer(programs, 0, bytemuck::cast_slice(&[2_u32, 0, 1, 0, 2]));
+        // Two sorted entries prove that the page-table bind is not truncated
+        // to the first 16-byte record.
+        queue.write_buffer(
+            page_table,
+            0,
+            bytemuck::cast_slice(&[7_u32, 0, 0, 0, 8, 0, 0, 0]),
+        );
+        queue.write_buffer(
+            vt_config,
+            0,
+            bytemuck::cast_slice(&[1_u32, 2, 64, 66, 1, 1, 1, 0]),
+        );
+
+        let atlas = device.create_texture(&rhi::TextureDescriptor {
+            label: Some("native-gi-evaluator-test-atlas".into()),
+            size: rhi::Extent3d {
+                width: 66,
+                height: 66,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: rhi::TextureDimension::D2,
+            format: rhi::TextureFormat::Rgba8Unorm,
+            usage: rhi::TextureUsages::TEXTURE_BINDING | rhi::TextureUsages::COPY_DST,
+        });
+        let atlas_view = device.create_texture_view(
+            atlas,
+            &rhi::TextureViewDescriptor {
+                dimension: rhi::TextureViewDimension::D2Array,
+                ..rhi::TextureViewDescriptor::default()
+            },
+        );
+        let sampler = device.create_sampler(&rhi::SamplerDescriptor::default());
+        queue.write_texture(
+            rhi::TextureWrite {
+                texture: atlas,
+                mip_level: 0,
+                origin: [0, 0, 0],
+                size: rhi::Extent3d::new_2d(66, 66),
+            },
+            &vec![255_u8, 0, 0, 255]
+                .into_iter()
+                .cycle()
+                .take(66 * 66 * 4)
+                .collect::<Vec<_>>(),
+            rhi::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(66 * 4),
+                rows_per_image: Some(66),
+            },
+        );
+
+        let lease = MaterialVtLeaseSnapshot::for_test(
+            Arc::new(()),
+            trace_device.clone(),
+            page_table,
+            vt_config,
+            atlas_view,
+            sampler,
+            1,
+            7,
+        );
+        let evaluator = NativeGiMaterialEvaluatorInput {
+            config: NativeGiMaterialEvaluatorConfig {
+                abi_version: NATIVE_GI_MATERIAL_EVALUATOR_ABI_VERSION,
+                material_epoch_low: 23,
+                material_epoch_high: 0,
+                execution_table_version: 1,
+                vt_generation_low: 7,
+                vt_generation_high: 0,
+                material_header_count: 1,
+                parameter_word_count: packed_parameters.len() as u32,
+                texture_row_count: 1,
+                execution_plan_count: 1,
+                execution_program_count: 1,
+                texture_slot_count: 0,
+                vt_page_table_word_count: 8,
+                flags: 0,
+                _padding: [0; 2],
+            },
+            material_headers: TraceGraphBuffer {
+                id: headers,
+                size_bytes: core::mem::size_of_val(&header) as u64,
+            },
+            material_parameters: TraceGraphBuffer {
+                id: parameters,
+                size_bytes: (packed_parameters.len() * 4) as u64,
+            },
+            material_texture_rows: TraceGraphBuffer {
+                id: texture_rows,
+                size_bytes: core::mem::size_of_val(&material.textures[0]) as u64,
+            },
+            execution_plans: TraceGraphBuffer {
+                id: plans,
+                size_bytes: 8 * 4,
+            },
+            execution_programs: TraceGraphBuffer {
+                id: programs,
+                size_bytes: 5 * 4,
+            },
+            registered_response_wgsl: Arc::<str>::from(""),
+            vt: Some(NativeGiMaterialEvaluatorVtInput::from_lease(&lease)),
+        };
+
+        let hits = device.create_buffer(&BufferDescriptor::new(
+            HIT_WORDS as u64 * 4,
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        ));
+        let mut pass = LightingTraceGpu::new(trace_device);
+        let recorder = pass
+            .prepare_graph_with_material_evaluator(
+                &queue,
+                &BorrowedPackedTraceScene::from(&scene),
+                &rays,
+                hits,
+                HIT_WORDS as u64 * 4,
+                None,
+                Some(evaluator),
+            )
+            .expect("valid evaluator fixture is admitted");
+        let evaluation_output = recorder
+            .material_evaluations
+            .expect("evaluator output is present");
+        let mut graph = RenderGraph::new(rhi::Extent3d::new_2d(1, 1));
+        let import = |graph: &mut RenderGraph, name: &str, id, size| {
+            graph.import_buffer(
+                name,
+                BufferDesc::new(size, BufferUsages::STORAGE),
+                ImportedBuffer {
+                    buffer: id,
+                    entry_state: BufferState::initial(),
+                },
+            )
+        };
+        let nodes = import(&mut graph, "evaluator-nodes", recorder.nodes.id, recorder.nodes.size_bytes);
+        let triangles = import(
+            &mut graph,
+            "evaluator-triangles",
+            recorder.triangles.id,
+            recorder.triangles.size_bytes,
+        );
+        let attributes = import(
+            &mut graph,
+            "evaluator-attributes",
+            recorder.attributes.id,
+            recorder.attributes.size_bytes,
+        );
+        let ray_buffer = import(&mut graph, "evaluator-rays", recorder.rays.id, recorder.rays.size_bytes);
+        let mut hit_buffer = import(&mut graph, "evaluator-hits", hits, HIT_WORDS as u64 * 4);
+        let header_buffer = import(&mut graph, "evaluator-headers", headers, core::mem::size_of_val(&header) as u64);
+        let parameter_buffer = import(&mut graph, "evaluator-parameters", parameters, (packed_parameters.len() * 4) as u64);
+        let texture_buffer = import(&mut graph, "evaluator-textures", texture_rows, 32);
+        let plan_buffer = import(&mut graph, "evaluator-plans", plans, 32);
+        let program_buffer = import(&mut graph, "evaluator-programs", programs, 20);
+        let page_table_buffer = import(&mut graph, "evaluator-page-table", page_table, 32);
+        let vt_config_buffer = import(&mut graph, "evaluator-vt-config", vt_config, 32);
+        let evaluator_config = recorder.evaluator_config.expect("evaluator config");
+        let evaluator_config_buffer = graph.import_buffer(
+            "evaluator-config",
+            BufferDesc::new(evaluator_config.size_bytes, BufferUsages::UNIFORM),
+            ImportedBuffer {
+                buffer: evaluator_config.id,
+                entry_state: BufferState::initial(),
+            },
+        );
+        let mut evaluation_buffer = import(
+            &mut graph,
+            "evaluator-output",
+            evaluation_output.id,
+            evaluation_output.size_bytes,
+        );
+        let trace_recorder = recorder.clone();
+        let trace_pass = graph
+            .try_add_pass_with_dependencies(
+                "evaluator-trace",
+                PassKind::Compute,
+                PassFlags::SIDE_EFFECT,
+                Vec::new(),
+                move |builder| {
+                builder.read_storage_buffer(nodes);
+                builder.read_storage_buffer(triangles);
+                builder.read_storage_buffer(attributes);
+                builder.read_storage_buffer(ray_buffer);
+                hit_buffer = builder.write_storage_buffer(hit_buffer);
+                move |context| trace_recorder.record_graph(context)
+                },
+            )
+            .expect("trace pass fits evaluator graph");
+        let evaluator_recorder = recorder;
+        graph
+            .try_add_pass_with_dependencies(
+                "native-gi-material-evaluator",
+                PassKind::Compute,
+                PassFlags::SIDE_EFFECT,
+                vec![trace_pass],
+                move |builder| {
+                    builder.read_storage_buffer(hit_buffer);
+                    builder.read_storage_buffer(attributes);
+                    builder.read_storage_buffer(ray_buffer);
+                    builder.read_uniform(evaluator_config_buffer);
+                    builder.read_storage_buffer(header_buffer);
+                    builder.read_storage_buffer(parameter_buffer);
+                    builder.read_storage_buffer(texture_buffer);
+                    builder.read_storage_buffer(plan_buffer);
+                    builder.read_storage_buffer(program_buffer);
+                    builder.read_storage_buffer(page_table_buffer);
+                    builder.read_storage_buffer(vt_config_buffer);
+                    evaluation_buffer = builder.write_storage_buffer(evaluation_buffer);
+                    move |context| evaluator_recorder.record_evaluator_graph(context)
+                },
+            )
+            .expect("evaluator pass fits evaluator graph");
+        let recorded = graph.execute(device.as_ref(), &queue).unwrap();
+        let bytes = queue
+            .read_buffer(evaluation_output.id, evaluation_output.size_bytes)
+            .expect("evaluator result readback must complete");
+        let result = bytemuck::pod_read_unaligned::<NativeGiMaterialEvaluationRecord>(&bytes);
+        result.validate().expect("GPU evaluator must publish a valid record");
+        // CPU oracle: the fixture is unlit, base color is the default 0.8,
+        // and the resident VT tile is exact sRGB red.
+        for (actual, expected) in result.response_rgb.into_iter().zip([0.8, 0.0, 0.0]) {
+            assert!((actual - expected).abs() < 2.0e-3, "{actual} != {expected}");
+        }
+        assert_eq!(result.material_index, 0);
+        assert_eq!(result.material_generation, 7);
+        assert_eq!(result.material_revision, 11);
+        assert_eq!(result.execution_plan_index, 0);
+        assert_eq!(result.execution_program_index, 0);
+        assert_eq!(result.execution_package_index, 0);
+        assert_eq!(result.execution_family, 1);
+        recorded.release(device.as_ref());
+        drop(recorder);
+        drop(pass);
+        device.destroy_buffer(hits);
+        for buffer in [headers, parameters, texture_rows, plans, programs, page_table, vt_config] {
+            device.destroy_buffer(buffer);
+        }
+        device.destroy_texture_view(atlas_view);
+        device.destroy_texture(atlas);
+        device.destroy_sampler(sampler);
     }
 
     #[test]

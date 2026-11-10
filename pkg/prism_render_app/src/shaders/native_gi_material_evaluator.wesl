@@ -211,7 +211,8 @@ struct RegisteredCustomData { header: RegisteredHeader, permutation_low: u32, pe
 @group(1) @binding(2) var<storage, read> material_texture_rows: array<PrismMaterialTexture>;
 @group(1) @binding(3) var<storage, read> execution_plans: array<ExecutionPlanRow>;
 @group(1) @binding(4) var<storage, read> execution_programs: array<ExecutionProgramRow>;
-// Binding 5 is declared by material_virtual_texture.wesl.
+// Binding 5 is owned by the imported VT resolver. Its runtime array is
+// clipped against the published entry_count inside material_vt_exact_slot.
 @group(1) @binding(6) var<storage, read> material_vt_config: MaterialVirtualTextureConfig;
 @group(1) @binding(7) var material_vt_atlas: texture_2d_array<f32>;
 @group(1) @binding(8) var material_vt_sampler: sampler;
@@ -620,6 +621,27 @@ fn native_mask_value(header: PrismMaterialHeader, index: u32) -> TextureSample {
     return out;
 }
 
+fn native_execution_program_is_valid(
+    program: ExecutionProgramRow,
+    package_index: u32,
+    permutation_low: u32,
+    permutation_high: u32,
+) -> bool {
+    if program.response_kind == 1u
+        || program.response_kind > RESPONSE_PROGRAM_KIND_CUSTOM
+        || (program.response_kind == RESPONSE_PROGRAM_KIND_LIT
+            && program.program_id != BUILTIN_LIT_PROGRAM_ID)
+        || (program.response_kind == RESPONSE_PROGRAM_KIND_UNLIT
+            && program.program_id != BUILTIN_UNLIT_PROGRAM_ID)
+        || program.package_index != package_index
+        || permutation_high > program.permutation_count_high
+        || (permutation_high == program.permutation_count_high
+            && permutation_low >= program.permutation_count_low) {
+        return false;
+    }
+    return true;
+}
+
 fn native_arm_response(
     surface: PrismSurfaceParameters,
     header: PrismMaterialHeader,
@@ -698,7 +720,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         || (evaluator_config.vt_page_table_word_count != 0u)
             != (evaluator_config.vt_generation_low != 0u
                 || evaluator_config.vt_generation_high != 0u)
-        || evaluator_config.vt_page_table_word_count > arrayLength(&material_vt_page_table)
+        || (evaluator_config.vt_page_table_word_count != 0u
+            && (evaluator_config.vt_page_table_word_count < 4u
+                || (evaluator_config.vt_page_table_word_count & 3u) != 0u))
         || evaluator_config.flags != 0u
         || any(evaluator_config.padding != vec2<u32>(0u))) {
         evaluations[ray_index] = result;
@@ -776,27 +800,38 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
     let program = execution_programs[program_index];
-    if (program.response_kind == 1u
-        || program.response_kind > RESPONSE_PROGRAM_KIND_CUSTOM
-        || (program.response_kind == RESPONSE_PROGRAM_KIND_LIT && program.program_id != BUILTIN_LIT_PROGRAM_ID)
-        || (program.response_kind == RESPONSE_PROGRAM_KIND_UNLIT && program.program_id != BUILTIN_UNLIT_PROGRAM_ID)
-        || program.package_index != package_index
-        || permutation_high > program.permutation_count_high
-        || (permutation_high == program.permutation_count_high
-            && permutation_low >= program.permutation_count_low)) {
+    if !native_execution_program_is_valid(program, package_index, permutation_low, permutation_high) {
+        evaluations[ray_index] = result;
+        return;
+    }
+    if plan.right_program == INVALID
+        && ((program.response_kind == RESPONSE_PROGRAM_KIND_LIT
+                && plan.execution_family != EXECUTION_FAMILY_FUSED_BUILTIN)
+            || (program.response_kind == RESPONSE_PROGRAM_KIND_UNLIT
+                && plan.execution_family != EXECUTION_FAMILY_SPLIT_RESPONSE)
+            || (program.response_kind == RESPONSE_PROGRAM_KIND_CUSTOM
+                && plan.execution_family != EXECUTION_FAMILY_SPLIT_RESPONSE)) {
         evaluations[ray_index] = result;
         return;
     }
     var right_program = program;
     if (plan.right_program != INVALID) {
         right_program = execution_programs[plan.right_program];
-        let builtin_pair = program.response_kind < RESPONSE_PROGRAM_KIND_CUSTOM
-            && right_program.response_kind < RESPONSE_PROGRAM_KIND_CUSTOM;
-        if ((builtin_pair && (program.response_kind != RESPONSE_PROGRAM_KIND_LIT
-            || right_program.response_kind != RESPONSE_PROGRAM_KIND_LIT))
-            || (!builtin_pair && program.response_kind != RESPONSE_PROGRAM_KIND_CUSTOM
-                && right_program.response_kind != RESPONSE_PROGRAM_KIND_CUSTOM)
-            || (plan.execution_family == EXECUTION_FAMILY_SPLIT_RESPONSE && builtin_pair)
+        if !native_execution_program_is_valid(
+            right_program, package_index, permutation_low, permutation_high,
+        ) {
+            evaluations[ray_index] = result;
+            return;
+        }
+        let builtin_pair = program.response_kind != RESPONSE_PROGRAM_KIND_CUSTOM
+            && right_program.response_kind != RESPONSE_PROGRAM_KIND_CUSTOM;
+        let both_lit = program.response_kind == RESPONSE_PROGRAM_KIND_LIT
+            && right_program.response_kind == RESPONSE_PROGRAM_KIND_LIT;
+        if ((builtin_pair
+                && ((both_lit && plan.execution_family != EXECUTION_FAMILY_FUSED_BUILTIN)
+                    || (!both_lit && plan.execution_family != EXECUTION_FAMILY_COMPOSITION)))
+            || (!builtin_pair && plan.execution_family != EXECUTION_FAMILY_COMPOSITION)
+            || plan.execution_family == EXECUTION_FAMILY_SPLIT_RESPONSE
             || plan.blended_channels == 0u || plan.blended_channels > 31u
             || plan.blend_domain > BLEND_DOMAIN_CUSTOM_CHANNELS
             || plan.mask_kind != MASK_KIND_DYNAMIC_CHANNEL || plan.mask_index > 3u) {
