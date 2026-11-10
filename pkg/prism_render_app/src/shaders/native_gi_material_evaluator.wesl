@@ -9,6 +9,19 @@ import prism_render_material::shaders::material_unpack::{
     prism_packed_word_count,
     prism_unpack_surface,
 };
+import prism_render_material::shaders::material_sample::{
+    SampledMaterial,
+    fold_material_texel,
+    sample_texture_slot,
+    sampled_material_defaults,
+};
+import prism_render_app::shaders::brdf::{
+    DirectLightSample,
+    ShadingFrame,
+    SurfaceSample,
+    principled_direct_channels_with,
+    principled_pre,
+};
 import prism_render_material::shaders::material_virtual_texture::{
     MaterialVirtualTextureConfig,
     material_vt_atlas_uv,
@@ -31,6 +44,13 @@ const BUILTIN_UNLIT_PROGRAM_ID: u32 = 2u;
 const BUILTIN_LIT_PROGRAM_ID: u32 = 0u;
 const TEXTURE_SEMANTIC_BASE_COLOR: u32 = 0u;
 const TEXTURE_SEMANTIC_EMISSIVE: u32 = 1u;
+const TEXTURE_SEMANTIC_METALLIC_ROUGHNESS: u32 = 2u;
+const TEXTURE_SEMANTIC_NORMAL: u32 = 3u;
+const TEXTURE_SEMANTIC_OCCLUSION: u32 = 4u;
+const TEXTURE_SEMANTIC_CLEAR_COAT: u32 = 5u;
+const TEXTURE_SEMANTIC_CLEAR_COAT_ROUGHNESS: u32 = 6u;
+const TEXTURE_SEMANTIC_CLEAR_COAT_NORMAL: u32 = 7u;
+const TEXTURE_SEMANTIC_NORMAL_VARIANCE: u32 = 11u;
 const NO_VIRTUAL_TEXTURE: u32 = 0xffffffffu;
 const PORTABLE_TEXTURE_ATLAS: u32 = 0xfffffffeu;
 const EXECUTION_FAMILY_FUSED_BUILTIN: u32 = 0u;
@@ -201,21 +221,21 @@ struct RegisteredView {
 struct RegisteredCustomData { header: RegisteredHeader, permutation_low: u32, permutation_high: u32 };
 
 @group(0) @binding(0) var<storage, read> trace_hits: array<u32>;
-@group(0) @binding(1) var<storage, read> hit_attributes: array<u32>;
-@group(0) @binding(2) var<storage, read> trace_rays: array<u32>;
-@group(0) @binding(3) var<uniform> evaluator_config: NativeGiMaterialEvaluatorConfig;
-@group(0) @binding(4) var<storage, read_write> evaluations: array<NativeGiMaterialEvaluationRecord>;
+@group(0) @binding(1) var<uniform> evaluator_config: NativeGiMaterialEvaluatorConfig;
+@group(0) @binding(2) var<storage, read_write> evaluations: array<NativeGiMaterialEvaluationRecord>;
 
 @group(1) @binding(0) var<storage, read> material_headers: array<PrismMaterialHeader>;
 @group(1) @binding(1) var<storage, read> material_parameters: array<u32>;
 @group(1) @binding(2) var<storage, read> material_texture_rows: array<PrismMaterialTexture>;
-@group(1) @binding(3) var<storage, read> execution_plans: array<ExecutionPlanRow>;
-@group(1) @binding(4) var<storage, read> execution_programs: array<ExecutionProgramRow>;
+// Plans and programs are packed consecutively into one storage buffer. This
+// keeps the evaluator below Metal's combined storage-buffer stage limit while
+// preserving both validated tables as real GPU data.
+@group(2) @binding(0) var<storage, read> execution_table: array<u32>;
 // Binding 5 is owned by the imported VT resolver. Its runtime array is
 // clipped against the published entry_count inside material_vt_exact_slot.
-@group(1) @binding(6) var<storage, read> material_vt_config: MaterialVirtualTextureConfig;
-@group(1) @binding(7) var material_vt_atlas: texture_2d_array<f32>;
-@group(1) @binding(8) var material_vt_sampler: sampler;
+@if(!MATERIAL_BINDLESS) @group(1) @binding(6) var<storage, read> material_vt_config: MaterialVirtualTextureConfig;
+@if(!MATERIAL_BINDLESS) @group(1) @binding(7) var material_vt_atlas: texture_2d_array<f32>;
+@if(!MATERIAL_BINDLESS) @group(1) @binding(8) var material_vt_sampler: sampler;
 
 fn invalid_evaluation() -> NativeGiMaterialEvaluationRecord {
     return NativeGiMaterialEvaluationRecord(
@@ -240,16 +260,23 @@ fn invalid_evaluation() -> NativeGiMaterialEvaluationRecord {
     );
 }
 
-fn hit_matches_attributes(hit_base: u32, attribute_base: u32) -> bool {
-    if (trace_hits[hit_base] != 1u) { return false; }
-    // Hit identity is [instance, geometry, material slot, generation, revision,
-    // epoch low/high, plan, program, package, permutation low/high].
-    for (var word = 0u; word < 12u; word += 1u) {
-        if (trace_hits[hit_base + 6u + word] != hit_attributes[attribute_base + word]) {
-            return false;
-        }
-    }
-    return true;
+fn execution_plan_at(index: u32) -> ExecutionPlanRow {
+    let base = index * 8u;
+    return ExecutionPlanRow(
+        execution_table[base], execution_table[base + 1u],
+        execution_table[base + 2u], execution_table[base + 3u],
+        execution_table[base + 4u], execution_table[base + 5u],
+        execution_table[base + 6u], execution_table[base + 7u],
+    );
+}
+
+fn execution_program_at(index: u32) -> ExecutionProgramRow {
+    let base = evaluator_config.execution_plan_count * 8u + index * 5u;
+    return ExecutionProgramRow(
+        execution_table[base], execution_table[base + 1u],
+        execution_table[base + 2u], execution_table[base + 3u],
+        execution_table[base + 4u],
+    );
 }
 
 struct TextureSample {
@@ -274,22 +301,7 @@ fn invalid_native_response() -> NativeResponse {
     );
 }
 
-fn srgb_channel_to_linear(value: f32) -> f32 {
-    if value <= 0.04045 {
-        return value / 12.92;
-    }
-    return pow((value + 0.055) / 1.055, 2.4);
-}
-
-fn srgb_to_linear(value: vec3<f32>) -> vec3<f32> {
-    return vec3<f32>(
-        srgb_channel_to_linear(value.x),
-        srgb_channel_to_linear(value.y),
-        srgb_channel_to_linear(value.z),
-    );
-}
-
-fn sample_vt_row(row: PrismMaterialTexture, uv: vec2<f32>) -> TextureSample {
+@if(!MATERIAL_BINDLESS) fn sample_vt_row(row: PrismMaterialTexture, uv: vec2<f32>) -> TextureSample {
     var out: TextureSample;
     out.valid = false;
     out.value = vec4<f32>(0.0);
@@ -381,10 +393,21 @@ fn sample_vt_row(row: PrismMaterialTexture, uv: vec2<f32>) -> TextureSample {
     return out;
 }
 
-fn sample_texture_row(row: PrismMaterialTexture, uv: vec2<f32>) -> TextureSample {
-    // Direct rows have no image heap in this evaluator ABI. Treating one as a
-    // white texel would make a stale or unbound generation look valid.
+@if(!MATERIAL_BINDLESS) fn sample_texture_row(row: PrismMaterialTexture, uv: vec2<f32>) -> TextureSample {
     return sample_vt_row(row, uv);
+}
+
+@if(MATERIAL_BINDLESS) fn sample_texture_row(row: PrismMaterialTexture, uv: vec2<f32>) -> TextureSample {
+    var out: TextureSample;
+    out.valid = row.generation != 0u;
+    out.value = vec4<f32>(0.0);
+    if (!out.valid) { return out; }
+    out.value = sample_texture_slot(row, uv, 0.0);
+    out.valid = finite(out.value.x)
+        && finite(out.value.y)
+        && finite(out.value.z)
+        && finite(out.value.w);
+    return out;
 }
 
 fn prism_native_registered_evaluate(
@@ -560,47 +583,136 @@ fn finite3(value: vec3<f32>) -> bool {
     return finite(value.x) && finite(value.y) && finite(value.z);
 }
 
-fn native_builtin_response(
-    surface: PrismSurfaceParameters,
-    base_color: vec3<f32>,
-    emission_color: vec3<f32>,
+fn native_texture_semantic_is_supported(semantic: u32) -> bool {
+    return semantic == TEXTURE_SEMANTIC_BASE_COLOR
+        || semantic == TEXTURE_SEMANTIC_EMISSIVE
+        || semantic == TEXTURE_SEMANTIC_METALLIC_ROUGHNESS
+        || semantic == TEXTURE_SEMANTIC_NORMAL
+        || semantic == TEXTURE_SEMANTIC_OCCLUSION
+        || semantic == TEXTURE_SEMANTIC_CLEAR_COAT
+        || semantic == TEXTURE_SEMANTIC_CLEAR_COAT_ROUGHNESS
+        || semantic == TEXTURE_SEMANTIC_CLEAR_COAT_NORMAL
+        || semantic == TEXTURE_SEMANTIC_NORMAL_VARIANCE;
+}
+
+fn native_tangent_frame(
     normal: vec3<f32>,
-    view_direction: vec3<f32>,
+    tangent_input: vec4<f32>,
+) -> ShadingFrame {
+    let n = native_normalize_or(normal, vec3<f32>(0.0, 1.0, 0.0));
+    let projected = tangent_input.xyz - n * dot(n, tangent_input.xyz);
+    let t = native_normalize_or(projected, vec3<f32>(1.0, 0.0, 0.0));
+    let handedness = select(1.0, -1.0, tangent_input.w < 0.0);
+    let b = native_normalize_or(cross(n, t) * handedness, vec3<f32>(0.0, 0.0, 1.0));
+    return ShadingFrame(n, vec3<f32>(0.0), t, b);
+}
+
+fn native_apply_tangent_normal(
+    tangent_normal: vec3<f32>,
+    frame: ShadingFrame,
+    fallback: vec3<f32>,
+) -> vec3<f32> {
+    return native_normalize_or(
+        frame.tangent * tangent_normal.x
+            + frame.bitangent * tangent_normal.y
+            + frame.normal * tangent_normal.z,
+        fallback,
+    );
+}
+
+fn native_surface_sample(
+    parameters: PrismSurfaceParameters,
+    sampled: SampledMaterial,
+    frame: ShadingFrame,
+) -> SurfaceSample {
+    var surface: SurfaceSample;
+    surface.base_color = sampled.base_color;
+    surface.base_weight = parameters.base_weight;
+    surface.diffuse_roughness = parameters.base_diffuse_roughness;
+    surface.metallic = sampled.metallic;
+    surface.perceptual_roughness = sampled.perceptual_roughness;
+    surface.specular_weight = parameters.specular_weight;
+    surface.specular_color = parameters.specular_color.xyz;
+    surface.specular_ior = parameters.specular_ior;
+    surface.transmission = parameters.transmission_weight;
+    surface.index_of_refraction = parameters.index_of_refraction;
+    surface.dispersion = parameters.transmission_dispersion_scale;
+    surface.thin_walled = parameters.thin_walled;
+    surface.transmission_color = parameters.transmission_color.xyz;
+    surface.transmission_scatter = parameters.transmission_scatter.xyz;
+    surface.transmission_scatter_anisotropy = parameters.transmission_scatter_anisotropy;
+    surface.transmission_dispersion_abbe_number = parameters.transmission_dispersion_abbe_number;
+    surface.coat_darkening = parameters.coat_darkening;
+    surface.scatter_anisotropy = parameters.subsurface_scatter_anisotropy;
+    surface.ambient_occlusion = sampled.occlusion;
+    surface.emissive = sampled.emissive * parameters.emission_luminance;
+    surface.clearcoat = sampled.clearcoat;
+    surface.clearcoat_roughness = sampled.clearcoat_roughness;
+    surface.coat_ior = parameters.coat_ior;
+    surface.coat_color = parameters.coat_color.xyz;
+    surface.coat_normal = select(
+        vec3<f32>(0.0),
+        native_apply_tangent_normal(sampled.clearcoat_normal_tangent, frame, frame.normal),
+        sampled.has_clearcoat_normal,
+    );
+    surface.coat_roughness_anisotropy = parameters.coat_roughness_anisotropy;
+    surface.coat_tangent = vec3<f32>(0.0);
+    surface.sheen = parameters.fuzz_weight;
+    surface.fuzz_roughness = parameters.fuzz_roughness;
+    surface.fuzz_color = parameters.fuzz_color.xyz;
+    surface.subsurface = parameters.subsurface_weight;
+    surface.subsurface_color = parameters.subsurface_color.xyz;
+    surface.subsurface_radius = parameters.subsurface_radius;
+    surface.subsurface_radius_scale = parameters.subsurface_radius_scale.xyz;
+    surface.thickness = parameters.thickness;
+    surface.anisotropy = parameters.anisotropy;
+    surface.anisotropy_rotation = parameters.anisotropy_rotation;
+    surface.normal_variance = sampled.offline_normal_variance;
+    surface.iridescence = parameters.thin_film_weight;
+    surface.iridescence_thickness_nm = parameters.thin_film_thickness * 1000.0;
+    surface.iridescence_ior = parameters.thin_film_ior;
+    surface.glint_weight = parameters.glint_weight;
+    surface.glint_roughness = parameters.glint_roughness;
+    surface.glint_density = parameters.glint_density;
+    surface.glint_bin_half_width = parameters.glint_bin_half_width;
+    surface.glint_state = -1.0;
+    surface.glint_cell = vec2<f32>(0.0);
+    surface.glint_footprint_area = 0.0;
+    return surface;
+}
+
+fn native_builtin_response(
+    surface: SurfaceSample,
+    alpha: f32,
+    frame: ShadingFrame,
     response_kind: u32,
 ) -> NativeResponse {
     var out = invalid_native_response();
-    let n = native_normalize_or(normal, vec3<f32>(0.0, 1.0, 0.0));
-    let v = native_normalize_or(view_direction, n);
-    let n_dot_v = max(dot(n, v), 0.0);
-    let emission = emission_color * surface.emission_luminance;
     if response_kind == RESPONSE_PROGRAM_KIND_UNLIT {
-        out.direct = base_color;
-        out.emission = emission;
-        out.alpha = surface.geometry_opacity;
-        out.valid = all(finite3(base_color + emission)) && out.alpha >= 0.0 && out.alpha <= 1.0;
+        out.direct = surface.base_color;
+        out.emission = surface.emissive;
+        out.alpha = alpha;
+        out.valid = all(finite3(surface.base_color + surface.emissive))
+            && out.alpha >= 0.0 && out.alpha <= 1.0;
         return out;
     }
     if response_kind != RESPONSE_PROGRAM_KIND_LIT {
         return out;
     }
-    let metallic = clamp(surface.base_metalness, 0.0, 1.0);
-    let roughness = clamp(surface.specular_roughness, 0.04, 1.0);
-    let alpha = roughness * roughness;
-    let ior = clamp(surface.specular_ior, 1.0, 3.0);
-    let dielectric = (ior - 1.0) / (ior + 1.0);
-    let f0 = mix(vec3<f32>(dielectric * dielectric) * surface.specular_color.xyz, base_color, metallic);
-    let fresnel = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - n_dot_v, 5.0);
-    let denominator = max(4.0 * n_dot_v * n_dot_v, 1.0e-4);
-    let d = alpha * alpha / max(3.14159265 * pow((n_dot_v * n_dot_v) * (alpha * alpha - 1.0) + 1.0, 2.0), 1.0e-5);
-    let k = (roughness + 1.0) * (roughness + 1.0) * 0.125;
-    let g = (n_dot_v / max(n_dot_v * (1.0 - k) + k, 1.0e-5));
-    let specular = fresnel * d * g * g / denominator;
-    let diffuse = base_color * clamp(surface.base_weight, 0.0, 1.0) * (1.0 - metallic)
-        * n_dot_v / 3.14159265;
-    let response = diffuse + specular + emission;
-    out.direct = diffuse + specular;
-    out.emission = emission;
-    out.alpha = surface.geometry_opacity;
+    // The evaluator ABI has no incident-light buffer. Its canonical reference
+    // convention is one unit-white light aligned to the sampled hit normal.
+    let light = DirectLightSample(frame.normal, vec3<f32>(1.0), 1.0);
+    let channels = principled_direct_channels_with(
+        surface,
+        frame,
+        light,
+        principled_pre(surface, frame),
+    );
+    out.direct = channels.direct;
+    out.transmission = channels.transmission;
+    out.emission = surface.emissive;
+    out.alpha = alpha;
+    let response = out.direct + out.transmission + out.emission;
     out.valid = all(finite3(response)) && all(response >= vec3<f32>(0.0))
         && finite(out.alpha) && out.alpha >= 0.0 && out.alpha <= 1.0;
     return out;
@@ -643,19 +755,19 @@ fn native_execution_program_is_valid(
 }
 
 fn native_arm_response(
-    surface: PrismSurfaceParameters,
+    parameters: PrismSurfaceParameters,
+    sampled_surface: SurfaceSample,
     header: PrismMaterialHeader,
     program: ExecutionProgramRow,
-    normal: vec3<f32>,
-    view_direction: vec3<f32>,
+    frame: ShadingFrame,
     uv: vec2<f32>,
+    alpha: f32,
     permutation_low: u32,
     permutation_high: u32,
 ) -> NativeResponse {
-    var shaded = surface;
     if program.response_kind == RESPONSE_PROGRAM_KIND_CUSTOM {
         return native_registered_response(
-            shaded, header, normal, view_direction, uv, program.program_id,
+            parameters, header, frame.normal, frame.view, uv, program.program_id,
             permutation_low, permutation_high,
         );
     }
@@ -666,8 +778,7 @@ fn native_arm_response(
         return invalid_native_response();
     }
     return native_builtin_response(
-        shaded, shaded.base_color.xyz, shaded.emission_color.xyz,
-        normal, view_direction, program.response_kind,
+        sampled_surface, alpha, frame, program.response_kind,
     );
 }
 
@@ -687,19 +798,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
     let triangle_index = trace_hits[hit_base + 5u];
-    if (triangle_index >= arrayLength(&hit_attributes) / HIT_ATTRIBUTE_WORDS) {
-        evaluations[ray_index] = result;
-        return;
-    }
-    let attribute_base = triangle_index * HIT_ATTRIBUTE_WORDS;
-    if (trace_hits[hit_base] != 1u
-        || triangle_index == INVALID
-        || !hit_matches_attributes(hit_base, attribute_base)) {
-        evaluations[ray_index] = result;
-        return;
-    }
-    let ray_base = ray_index * 12u;
-    if (ray_base + 6u >= arrayLength(&trace_rays)) {
+    if (trace_hits[hit_base] != 1u || triangle_index == INVALID) {
         evaluations[ray_index] = result;
         return;
     }
@@ -708,15 +807,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         || evaluator_config.execution_table_version == 0u
         || evaluator_config.material_header_count == 0u
         || evaluator_config.parameter_word_count == 0u
-        || evaluator_config.texture_row_count == 0u
         || evaluator_config.execution_plan_count == 0u
         || evaluator_config.execution_program_count == 0u
         || evaluator_config.material_header_count > arrayLength(&material_headers)
         || evaluator_config.parameter_word_count > arrayLength(&material_parameters)
         || evaluator_config.texture_row_count > arrayLength(&material_texture_rows)
-        || evaluator_config.execution_plan_count > arrayLength(&execution_plans)
-        || evaluator_config.execution_program_count > arrayLength(&execution_programs)
-        || evaluator_config.texture_slot_count != 0u
+        || evaluator_config.execution_plan_count * 8u
+            + evaluator_config.execution_program_count * 5u > arrayLength(&execution_table)
         || (evaluator_config.vt_page_table_word_count != 0u)
             != (evaluator_config.vt_generation_low != 0u
                 || evaluator_config.vt_generation_high != 0u)
@@ -729,19 +826,19 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
-    let material_index = hit_attributes[attribute_base + 2u];
-    let material_generation = hit_attributes[attribute_base + 3u];
-    let material_revision = hit_attributes[attribute_base + 4u];
-    let material_epoch_low = hit_attributes[attribute_base + 5u];
-    let material_epoch_high = hit_attributes[attribute_base + 6u];
-    let plan_index = hit_attributes[attribute_base + 7u];
-    let program_index = hit_attributes[attribute_base + 8u];
-    let package_index = hit_attributes[attribute_base + 9u];
-    let permutation_low = hit_attributes[attribute_base + 10u];
-    let permutation_high = hit_attributes[attribute_base + 11u];
-    if (hit_attributes[attribute_base] == INVALID
-        || hit_attributes[attribute_base + 1u] == INVALID
-        || material_index == INVALID
+    let instance_id = trace_hits[hit_base + 6u];
+    let geometry_id = trace_hits[hit_base + 7u];
+    let material_index = trace_hits[hit_base + 8u];
+    let material_generation = trace_hits[hit_base + 9u];
+    let material_revision = trace_hits[hit_base + 10u];
+    let material_epoch_low = trace_hits[hit_base + 11u];
+    let material_epoch_high = trace_hits[hit_base + 12u];
+    let plan_index = trace_hits[hit_base + 13u];
+    let program_index = trace_hits[hit_base + 14u];
+    let package_index = trace_hits[hit_base + 15u];
+    let permutation_low = trace_hits[hit_base + 16u];
+    let permutation_high = trace_hits[hit_base + 17u];
+    if (instance_id == INVALID || geometry_id == INVALID || material_index == INVALID
         || material_generation == INVALID
         || material_revision == INVALID
         || (material_epoch_low == INVALID && material_epoch_high == INVALID)
@@ -753,9 +850,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         || material_index >= evaluator_config.material_header_count
         || material_index >= arrayLength(&material_headers)
         || plan_index >= evaluator_config.execution_plan_count
-        || plan_index >= arrayLength(&execution_plans)
         || program_index >= evaluator_config.execution_program_count
-        || program_index >= arrayLength(&execution_programs)) {
+        || plan_index >= evaluator_config.execution_plan_count) {
         evaluations[ray_index] = result;
         return;
     }
@@ -783,14 +879,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
-    let plan = execution_plans[plan_index];
+    let plan = execution_plan_at(plan_index);
     if (plan.reserved != 0u
         || plan.execution_family > EXECUTION_FAMILY_COMPOSITION
         || plan.left_program != program_index
         || plan.left_program >= evaluator_config.execution_program_count
-        || plan.left_program >= arrayLength(&execution_programs)
-        || (plan.right_program != INVALID && (plan.right_program >= evaluator_config.execution_program_count
-            || plan.right_program >= arrayLength(&execution_programs))
+        || (plan.right_program != INVALID && (plan.right_program >= evaluator_config.execution_program_count)
         )
         || (plan.right_program == INVALID && (plan.execution_family == EXECUTION_FAMILY_COMPOSITION
             || plan.blended_channels != 0u || plan.mask_kind != 0u
@@ -799,7 +893,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         evaluations[ray_index] = result;
         return;
     }
-    let program = execution_programs[program_index];
+    let program = execution_program_at(program_index);
     if !native_execution_program_is_valid(program, package_index, permutation_low, permutation_high) {
         evaluations[ray_index] = result;
         return;
@@ -816,7 +910,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     var right_program = program;
     if (plan.right_program != INVALID) {
-        right_program = execution_programs[plan.right_program];
+        right_program = execution_program_at(plan.right_program);
         if !native_execution_program_is_valid(
             right_program, package_index, permutation_low, permutation_high,
         ) {
@@ -870,47 +964,62 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         evaluations[ray_index] = result;
         return;
     }
-    var base_color = surface.base_color.xyz;
-    var emission_color = surface.emission_color.xyz;
+    var sampled = sampled_material_defaults(surface);
     for (var row_index = 0u; row_index < header.texture_count; row_index += 1u) {
         let row = material_texture_rows[header.texture_offset + row_index];
-        let sampled = sample_texture_row(row, uv);
-        if !sampled.valid {
+        if !native_texture_semantic_is_supported(row.semantic) {
+            // A semantic that this evaluator cannot fold is a missing material
+            // input, never an identity/white texture.
+            evaluations[ray_index] = result;
+            return;
+        }
+        let texel_sample = sample_texture_row(row, uv);
+        if !texel_sample.valid {
             // Direct authored images and stale texture generations are not
             // silently replaced by a fallback in this portable evaluator.
             evaluations[ray_index] = result;
             return;
         }
-        if row.semantic == TEXTURE_SEMANTIC_BASE_COLOR {
-            base_color = base_color * srgb_to_linear(sampled.value.xyz);
-        } else if row.semantic == TEXTURE_SEMANTIC_EMISSIVE {
-            emission_color = emission_color * srgb_to_linear(sampled.value.xyz);
-        } else {
-            // A row with an unsupported semantic is not interchangeable with
-            // an absent row: reject the tuple instead of silently whitening it.
-            evaluations[ray_index] = result;
-            return;
-        }
+        sampled = fold_material_texel(row, texel_sample.value, surface.normal_scale, sampled);
     }
-    var shaded_surface = surface;
-    shaded_surface.base_color = vec4<f32>(base_color, surface.base_color.w);
-    shaded_surface.emission_color = vec4<f32>(emission_color, surface.emission_color.w);
-    let normal = vec3<f32>(
+    let geometry_normal = vec3<f32>(
         bitcast<f32>(trace_hits[hit_base + 20u]),
         bitcast<f32>(trace_hits[hit_base + 21u]),
         bitcast<f32>(trace_hits[hit_base + 22u]),
     );
-    let view_direction = -vec3<f32>(
-        bitcast<f32>(trace_rays[ray_base + 4u]),
-        bitcast<f32>(trace_rays[ray_base + 5u]),
-        bitcast<f32>(trace_rays[ray_base + 6u]),
+    let tangent_input = vec4<f32>(
+        bitcast<f32>(trace_hits[hit_base + 23u]),
+        bitcast<f32>(trace_hits[hit_base + 24u]),
+        bitcast<f32>(trace_hits[hit_base + 25u]),
+        bitcast<f32>(trace_hits[hit_base + 26u]),
     );
-    if !finite3(normal) || !finite3(view_direction) {
+    let view_direction = -vec3<f32>(
+        bitcast<f32>(trace_hits[hit_base + 27u]),
+        bitcast<f32>(trace_hits[hit_base + 28u]),
+        bitcast<f32>(trace_hits[hit_base + 29u]),
+    );
+    if !finite3(geometry_normal) || !finite3(tangent_input.xyz)
+        || !finite(tangent_input.w) || abs(abs(tangent_input.w) - 1.0) > 1.0e-3
+        || !finite3(view_direction) {
         evaluations[ray_index] = result;
         return;
     }
+    let geometry_frame = native_tangent_frame(geometry_normal, tangent_input);
+    let sampled_normal = select(
+        geometry_frame.normal,
+        native_apply_tangent_normal(sampled.normal_tangent, geometry_frame, geometry_frame.normal),
+        sampled.has_normal_map,
+    );
+    let sampled_frame = ShadingFrame(
+        sampled_normal,
+        native_normalize_or(view_direction, sampled_normal),
+        geometry_frame.tangent,
+        geometry_frame.bitangent,
+    );
+    let sampled_surface = native_surface_sample(surface, sampled, sampled_frame);
+    let alpha = clamp(sampled.base_alpha * surface.geometry_opacity, 0.0, 1.0);
     let left = native_arm_response(
-        shaded_surface, header, program, normal, view_direction, uv,
+        surface, sampled_surface, header, program, sampled_frame, uv, alpha,
         permutation_low, permutation_high,
     );
     if !left.valid {
@@ -920,7 +1029,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var response = left;
     if plan.right_program != INVALID {
         let right = native_arm_response(
-            shaded_surface, header, right_program, normal, view_direction, uv,
+            surface, sampled_surface, header, right_program, sampled_frame, uv, alpha,
             permutation_low, permutation_high,
         );
         let mask = native_mask_value(header, plan.mask_index);
@@ -957,8 +1066,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     result.response_rgb = response_rgb;
     result.valid = 1u;
-    result.instance_id = hit_attributes[attribute_base];
-    result.geometry_id = hit_attributes[attribute_base + 1u];
+    result.instance_id = instance_id;
+    result.geometry_id = geometry_id;
     result.material_index = material_index;
     result.material_generation = material_generation;
     result.material_revision = material_revision;

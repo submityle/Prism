@@ -550,8 +550,7 @@ impl FrameGraphBuffers {
                 trace.material_headers,
                 trace.material_parameters,
                 trace.material_texture_rows,
-                trace.execution_plans,
-                trace.execution_programs,
+                trace.execution_table,
                 trace.vt_config,
                 trace.material_evaluations,
             ]
@@ -1489,16 +1488,14 @@ fn append_target_graph(
             Some(material_headers),
             Some(material_parameters),
             Some(material_texture_rows),
-            Some(execution_plans),
-            Some(execution_programs),
+            Some(execution_table),
             Some(evaluator_config),
             Some(evaluations),
         ) = (
             trace.material_headers,
             trace.material_parameters,
             trace.material_texture_rows,
-            trace.execution_plans,
-            trace.execution_programs,
+            trace.execution_table,
             trace.evaluator_config,
             trace.material_evaluations,
         ) {
@@ -1520,17 +1517,11 @@ fn append_target_graph(
                 BufferDesc::new(material_texture_rows.size_bytes, BufferUsages::STORAGE),
                 material_texture_rows.id,
             );
-            let execution_plans = buffers.import(
+            let execution_table = buffers.import(
                 graph,
-                "prism-lighting-native-material-execution-plans",
-                BufferDesc::new(execution_plans.size_bytes, BufferUsages::STORAGE),
-                execution_plans.id,
-            );
-            let execution_programs = buffers.import(
-                graph,
-                "prism-lighting-native-material-execution-programs",
-                BufferDesc::new(execution_programs.size_bytes, BufferUsages::STORAGE),
-                execution_programs.id,
+                "prism-lighting-native-material-execution-table",
+                BufferDesc::new(execution_table.size_bytes, BufferUsages::STORAGE),
+                execution_table.id,
             );
             let vt_page_table = trace.vt_page_table.map(|vt_page_table| {
                 buffers.import(
@@ -1568,13 +1559,11 @@ fn append_target_graph(
                     trace_pass_dependency.into_iter().collect(),
                     |builder| {
                         let _hits = builder.read_storage_buffer(hits);
-                        let _attributes = builder.read_storage_buffer(attributes);
-                        let _rays = builder.read_storage_buffer(rays);
                         let _material_headers = builder.read_storage_buffer(material_headers);
                         let _material_parameters = builder.read_storage_buffer(material_parameters);
-                        let _material_texture_rows = builder.read_storage_buffer(material_texture_rows);
-                        let _execution_plans = builder.read_storage_buffer(execution_plans);
-                        let _execution_programs = builder.read_storage_buffer(execution_programs);
+                        let _material_texture_rows =
+                            builder.read_storage_buffer(material_texture_rows);
+                        let _execution_table = builder.read_storage_buffer(execution_table);
                         if let Some(vt_page_table) = vt_page_table {
                             let _vt_page_table = builder.read_storage_buffer(vt_page_table);
                         }
@@ -1582,9 +1571,10 @@ fn append_target_graph(
                             let _vt_config = builder.read_storage_buffer(vt_config);
                         }
                         if let Some(vt_atlas_view) = trace.vt_atlas_view {
-                            if let Some(vt_atlas) = external_texture_handles
-                                .iter()
-                                .find_map(|(view, handle)| (*view == vt_atlas_view).then_some(*handle))
+                            if let Some(vt_atlas) =
+                                external_texture_handles.iter().find_map(|(view, handle)| {
+                                    (*view == vt_atlas_view).then_some(*handle)
+                                })
                             {
                                 let _vt_atlas = builder.read_texture(vt_atlas);
                             }
@@ -1855,10 +1845,15 @@ fn append_target_graph(
     let vt_config = buffers.import(
         graph,
         "prism-material-vt-config",
-        BufferDesc::new(material_resources.vt_config_size_bytes, BufferUsages::STORAGE),
+        BufferDesc::new(
+            material_resources.vt_config_size_bytes,
+            BufferUsages::STORAGE,
+        ),
         material_resources.vt_config,
     );
-    let vt_atlas = external_texture_handles.get(&material_resources.vt_atlas_view).copied();
+    let vt_atlas = external_texture_handles
+        .get(&material_resources.vt_atlas_view)
+        .copied();
     if material_resources.device_generation != 0 {
         assert!(
             vt_atlas.is_some(),
