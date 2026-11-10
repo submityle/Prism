@@ -26,7 +26,7 @@
 //! view set actually changes so the bind group is recreated lazily.
 //!
 //! Bindless is gated on device support. When the adapter lacks binding arrays
-//! (or is a known-buggy Adreno) the resource degrades to a non-bindless stub
+//! (or is a known-buggy Adreno) the resource degrades to the portable non-bindless path
 //! (`bindless == false`, empty arrays) and the material bind group falls back to
 //! the three storage-buffer bindings alone.
 
