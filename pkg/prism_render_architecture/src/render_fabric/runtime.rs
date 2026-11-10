@@ -1,9 +1,9 @@
 //! Typed lowering to the existing graph runtime, not another executor.
 use super::*;
-use crate::frame_graph::ResourceId;
 use alloc::{boxed::Box, collections::BTreeMap, sync::Arc, vec, vec::Vec};
 use core::fmt;
 use prism_render_driver::{Extent3d, RenderDevice, RenderQueue};
+use prism_render_graph::frame_graph::ResourceId;
 use prism_render_graph::{
     full_range, BufferDesc, BufferHandle, CompileError, ExecuteContext, ExecutionPlan,
     ImportedBuffer, ImportedTexture, LogicalResource, PassBuilder, PassFlags, PassKind,
@@ -59,6 +59,14 @@ pub enum FabricRuntimeError {
         pass: PassKey,
         resource: ResourceKey,
     },
+    /// The host graph already owns this physical resource as an import. A
+    /// graph-local mapping is required; registering it a second time would
+    /// make hazards invisible to the shared compiler.
+    DuplicateHostImport(ResourceId),
+    /// A graph-local handle does not match the compiled Fabric resource.
+    InvalidGraphMapping(ResourceId),
+    /// A resource was mapped to more than one graph-local handle.
+    DuplicateGraphMapping(ResourceId),
     PlanMismatch,
     Graph(CompileError),
 }
@@ -83,6 +91,31 @@ pub enum RuntimeResourceHandle {
         bytes: u64,
     },
     Texture(TextureHandle),
+}
+
+/// Reuses a version-zero imported resource already declared by the host graph.
+///
+/// The mapping carries only the graph-local handle. The compiled Fabric
+/// binding remains authoritative for physical identity, range, layout and
+/// usage; lowering rejects any mismatch before adding passes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeGraphResourceMapping {
+    Buffer {
+        resource: ResourceId,
+        handle: BufferHandle,
+    },
+    Texture {
+        resource: ResourceId,
+        handle: TextureHandle,
+    },
+}
+
+impl RuntimeGraphResourceMapping {
+    pub const fn resource(self) -> ResourceId {
+        match self {
+            Self::Buffer { resource, .. } | Self::Texture { resource, .. } => resource,
+        }
+    }
 }
 impl RuntimeResourceHandle {
     fn version(self) -> u32 {
@@ -330,6 +363,36 @@ impl RuntimeFeatureGraph {
     }
 }
 
+/// The result of lowering a compiled Fabric graph into a caller-owned graph.
+///
+/// The returned value keeps the declaration and the graph-local handles alive
+/// for hosts that want to inspect the lowering before preparing the combined
+/// graph. The graph itself remains owned by the caller and is prepared exactly
+/// once by that caller.
+#[must_use]
+pub struct RuntimeGraphLowering {
+    declaration: CompiledFeatureGraph,
+    handles: Vec<Option<RuntimeResourceHandle>>,
+    pass_offset: usize,
+    pass_count: usize,
+}
+
+impl RuntimeGraphLowering {
+    pub const fn declaration(&self) -> &CompiledFeatureGraph {
+        &self.declaration
+    }
+
+    /// The first pass index occupied by this lowering in the host graph.
+    pub const fn pass_offset(&self) -> usize {
+        self.pass_offset
+    }
+
+    /// The number of active Fabric passes appended to the host graph.
+    pub const fn pass_count(&self) -> usize {
+        self.pass_count
+    }
+}
+
 impl CompiledFeatureGraph {
     /// The production lowering seam. Import and recorder coverage is exact;
     /// no GPU allocation, user recorder or queue submission occurs on error.
@@ -351,6 +414,67 @@ impl CompiledFeatureGraph {
         object_imports: &[ObjectRuntimeImport],
         recorders: Vec<RuntimePassBinding>,
     ) -> Result<RuntimeFeatureGraph, FabricRuntimeError> {
+        let mut graph = RenderGraph::with_limits(extent, self.limits());
+        let lowering = self.append_to_graph_with_object_imports(
+            &mut graph,
+            shared_imports,
+            object_imports,
+            recorders,
+        )?;
+        let prepared = graph.prepare()?;
+        verify_plan(&lowering.declaration, prepared.plan(), &lowering.handles)?;
+        Ok(RuntimeFeatureGraph {
+            graph: prepared,
+            declaration: lowering.declaration,
+        })
+    }
+
+    /// Lowers this verified declaration into an existing caller-owned graph.
+    ///
+    /// Imports, transient resources, pass accesses, explicit Fabric
+    /// dependencies, and recorder closures are all appended to `graph`. No
+    /// second graph is created and this method does not compile or prepare the
+    /// host graph; the caller must call [`RenderGraph::prepare`] after all
+    /// producers have appended their work.
+    pub fn append_to_graph(
+        self,
+        graph: &mut RenderGraph,
+        imports: &[RuntimeImport],
+        recorders: Vec<RuntimePassBinding>,
+    ) -> Result<RuntimeGraphLowering, FabricRuntimeError> {
+        self.append_to_graph_with_object_imports(graph, imports, &[], recorders)
+    }
+
+    /// Object-import variant of [`Self::append_to_graph`].
+    pub fn append_to_graph_with_object_imports(
+        self,
+        graph: &mut RenderGraph,
+        shared_imports: &[RuntimeImport],
+        object_imports: &[ObjectRuntimeImport],
+        recorders: Vec<RuntimePassBinding>,
+    ) -> Result<RuntimeGraphLowering, FabricRuntimeError> {
+        self.append_to_graph_with_resource_mappings(
+            graph,
+            shared_imports,
+            object_imports,
+            &[],
+            recorders,
+        )
+    }
+
+    /// Lowers into a host graph while reusing graph-local imported handles.
+    ///
+    /// A mapping is required when the host already imported the same physical
+    /// resource. Re-importing it would create a second hazard timeline; a
+    /// mapping makes both producers use the host's single logical resource.
+    pub fn append_to_graph_with_resource_mappings(
+        self,
+        graph: &mut RenderGraph,
+        shared_imports: &[RuntimeImport],
+        object_imports: &[ObjectRuntimeImport],
+        resource_mappings: &[RuntimeGraphResourceMapping],
+        recorders: Vec<RuntimePassBinding>,
+    ) -> Result<RuntimeGraphLowering, FabricRuntimeError> {
         let mut imports = Vec::with_capacity(shared_imports.len() + object_imports.len());
         for &entry in shared_imports {
             if self
@@ -374,6 +498,97 @@ impl CompiledFeatureGraph {
                 return Err(FabricRuntimeError::InvalidObjectImport(entry.address));
             }
             imports.push(entry.imported);
+        }
+        let mut mappings = BTreeMap::new();
+        for mapping in resource_mappings {
+            let id = mapping.resource();
+            let resource = self
+                .resources()
+                .get(id.0 as usize)
+                .filter(|resource| resource.id == id && resource.external.is_some())
+                .ok_or(FabricRuntimeError::InvalidGraphMapping(id))?;
+            if resource.identity.is_some() {
+                return Err(FabricRuntimeError::InvalidGraphMapping(id));
+            }
+            let handle = match *mapping {
+                RuntimeGraphResourceMapping::Buffer { handle, .. } => {
+                    let ResourceLayout::Buffer { bytes, usage } = resource.template.layout else {
+                        return Err(FabricRuntimeError::InvalidGraphMapping(id));
+                    };
+                    let PhysicalResource::Buffer {
+                        id: physical,
+                        offset,
+                    } = resource
+                        .external
+                        .expect("checked external resource")
+                        .physical
+                    else {
+                        return Err(FabricRuntimeError::InvalidGraphMapping(id));
+                    };
+                    let Some(imported) = graph.imported_buffer(handle) else {
+                        return Err(FabricRuntimeError::InvalidGraphMapping(id));
+                    };
+                    let Some(desc) = graph.buffer_desc(handle) else {
+                        return Err(FabricRuntimeError::InvalidGraphMapping(id));
+                    };
+                    if imported.buffer != physical
+                        || !desc.usage.contains(usage)
+                        || offset.checked_add(bytes).is_none_or(|end| end > desc.size)
+                    {
+                        return Err(FabricRuntimeError::InvalidGraphMapping(id));
+                    }
+                    RuntimeResourceHandle::Buffer {
+                        handle,
+                        offset,
+                        bytes,
+                    }
+                }
+                RuntimeGraphResourceMapping::Texture { handle, .. } => {
+                    let ResourceLayout::Texture {
+                        extent,
+                        dimension,
+                        format,
+                        mip_levels,
+                        samples,
+                        usage,
+                    } = resource.template.layout
+                    else {
+                        return Err(FabricRuntimeError::InvalidGraphMapping(id));
+                    };
+                    let PhysicalResource::Texture(physical) = resource
+                        .external
+                        .expect("checked external resource")
+                        .physical
+                    else {
+                        return Err(FabricRuntimeError::InvalidGraphMapping(id));
+                    };
+                    let Some(imported) = graph.imported_texture(handle) else {
+                        return Err(FabricRuntimeError::InvalidGraphMapping(id));
+                    };
+                    let Some(desc) = graph.texture_desc(handle) else {
+                        return Err(FabricRuntimeError::InvalidGraphMapping(id));
+                    };
+                    if imported.texture != physical
+                        || desc.size.resolve(graph.swapchain())
+                            != (Extent3d {
+                                width: extent[0],
+                                height: extent[1],
+                                depth_or_array_layers: extent[2],
+                            })
+                        || desc.dimension != dimension
+                        || desc.format != format
+                        || desc.mip_level_count != mip_levels
+                        || desc.sample_count != samples
+                        || !desc.usage.contains(usage)
+                    {
+                        return Err(FabricRuntimeError::InvalidGraphMapping(id));
+                    }
+                    RuntimeResourceHandle::Texture(handle)
+                }
+            };
+            if mappings.insert(id.0, handle).is_some() {
+                return Err(FabricRuntimeError::DuplicateGraphMapping(id));
+            }
         }
         // Resolve stable keys once, then keep move-only recorders in pass order.
         // Coverage is O((P + R) log P), not a full pass scan per recorder.
@@ -414,7 +629,27 @@ impl CompiledFeatureGraph {
                 return Err(FabricRuntimeError::DuplicateImport(id));
             }
         }
-        let mut graph = RenderGraph::with_limits(extent, self.limits());
+        for mapping in resource_mappings {
+            if imported.contains_key(&mapping.resource().0) {
+                return Err(FabricRuntimeError::DuplicateGraphMapping(
+                    mapping.resource(),
+                ));
+            }
+        }
+        for (&id, &entry) in &imported {
+            let duplicate = match entry {
+                RuntimeImport::Buffer { imported, .. } => {
+                    graph.has_imported_buffer(imported.buffer)
+                }
+                RuntimeImport::Texture { imported, .. } => {
+                    graph.has_imported_texture(imported.texture)
+                }
+            };
+            if duplicate {
+                return Err(FabricRuntimeError::DuplicateHostImport(ResourceId(id)));
+            }
+        }
+        let pass_offset = graph.pass_count();
         let mut handles = vec![None; self.resources().len()];
         let mut versions = vec![BTreeMap::new(); self.resources().len()];
         for resource in self
@@ -422,6 +657,11 @@ impl CompiledFeatureGraph {
             .iter()
             .filter(|resource| resource.external.is_some())
         {
+            if let Some(&handle) = mappings.get(&resource.id.0) {
+                handles[resource.id.0 as usize] = Some(handle);
+                versions[resource.id.0 as usize].insert(0, handle);
+                continue;
+            }
             let entry = imported
                 .get(&resource.id.0)
                 .ok_or(FabricRuntimeError::MissingImport(resource.id))?;
@@ -458,6 +698,7 @@ impl CompiledFeatureGraph {
             versions[resource.id.0 as usize].insert(0, handle);
         }
         let items = Arc::new(RuntimeFrameItems::new(self.shared_items()));
+        let pass_count = callbacks.len();
         for (index, (pass, callback)) in self.passes().iter().zip(callbacks).enumerate() {
             let callback = callback.expect("validated recorder coverage");
             let mut setup_error = None;
@@ -526,7 +767,7 @@ impl CompiledFeatureGraph {
                 pass.descriptor()
                     .depends_on
                     .iter()
-                    .map(|id| id.0 as usize)
+                    .map(|id| pass_offset + id.0 as usize)
                     .collect(),
                 setup,
             )?;
@@ -534,11 +775,11 @@ impl CompiledFeatureGraph {
                 return Err(error);
             }
         }
-        let graph = graph.prepare()?;
-        verify_plan(&self, graph.plan(), &handles)?;
-        Ok(RuntimeFeatureGraph {
-            graph,
+        Ok(RuntimeGraphLowering {
             declaration: self,
+            handles,
+            pass_offset,
+            pass_count,
         })
     }
 }

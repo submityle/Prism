@@ -422,6 +422,42 @@ impl RenderGraph {
         Some(texture.desc.size.resolve(self.swapchain))
     }
 
+    /// Returns the declaration for a texture handle owned by this graph.
+    ///
+    /// Native graph appenders use this to authenticate a graph-local mapping
+    /// before reusing an already imported physical texture.
+    #[must_use]
+    pub fn texture_desc(&self, handle: TextureHandle) -> Option<TextureDesc> {
+        let texture = self.textures.get(handle.resource().get() as usize)?;
+        (handle.version() <= texture.version).then(|| texture.desc.clone())
+    }
+
+    /// Returns the import payload for an imported version-zero texture.
+    #[must_use]
+    pub fn imported_texture(&self, handle: TextureHandle) -> Option<ImportedTexture> {
+        let texture = self.textures.get(handle.resource().get() as usize)?;
+        (handle.version() == 0)
+            .then_some(texture.imported)
+            .flatten()
+    }
+
+    /// Returns the declaration for a buffer handle owned by this graph.
+    ///
+    /// Native graph appenders use this to authenticate a graph-local mapping
+    /// before reusing an already imported physical buffer or suballocation.
+    #[must_use]
+    pub fn buffer_desc(&self, handle: BufferHandle) -> Option<BufferDesc> {
+        let buffer = self.buffers.get(handle.resource().get() as usize)?;
+        (handle.version() <= buffer.version).then(|| buffer.desc.clone())
+    }
+
+    /// Returns the import payload for an imported version-zero buffer.
+    #[must_use]
+    pub fn imported_buffer(&self, handle: BufferHandle) -> Option<ImportedBuffer> {
+        let buffer = self.buffers.get(handle.resource().get() as usize)?;
+        (handle.version() == 0).then_some(buffer.imported).flatten()
+    }
+
     /// Pins an external owner through declaration, recording and GPU retirement.
     ///
     /// Use this for imported resources, pipelines, layouts or other external
@@ -475,6 +511,67 @@ impl RenderGraph {
     #[must_use]
     pub fn pass_count(&self) -> usize {
         self.passes.len()
+    }
+
+    /// The number of externally-owned resources imported so far.
+    ///
+    /// This is a declaration-time diagnostic used by native frame hosts. It
+    /// counts texture and buffer imports separately from graph-owned
+    /// transients, so a host can prove that resource import happened before
+    /// preparation without inspecting private graph tables.
+    #[must_use]
+    pub fn imported_resource_count(&self) -> usize {
+        self.textures
+            .iter()
+            .filter(|resource| resource.imported.is_some())
+            .count()
+            + self
+                .buffers
+                .iter()
+                .filter(|resource| resource.imported.is_some())
+                .count()
+    }
+
+    /// Whether this graph already imports the given physical buffer.
+    ///
+    /// Resource handles are graph-local. Hosts that append another producer
+    /// must either reuse an explicit mapping or reject a duplicate physical
+    /// import; silently registering the same buffer twice would hide hazards
+    /// from the compiler.
+    #[must_use]
+    pub fn has_imported_buffer(&self, buffer: BufferId) -> bool {
+        self.buffers.iter().any(|resource| {
+            resource
+                .imported
+                .is_some_and(|imported| imported.buffer == buffer)
+        })
+    }
+
+    /// Whether this graph already imports the given physical texture.
+    ///
+    /// See [`Self::has_imported_buffer`] for why this is exposed to graph
+    /// appenders instead of allowing duplicate logical imports.
+    #[must_use]
+    pub fn has_imported_texture(&self, texture: TextureId) -> bool {
+        self.textures.iter().any(|resource| {
+            resource
+                .imported
+                .is_some_and(|imported| imported.texture == texture)
+        })
+    }
+
+    /// Compiles and prepares the graph while exposing the immutable compiled
+    /// plan to a frame host. The observer runs after compilation and before
+    /// any device allocation or command recording; it cannot alter the plan.
+    ///
+    /// [`Self::prepare`] remains the no-observer convenience entry point.
+    pub fn prepare_with<F>(self, observe: F) -> Result<PreparedGraph, CompileError>
+    where
+        F: FnOnce(&ExecutionPlan),
+    {
+        let plan = self.compile()?;
+        observe(&plan);
+        Ok(PreparedGraph { graph: self, plan })
     }
 
     /// Declares a frame-local bind group over graph textures' default views.
@@ -1275,8 +1372,7 @@ impl RenderGraph {
     /// this exact plan without compiling again. A compilation error runs no
     /// execute callbacks and creates no driver objects.
     pub fn prepare(self) -> Result<PreparedGraph, CompileError> {
-        let plan = self.compile()?;
-        Ok(PreparedGraph { graph: self, plan })
+        self.prepare_with(|_| {})
     }
 
     /// Compiles once, realizes resources and records without submitting.

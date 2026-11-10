@@ -1,9 +1,9 @@
 use super::{runtime::verify_plan, *};
-use crate::frame_graph::{AccessKind, QueueClass, ResourceId, ResourceLifetime};
 use prism_render_driver::{
     Accesses, Barrier, BufferId, BufferState, BufferUsages, Extent3d, PipelineStages,
     SubresourceRange, TextureState, TextureViewId,
 };
+use prism_render_graph::frame_graph::{AccessKind, QueueClass, ResourceId, ResourceLifetime};
 use prism_render_graph::{
     BufferDesc, ExecutionPlan, ImportedBuffer, ImportedTexture, LogicalResource, PassFlags,
     RenderGraph, SizeClass, TextureDesc,
@@ -11,6 +11,7 @@ use prism_render_graph::{
 
 const FEATURE: FeatureId = FeatureId(900);
 const RESOURCE: ResourceKey = ResourceKey::of(FEATURE, 0);
+const TRANSIENT_RESOURCE: ResourceKey = ResourceKey::of(FEATURE, 1);
 
 fn table<T>(values: Vec<T>) -> &'static [T] {
     Box::leak(values.into_boxed_slice())
@@ -1293,6 +1294,231 @@ fn runtime_lowers_transient_accesses_through_authority() {
 }
 
 #[test]
+fn runtime_appends_into_combined_host_graph_with_projection_and_recorder_coverage() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    let imported_template = buffer(RESOURCE, ResourceLifetime::Imported);
+    let transient_template = buffer(TRANSIENT_RESOURCE, ResourceLifetime::Transient);
+    let physical = BufferId::from_parts(41, 2);
+    let declaration = compile_passes(
+        vec![pass(
+            1,
+            QueueClass::Compute,
+            vec![
+                usage(RESOURCE, AccessKind::StorageRead),
+                usage(TRANSIENT_RESOURCE, AccessKind::StorageWrite),
+            ],
+        )],
+        &[imported_template, transient_template],
+        &[binding(
+            imported_template,
+            PhysicalResource::Buffer {
+                id: physical,
+                offset: 0,
+            },
+        )],
+    );
+    let imported_resource = declaration.resource_id(RESOURCE, 1).unwrap();
+    let host_calls = Arc::new(AtomicUsize::new(0));
+    let fabric_calls = Arc::new(AtomicUsize::new(0));
+    let mut host = RenderGraph::new(Extent3d::new_2d(1, 1));
+    {
+        let host_calls = Arc::clone(&host_calls);
+        host.add_compute_pass("host producer", PassFlags::NEVER_CULL, move |builder| {
+            let buffer =
+                builder.create_buffer("host transient", BufferDesc::new(64, BufferUsages::STORAGE));
+            builder.write_storage_buffer(buffer);
+            move |_| {
+                host_calls.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+    }
+    {
+        let fabric_calls = Arc::clone(&fabric_calls);
+        declaration
+            .append_to_graph(
+                &mut host,
+                &[RuntimeImport::Buffer {
+                    resource: imported_resource,
+                    imported: imported_buffer(physical),
+                }],
+                vec![RuntimePassBinding::new(PassKey(1), move |context| {
+                    assert_eq!(context.pass().key(), PassKey(1));
+                    assert_eq!(context.accesses().len(), 2);
+                    assert_eq!(
+                        context
+                            .accesses()
+                            .iter()
+                            .map(|access| access.bound.declaration.key)
+                            .collect::<Vec<_>>(),
+                        vec![RESOURCE, TRANSIENT_RESOURCE]
+                    );
+                    fabric_calls.fetch_add(1, Ordering::SeqCst);
+                })],
+            )
+            .unwrap();
+    }
+    assert_eq!(host.pass_count(), 2);
+    assert_eq!(host.imported_resource_count(), 1);
+    assert_eq!(host_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fabric_calls.load(Ordering::SeqCst), 0);
+
+    let prepared = host.prepare().unwrap();
+    assert_eq!(prepared.plan().declared_pass_count, 2);
+    assert_eq!(prepared.plan().order, vec![0, 1]);
+    assert!(prepared.plan().is_alive(0));
+    assert!(prepared.plan().is_alive(1));
+    assert_eq!(prepared.plan().accesses[1].len(), 2);
+
+    let device = recording_device();
+    let recorded = prepared.record(&device);
+    assert_eq!(host_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fabric_calls.load(Ordering::SeqCst), 1);
+    recorded.release(&device);
+    assert_eq!(device.live_resource_count(), 0);
+}
+
+#[test]
+fn runtime_rejects_duplicate_physical_import_already_owned_by_host_graph() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    let physical = BufferId::from_parts(42, 3);
+    let declaration = compiled_import(
+        buffer(RESOURCE, ResourceLifetime::Imported),
+        PhysicalResource::Buffer {
+            id: physical,
+            offset: 0,
+        },
+    );
+    let imported_resource = declaration.resource_id(RESOURCE, 1).unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut host = RenderGraph::new(Extent3d::new_2d(1, 1));
+    host.import_buffer(
+        "host imported buffer",
+        BufferDesc::new(64, BufferUsages::STORAGE),
+        imported_buffer(physical),
+    );
+    let result = declaration.append_to_graph(
+        &mut host,
+        &[RuntimeImport::Buffer {
+            resource: imported_resource,
+            imported: imported_buffer(physical),
+        }],
+        vec![RuntimePassBinding::new(PassKey(1), {
+            let calls = Arc::clone(&calls);
+            move |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+            }
+        })],
+    );
+    assert!(matches!(
+        result,
+        Err(FabricRuntimeError::DuplicateHostImport(id)) if id == imported_resource
+    ));
+    assert_eq!(host.imported_resource_count(), 1);
+    assert_eq!(host.pass_count(), 0);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn runtime_reuses_the_host_graph_imported_handle_without_a_second_import() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    let physical = BufferId::from_parts(43, 4);
+    let declaration = compiled_import(
+        buffer(RESOURCE, ResourceLifetime::Imported),
+        PhysicalResource::Buffer {
+            id: physical,
+            offset: 0,
+        },
+    );
+    let imported_resource = declaration.resource_id(RESOURCE, 1).unwrap();
+    let fabric_calls = Arc::new(AtomicUsize::new(0));
+    let mut host = RenderGraph::new(Extent3d::new_2d(1, 1));
+    let host_handle = host.import_buffer(
+        "host imported buffer",
+        BufferDesc::new(64, BufferUsages::STORAGE),
+        imported_buffer(physical),
+    );
+    host.add_compute_pass("host consumer", PassFlags::NEVER_CULL, |builder| {
+        builder.read_storage_buffer(host_handle);
+        |_| {}
+    });
+
+    let fabric_calls_for_recorder = Arc::clone(&fabric_calls);
+    declaration
+        .append_to_graph_with_resource_mappings(
+            &mut host,
+            &[],
+            &[],
+            &[RuntimeGraphResourceMapping::Buffer {
+                resource: imported_resource,
+                handle: host_handle,
+            }],
+            vec![RuntimePassBinding::new(PassKey(1), move |context| {
+                assert_eq!(context.accesses().len(), 1);
+                fabric_calls_for_recorder.fetch_add(1, Ordering::SeqCst);
+            })],
+        )
+        .unwrap();
+
+    assert_eq!(host.imported_resource_count(), 1);
+    assert_eq!(host.pass_count(), 2);
+    let prepared = host.prepare().unwrap();
+    assert_eq!(prepared.plan().declared_pass_count, 2);
+    let device = recording_device();
+    let recorded = prepared.record(&device);
+    assert_eq!(fabric_calls.load(Ordering::SeqCst), 1);
+    recorded.release(&device);
+    assert_eq!(device.live_resource_count(), 0);
+}
+
+#[test]
+fn runtime_rejects_a_graph_mapping_with_the_wrong_physical_resource() {
+    let physical = BufferId::from_parts(44, 5);
+    let wrong_physical = BufferId::from_parts(45, 5);
+    let declaration = compiled_import(
+        buffer(RESOURCE, ResourceLifetime::Imported),
+        PhysicalResource::Buffer {
+            id: physical,
+            offset: 0,
+        },
+    );
+    let imported_resource = declaration.resource_id(RESOURCE, 1).unwrap();
+    let mut host = RenderGraph::new(Extent3d::new_2d(1, 1));
+    let host_handle = host.import_buffer(
+        "wrong imported buffer",
+        BufferDesc::new(64, BufferUsages::STORAGE),
+        imported_buffer(wrong_physical),
+    );
+    let result = declaration.append_to_graph_with_resource_mappings(
+        &mut host,
+        &[],
+        &[],
+        &[RuntimeGraphResourceMapping::Buffer {
+            resource: imported_resource,
+            handle: host_handle,
+        }],
+        vec![RuntimePassBinding::new(PassKey(1), |_| {})],
+    );
+    assert!(matches!(
+        result,
+        Err(FabricRuntimeError::InvalidGraphMapping(id)) if id == imported_resource
+    ));
+    assert_eq!(host.imported_resource_count(), 1);
+    assert_eq!(host.pass_count(), 0);
+}
+
+#[test]
 fn runtime_rejects_unexpected_import_without_mutating_graph() {
     let compiled = compiled();
     let import = RuntimeImport::Buffer {
@@ -2029,11 +2255,11 @@ fn runtime_preserves_control_only_dependencies_without_synthetic_resource_edges(
     );
     assert_eq!(
         declaration.passes()[1].descriptor().depends_on,
-        vec![crate::frame_graph::PassId(0)]
+        vec![prism_render_graph::frame_graph::PassId(0)]
     );
     assert_eq!(
         declaration.passes()[2].descriptor().depends_on,
-        vec![crate::frame_graph::PassId(1)]
+        vec![prism_render_graph::frame_graph::PassId(1)]
     );
     let runtime = prepare(declaration, &[], &[3, 2, 1]).unwrap();
     assert!(runtime.plan().logical_barriers.is_empty());
