@@ -4,21 +4,24 @@
 
 > **2026-11-09 目标边界（当前权威）**：本系列的目标实现与验收只走 Prism 原生 prism_render_app、Prism RHI 和 prism_render_graph/RenderGraph。Bevy、Bevy RenderApp、prism_render_scene 的 Bevy 集成路径、SceneRhi 与 legacy-bevy 均为历史记录或排除项，不是当前实现前提，也不构成当前验收证据。下文保留这些名称时，仅表示历史证据、对照或明确排除的路线；原生全帧证据必须来自同一 Prism RHI 设备与原生 RenderGraph 的真实调用链。
 
-## 当前审计结论（2026-11-10，native Prism）
+## 当前审计结论（2026-11-11，native Prism）
 
 本篇的“已完成”只指当前 checkout 中有源码和相匹配的 native Prism 证据；契约、CPU 单测、null backend、Bevy/SceneRhi 历史记录不能升级为 native 全帧完成。
 
 **已确认的 native 证据**：
 
 - Surface/schema、Rust/WESL mirror、`ShadingPlan`、execution binding 以及 native lobe-budget ABI 有源码和定向契约测试；`lighting_gpu::composite_contract_tests::lobe_budget_native_uniform_matches_the_wesl_eight_word_abi` 已通过。
-- 同一 Prism RHI 设备上的 `physical_gpu_surface_encode_gbuffer_readback_and_composite_close_the_contract` 有 Metal 局部 GBuffer/composite readback 通过记录。这只证明该局部 producer/consumer 合同，不证明材质网格输出或完整帧。
-- native RenderApp 的 prepare/graph record/submit/completion 及失败关闭语义有实现和生命周期测试；这仍不是非空场景的视觉验收。
+- 非空场景 Surface GBuffer 以及 GBuffer → composite readback 已在同一 Prism RHI/Metal 路径通过；composite group-2 已收敛为 header/parameter 两个 storage buffers，满足 Apple Metal 的 8-buffer compute 限制。
+- native RenderApp 的 prepare/graph record/submit/completion 及失败关闭语义有实现和生命周期测试；非空 Surface GBuffer 最小视觉验收也已在 Metal 通过，但这仍不是完整帧验收。
+- 原生 Unlit 垂直切片已通过 Metal：真实场景 mesh/material 经 identity、GBuffer、composite 到 HDR readback，`native_scene_mesh_reaches_composite_hdr_on_a_gpu` 的中心像素为 `[1,1,1,1]`。这只证明单一内建响应和固定 fixture 的端到端切片。
 
 **当前明确未完成/未证实**：
 
-- Metal native 非空 draw readback 仍失败：`tests::the_frame_draws_a_queued_mesh_on_a_gpu` 与 `tests::the_spine_draws_the_visible_set_on_a_gpu` 的统计都显示 draw 已记录，但目标纹理 readback 仍为全黑，分别没有得到测试期望的红色/白色中心像素。不能把 draw 计数当成像素输出完成。
+- 多种 response program、MaskBlend/split response、材质变体和真实多对象场景尚未形成统一的 native response → composition → HDR 全帧验收；当前已通过的 Unlit 测试不能外推到 Lit/NPR/Registered 或完整混合材质。
 - `pkg/prism_render_app/tests/native_full_frame_acceptance.rs` 的 `native_app_update_drives_full_frame_and_fail_closed_recovery` 使用 `DeferredInstance`、`NullAdapter`/`NullDevice`/`NullQueue`，只生成没有可渲染对象的相机；源码明确断言 `draws_queued == 0`、`draws_recorded == 0`。它只证明空/null fixture 的提交、失败和恢复语义。
-- 因而 native 材质/网格/PSO/bind-group 到真实输出、统一全帧、多域 fan-out、设备丢失/resize/退休、第二 physical adapter、图像 parity 及 P50/P95/P99 性能仍未完成。Bevy、SceneRhi、CPU 或 null 证据均不计入这些条目。
+- 因而 native 统一全帧/31-pass 等价入口、多域 fan-out、Water/Volume/Hair/Decal 的 native 生产接线、设备丢失/resize/退休的完整链路、第二 physical adapter、图像 parity 及 P50/P95/P99 性能仍未完成。Bevy、SceneRhi、CPU 或 null 证据均不计入这些条目。
+
+**2026-11-11 原生场景验收补记**：修复 transform decoration 替换 draw recorder 时丢失 `SURFACE_MATERIAL`/VT 动态合约的问题；验收改读实际 camera-local graph target，而非 legacy/manual target。严格 `PRISM_REQUIRE_GPU=1 WGPU_BACKEND=metal` 的 `native_scene_mesh_draws_the_visible_set_on_a_gpu` 已通过。
 
 ## 0. 一句话
 
@@ -186,7 +189,7 @@ Bevy `prism_render_scene` 路径现另有 Hair/Volume/Decal 的生产帧聚合 s
 4. 对所有当前纳入 Prism 原生目标的 render domains 完成多视图 payload fan-out、资源导入和消费者接线；历史 Bevy Hair/Volume/Decal seam 只能作为排除项和历史证据，不计入 native domain 完成度。
 5. 运行并记录原生全帧图像 parity、至少两个 distinct physical adapter 的严格验收，以及资源峰值、队列等待、吞吐和 P50/P95/P99；缺少实际输出的测试定义或 SKIP_UNVERIFIED 不算通过。
 
-因此，本系列当前结论是“局部契约和局部生产切片有证据，原生全帧闭环仍未完成”。本次文档同步未运行 Cargo 或 GPU；所有新增结论均为范围/证据口径收口，不把未验证内容写成完成。
+因此，本系列当前结论是“原生非空 Surface GBuffer 最小切片已通过，但局部契约和生产切片仍未形成原生全帧闭环”。2026-11-11 已补做上述 Metal 场景验收；其余未完成项仍需独立证据，不以本测试外推。
 
 **2026-11-09 原生接线复核补记**：当前 `prism_render_app` 的基础生产入口已经完成 `prepare/finalize → RenderGraph → execute_tracked → completion`，Surface/Particle 的原生多视图与 recovery 也有对应实现；这些基础项不再单独当作“入口不存在”。本轮补上了原生 TAA 在 graph 成功提交后的 `mark_output_submitted`、失败路径的 `cancel_output`、逐帧 live-history completion 回收，并修正 Registered response MaskBlend 右臂使用左 program identity 的错误。该修正不关闭完整 31-pass 全帧、原生 Water/Hair/Volume/Decal 全域接线、跨适配器、图像 parity 或性能数据缺口。
 

@@ -2,13 +2,13 @@
 
 > **2026-11-09 目标边界（当前权威）**：Shader package、PSO、队列与缓存的目标消费者是 Prism 原生 prism_render_app、Prism RHI 与 prism_render_graph。Bevy、Bevy RenderApp、prism_render_scene 的 Bevy 集成路径、SceneRhi 与 legacy-bevy 仅为历史/排除项，不是 shader package、driver binary 或验收闭环的实现前提。
 
-## 当前审计结论（2026-11-10，native Prism）
+## 当前审计结论（2026-11-11，native Prism）
 
-**已确认**：native package identity、permutation/descriptor 校验、PSO/cache key、queue/lifecycle 契约以及 Rust/WESL ABI 检查已有源码和局部测试证据；Metal 局部 surface encode/GBuffer/composite 合同已通过。它们证明身份和局部 command path 的约束，不证明整个 shader package 已产生正确画面。
+**已确认**：native package identity、permutation/descriptor 校验、PSO/cache key、queue/lifecycle 契约以及 Rust/WESL ABI 检查已有源码和局部测试证据；Metal 非空场景 surface encode/GBuffer 与固定 composite readback 均已通过，composite ABI 已收敛到 Metal 可用的 storage-buffer 预算。它们证明身份和局部 command path 的约束，不证明整个 shader package 已产生正确画面。
 
-**当前失败与缺口**：Metal native 非空 draw readback 中，`tests::the_frame_draws_a_queued_mesh_on_a_gpu`、`tests::the_spine_draws_the_visible_set_on_a_gpu` 的 draw 统计为已记录，但目标纹理 readback 全黑。故尚不能把“PSO 创建成功”或“draws_recorded == 1”写成 package → bind group → draw → output 完成。另一个 `native_full_frame_acceptance` 只使用 `DeferredInstance`/Null backend 和无对象空相机，`draws_queued == 0`、`draws_recorded == 0`，不能验证真实 driver binary。
+**当前缺口**：Metal native 的基础直接 draw 与非空场景 package → bind group → surface-encode → GBuffer 最小路径均已通过；场景验收确认 `draws_queued=1`、`draws_recorded=1` 及真实 normal/albedo 输出。仍未完成的是完整 response package 消费、统一全帧 dispatch/draw、未就绪/失败/设备丢失/resize/退休、跨适配器输出与 P50/P95/P99。另一个 `native_full_frame_acceptance` 只使用 `DeferredInstance`/Null backend 和无对象空相机，不能验证真实 driver binary 的完整帧。
 
-本篇的 CPU/null/cache/contract 结果以及 Bevy/SceneRhi 历史记录必须保持范围标注。真实 native material/mesh shader consumption、未就绪/失败/设备丢失/resize/退休、统一全帧 dispatch/draw、跨适配器输出与 P50/P95/P99 仍是未完成项。
+本篇的 CPU/null/cache/contract 结果以及 Bevy/SceneRhi 历史记录必须保持范围标注。完整 response package 消费、未就绪/失败/设备丢失/resize/退休、统一全帧 dispatch/draw、跨适配器输出与 P50/P95/P99 仍是未完成项。
 
 > 文档口径：以当前源码、测试和已合入历史为准的实现审计。本文描述当前身份模型、缓存生命周期、队列入口与必须保持的架构约束。
 > 上层导航：[`00-overview_refactor_zh.md`](00-overview_refactor_zh.md)

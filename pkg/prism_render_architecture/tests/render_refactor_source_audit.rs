@@ -45,7 +45,8 @@ fn collect_files(root: &Path, files: &mut Vec<PathBuf>) {
             continue;
         }
         let extension = path.extension().and_then(|extension| extension.to_str());
-        let is_scoped_source = matches!(extension, Some("rs")) && !is_test_source(&path);
+        let is_scoped_source =
+            matches!(extension, Some("rs" | "wgsl" | "wesl")) && !is_test_source(&path);
         let is_scoped_document = matches!(extension, Some("md"));
         if is_scoped_source || is_scoped_document {
             files.push(path);
@@ -63,9 +64,13 @@ fn render_refactor_scope_has_no_executable_unfinished_markers() {
 
     let relative_scopes = [
         "pkg/prism_render_app/src",
-        "pkg/prism_render_scene/src",
         "pkg/prism_render_architecture/src",
+        "pkg/prism_render_graph/src",
         "pkg/prism_render_gpudriven/src",
+        "pkg/prism_render_runtime/src",
+        "pkg/prism_render_material/src",
+        "pkg/prism_render_driver/src",
+        "os-backends/prism_render_driver_wgpu/src",
         "docs/refactoring-dev",
     ];
     let mut files = Vec::new();
@@ -115,9 +120,11 @@ fn render_refactor_scope_has_no_removed_unpublished_api_symbols() {
 
     let relative_scopes = [
         "pkg/prism_render_app/src",
-        "pkg/prism_render_scene/src",
         "pkg/prism_render_architecture/src",
+        "pkg/prism_render_graph/src",
         "pkg/prism_render_gpudriven/src",
+        "pkg/prism_render_runtime/src",
+        "pkg/prism_render_material/src",
         "pkg/prism_render_driver/src",
         "os-backends/prism_render_driver_wgpu/src",
     ];
@@ -139,6 +146,22 @@ fn render_refactor_scope_has_no_removed_unpublished_api_symbols() {
             let mut search_from = 0;
             while let Some(relative) = source[search_from..].find(marker) {
                 let offset = search_from + relative;
+                let identifier_marker = !marker.ends_with('(');
+                let identifier_char = |byte: Option<u8>| {
+                    byte.is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                };
+                if identifier_marker
+                    && (identifier_char(source.as_bytes().get(offset.wrapping_sub(1)).copied())
+                        || identifier_char(
+                            source
+                                .as_bytes()
+                                .get(offset.saturating_add(marker.len()))
+                                .copied(),
+                        ))
+                {
+                    search_from = offset + marker.len();
+                    continue;
+                }
                 let line = source[..offset]
                     .bytes()
                     .filter(|byte| *byte == b'\n')
