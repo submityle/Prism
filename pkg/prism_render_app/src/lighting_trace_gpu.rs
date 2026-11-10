@@ -549,6 +549,9 @@ pub struct NativeGiMaterialEvaluatorInput {
     pub vt: Option<NativeGiMaterialEvaluatorVtInput>,
     /// Same-device authored image heap, when bindless is supported.
     pub direct_textures: Option<NativeGiMaterialTextureInput>,
+    /// Native shading-quality budget consumed by the linked BRDF evaluator.
+    /// The evaluator uses the same uniform block as the composite pass.
+    pub lobe_sample_budget: Option<TraceGraphBuffer>,
 }
 
 impl NativeGiMaterialEvaluatorInput {
@@ -612,6 +615,7 @@ impl NativeGiMaterialEvaluatorInput {
             registered_response_wgsl: Arc::<str>::from(execution.registered_response_wgsl()),
             vt,
             direct_textures: None,
+            lobe_sample_budget: None,
         }
     }
 
@@ -630,10 +634,34 @@ impl NativeGiMaterialEvaluatorInput {
         self
     }
 
-    fn validate(self) -> Result<(), TraceGpuError> {
-        self.config
-            .validate()
-            .map_err(|_| TraceGpuError::InvalidMaterialEvaluator)?;
+    /// Adds the exact device-local lobe budget used by the native lighting
+    /// bundle. The evaluator and composite must observe the same block.
+    #[must_use]
+    pub fn with_lobe_sample_budget(mut self, buffer: rhi::BufferId) -> Self {
+        self.lobe_sample_budget = Some(TraceGraphBuffer {
+            id: buffer,
+            size_bytes: 8 * core::mem::size_of::<u32>() as u64,
+        });
+        self
+    }
+
+    fn validate(self, bindless: bool) -> Result<(), TraceGpuError> {
+        // The architecture crate still exposes the pre-bindless validator,
+        // whose non-zero texture_slot_count rejection predates this consumer's
+        // real heap binding. Validate the shared ABI here and validate the
+        // selected resource path below instead of reintroducing that gate.
+        if self.config.abi_version != NATIVE_GI_MATERIAL_EVALUATOR_ABI_VERSION
+            || self.config.execution_table_version == 0
+            || self.config.material_header_count == 0
+            || self.config.parameter_word_count == 0
+            || self.config.texture_row_count == 0
+            || self.config.execution_plan_count == 0
+            || self.config.execution_program_count == 0
+            || self.config.flags != 0
+            || self.config._padding != [0; 2]
+        {
+            return Err(TraceGpuError::InvalidMaterialEvaluator);
+        }
         let required_header_bytes = u64::from(self.config.material_header_count)
             .checked_mul(core::mem::size_of::<prism_render_material::GpuMaterialHeader>() as u64)
             .ok_or(TraceGpuError::BufferSizeOverflow)?;
@@ -659,23 +687,30 @@ impl NativeGiMaterialEvaluatorInput {
         if self.material_texture_rows.size_bytes < required_texture_bytes {
             return Err(TraceGpuError::InvalidMaterialTextureRows);
         }
+        if self
+            .lobe_sample_budget
+            .is_none_or(|budget| budget.size_bytes < 32)
+        {
+            return Err(TraceGpuError::InvalidMaterialEvaluator);
+        }
         if self.execution_plan_rows.len() != self.config.execution_plan_count as usize
             || self.execution_program_rows.len() != self.config.execution_program_count as usize
         {
             return Err(TraceGpuError::InvalidMaterialEvaluator);
         }
-        if self.config.texture_slot_count != 0 {
+        if bindless {
             let Some(textures) = self.direct_textures.as_ref() else {
                 return Err(TraceGpuError::InvalidMaterialTextureHeap);
             };
-            if textures.owner().slot_count() != self.config.texture_slot_count
+            if self.config.texture_slot_count != MATERIAL_TEXTURE_HEAP_CAPACITY
+                || textures.owner().slot_count() != self.config.texture_slot_count
                 || textures.owner().generation_buffer().is_none()
                 || textures.owner().views().len() != self.config.texture_slot_count as usize
                 || textures.owner().samplers().len() != self.config.texture_slot_count as usize
             {
                 return Err(TraceGpuError::InvalidMaterialTextureHeap);
             }
-        } else if self.direct_textures.is_some() {
+        } else if self.config.texture_slot_count != 0 || self.direct_textures.is_some() {
             return Err(TraceGpuError::InvalidMaterialTextureHeap);
         }
         match self.vt {
@@ -1428,6 +1463,8 @@ pub struct TraceGraphRecorder {
     pub execution_table: Option<TraceGraphBuffer>,
     /// Evaluator configuration uniform read by the evaluator.
     pub evaluator_config: Option<TraceGraphBuffer>,
+    /// Shading-quality budget uniform shared with the composite pass.
+    pub lobe_sample_budget: Option<TraceGraphBuffer>,
     /// VT page table read by the evaluator, when a published lease is bound.
     pub vt_page_table: Option<TraceGraphBuffer>,
     /// VT configuration read by the evaluator, when a published lease is bound.
@@ -1572,7 +1609,7 @@ pub struct LightingTraceGpu {
     retired_material_candidate_bind_groups: Vec<rhi::BindGroupId>,
     evaluator_config: Option<ResidentBuffer>,
     evaluations: Option<ResidentBuffer>,
-    evaluator_bind_group: Option<(rhi::BindGroupId, [rhi::BufferId; 3])>,
+    evaluator_bind_group: Option<(rhi::BindGroupId, [rhi::BufferId; 4])>,
     retired_evaluator_bind_groups: Vec<rhi::BindGroupId>,
     evaluator_vt_bind_group: Option<(
         rhi::BindGroupId,
@@ -1714,6 +1751,16 @@ impl LightingTraceGpu {
                         ty: rhi::BufferBindingType::Storage { read_only: false },
                         has_dynamic_offset: false,
                         min_binding_size: None,
+                    },
+                    count: None,
+                },
+                rhi::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: rhi::ShaderStages::COMPUTE,
+                    ty: rhi::BindingType::Buffer {
+                        ty: rhi::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: Some(8 * core::mem::size_of::<u32>() as u64),
                     },
                     count: None,
                 },
@@ -2114,7 +2161,7 @@ impl LightingTraceGpu {
             byte_size(rays.len(), HIT_WORDS * 4)?,
         ];
         if let Some(evaluator) = material_evaluator.as_ref() {
-            evaluator.clone().validate()?;
+            evaluator.clone().validate(self.bindless)?;
             if self.bindless
                 && !evaluator.direct_textures.as_ref().is_some_and(|textures| {
                     textures.owner().slot_count() == MATERIAL_TEXTURE_HEAP_CAPACITY
@@ -2385,13 +2432,17 @@ impl LightingTraceGpu {
             evaluation_buffer,
             evaluator_config_buffer,
         ) {
-            let buffers = [output, config, evaluations];
+            let lobe_sample_budget = evaluator
+                .lobe_sample_budget
+                .expect("native evaluator requires the lighting lobe budget");
+            let buffers = [output, config, evaluations, lobe_sample_budget.id];
             let sizes = [
                 output_size_bytes,
                 (NATIVE_GI_MATERIAL_EVALUATOR_CONFIG_WORDS * 4) as u64,
                 self.evaluations
                     .expect("evaluation buffer was ensured")
                     .capacity_bytes,
+                lobe_sample_budget.size_bytes,
             ];
             let group = if let Some((group, previous)) = self.evaluator_bind_group {
                 if previous == buffers {
@@ -2529,6 +2580,11 @@ impl LightingTraceGpu {
             if let Some(vt) = evaluator.vt.as_ref() {
                 if self.evaluator_vt_leases.as_ref().is_none_or(|current| {
                     current.publication_generation() != vt.publication_generation
+                        || current.device_generation() != vt.lease.device_generation()
+                        || current.page_table() != vt.page_table
+                        || current.config() != vt.config
+                        || current.atlas_view() != vt.atlas_view
+                        || current.sampler() != vt.sampler
                 }) {
                     if let Some(previous) = self.evaluator_vt_leases.take() {
                         self.retired_evaluator_vt_leases.push(previous);
@@ -2648,6 +2704,9 @@ impl LightingTraceGpu {
                 id,
                 size_bytes: (NATIVE_GI_MATERIAL_EVALUATOR_CONFIG_WORDS * 4) as u64,
             }),
+            lobe_sample_budget: material_evaluator
+                .as_ref()
+                .and_then(|evaluator| evaluator.lobe_sample_budget),
             vt_page_table: material_evaluator.as_ref().and_then(|evaluator| {
                 evaluator.vt.as_ref().map(|vt| TraceGraphBuffer {
                     id: vt.page_table,
@@ -2735,25 +2794,36 @@ impl LightingTraceGpu {
 
     fn create_evaluator_bind_group(
         &self,
-        buffers: [rhi::BufferId; 3],
-        sizes: [u64; 3],
+        buffers: [rhi::BufferId; 4],
+        sizes: [u64; 4],
     ) -> rhi::BindGroupId {
+        let mut entries = buffers
+            .iter()
+            .copied()
+            .zip(sizes)
+            .take(3)
+            .enumerate()
+            .map(|(binding, (buffer, size))| rhi::BindGroupEntry {
+                binding: binding as u32,
+                resource: rhi::BindingResource::Buffer {
+                    buffer,
+                    offset: 0,
+                    size: Some(size),
+                },
+            })
+            .collect::<Vec<_>>();
+        entries.push(rhi::BindGroupEntry {
+            binding: 6,
+            resource: rhi::BindingResource::Buffer {
+                buffer: buffers[3],
+                offset: 0,
+                size: Some(sizes[3]),
+            },
+        });
         self.device.create_bind_group(&rhi::BindGroupDescriptor {
             label: Some("native-gi-material-evaluator-bind-group".into()),
             layout: Some(self.evaluator_layout),
-            entries: buffers
-                .into_iter()
-                .zip(sizes)
-                .enumerate()
-                .map(|(binding, (buffer, size))| rhi::BindGroupEntry {
-                    binding: binding as u32,
-                    resource: rhi::BindingResource::Buffer {
-                        buffer,
-                        offset: 0,
-                        size: Some(size),
-                    },
-                })
-                .collect(),
+            entries,
         })
     }
 
@@ -3524,6 +3594,11 @@ mod tests {
             "TEXTURE_SEMANTIC_NORMAL_VARIANCE",
             "native_mask_value",
             "if !texel_sample.valid",
+            "if !left.valid",
+            "if !right.valid || !mask.valid",
+            "RESPONSE_PROGRAM_KIND_CUSTOM",
+            "plan.mask_kind != MASK_KIND_DYNAMIC_CHANNEL",
+            "return invalid_native_response();",
         ] {
             assert!(
                 source.contains(required),
@@ -3531,8 +3606,23 @@ mod tests {
             );
         }
         assert!(
-            !source.contains("texture_slot_count != 0u"),
-            "texture rows/VT must not be rejected by the legacy texture-slot guard"
+            source.contains("native_texture_binding_contract_is_valid"),
+            "the evaluator must validate the selected texture binding path"
+        );
+        assert!(
+            source.contains("evaluator_config.texture_slot_count == 0u")
+                && source.contains("evaluator_config.texture_slot_count > arrayLength(&material_texture_generation_table)"),
+            "bindless evaluation must require an in-range dense heap"
+        );
+        assert!(
+            source.contains("evaluator_config.texture_slot_count != 0u"),
+            "non-bindless evaluation must reject direct heap state explicitly"
+        );
+        assert!(
+            source.contains(
+                "evaluator_config.vt_page_table_word_count > arrayLength(&material_vt_page_table)"
+            ),
+            "VT evaluation must validate the published page-table range"
         );
         assert!(
             source.contains(
@@ -3546,6 +3636,95 @@ mod tests {
             ) && source.contains("out.value = sample_texture_slot(row, uv, 0.0);"),
             "bindless rows must use the published authored-image heap"
         );
+    }
+
+    #[test]
+    fn native_material_evaluator_admits_a_published_bindless_heap_without_the_legacy_gate() {
+        let device: Arc<dyn RenderDevice + Send + Sync> = Arc::new(
+            prism_render_driver_null::NullDevice::new_with_capabilities(rhi::DeviceCapabilities {
+                backend: rhi::Backend::Noop,
+                features: rhi::Features::BINDLESS,
+                limits: rhi::Limits {
+                    max_bindings_per_bind_group: MATERIAL_TEXTURE_HEAP_CAPACITY,
+                    ..rhi::Limits::baseline()
+                },
+            }),
+        );
+        let queue = prism_render_driver_null::NullQueue::new();
+        let images = crate::RenderAssets::<crate::GpuImage>::new();
+        let heap = crate::TextureSlotHeap::new(MATERIAL_TEXTURE_HEAP_CAPACITY);
+        let owner = NativeMaterialTextureBindingOwner::build(device.clone(), &queue, &images, &heap)
+            .expect("the test device publishes the complete dense heap");
+        let slot_count = owner.slot_count();
+        let lobe_sample_budget = device.create_buffer(&BufferDescriptor::new(
+            32,
+            BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        ));
+        let evaluator = NativeGiMaterialEvaluatorInput {
+            config: NativeGiMaterialEvaluatorConfig {
+                abi_version: NATIVE_GI_MATERIAL_EVALUATOR_ABI_VERSION,
+                material_epoch_low: 1,
+                material_epoch_high: 0,
+                execution_table_version: 1,
+                vt_generation_low: 0,
+                vt_generation_high: 0,
+                material_header_count: 1,
+                parameter_word_count: 1,
+                texture_row_count: 1,
+                execution_plan_count: 1,
+                execution_program_count: 1,
+                texture_slot_count: 0,
+                vt_page_table_word_count: 0,
+                flags: 0,
+                _padding: [0; 2],
+            },
+            material_headers: TraceGraphBuffer {
+                id: rhi::BufferId::from_parts(0, 0),
+                size_bytes: core::mem::size_of::<prism_render_material::GpuMaterialHeader>() as u64,
+            },
+            material_parameters: TraceGraphBuffer {
+                id: rhi::BufferId::from_parts(0, 0),
+                size_bytes: 4,
+            },
+            material_texture_rows: TraceGraphBuffer {
+                id: rhi::BufferId::from_parts(0, 0),
+                size_bytes: core::mem::size_of::<prism_render_material::GpuMaterialTexture>()
+                    as u64,
+            },
+            execution_plans: TraceGraphBuffer {
+                id: rhi::BufferId::from_parts(0, 0),
+                size_bytes: (EXECUTION_PLAN_ROW_WORDS * 4) as u64,
+            },
+            execution_programs: TraceGraphBuffer {
+                id: rhi::BufferId::from_parts(0, 0),
+                size_bytes: (EXECUTION_PROGRAM_ROW_WORDS * 4) as u64,
+            },
+            execution_plan_rows: Arc::new(vec![[0; EXECUTION_PLAN_ROW_WORDS]]),
+            execution_program_rows: Arc::new(vec![[0; EXECUTION_PROGRAM_ROW_WORDS]]),
+            registered_response_wgsl: Arc::<str>::from(""),
+            vt: None,
+            direct_textures: None,
+            lobe_sample_budget: Some(TraceGraphBuffer {
+                id: lobe_sample_budget,
+                size_bytes: 32,
+            }),
+        }
+        .with_direct_textures(Some(owner));
+        assert_eq!(evaluator.config.texture_slot_count, slot_count);
+        assert_eq!(evaluator.clone().validate(true), Ok(()));
+
+        let mut stale = evaluator.clone();
+        stale.config.texture_slot_count = 0;
+        assert_eq!(
+            stale.validate(true),
+            Err(TraceGpuError::InvalidMaterialTextureHeap)
+        );
+        device.destroy_buffer(lobe_sample_budget);
+
+        let mut non_bindless = evaluator;
+        non_bindless.config.texture_slot_count = 0;
+        non_bindless.direct_textures = None;
+        assert_eq!(non_bindless.validate(false), Ok(()));
     }
 
     #[test]
@@ -3892,6 +4071,46 @@ mod tests {
         };
         let device = Arc::new(device);
         let trace_device: Arc<dyn RenderDevice + Send + Sync> = device.clone();
+        let bindless = device
+            .capabilities()
+            .features
+            .contains(rhi::Features::BINDLESS);
+        let mut direct_images = crate::RenderAssets::<crate::GpuImage>::new();
+        let mut direct_heap = crate::TextureSlotHeap::new(MATERIAL_TEXTURE_HEAP_CAPACITY);
+        let direct_texture_owner = if device
+            .capabilities()
+            .features
+            .contains(rhi::Features::BINDLESS)
+        {
+            let image_id = prism_asset::AssetId::<prism_image::Image>::new(
+                prism_asset::AssetIndex::from_parts(991, 1),
+            );
+            let source = prism_image::Image::new(
+                rhi::Extent3d::new_2d(1, 1),
+                rhi::TextureFormat::Rgba8Unorm,
+                vec![255, 0, 0, 255],
+            )
+            .expect("direct evaluator fixture image is valid");
+            direct_images.insert(
+                image_id,
+                crate::GpuImage::prepare(&source, image_id, &*device, &queue, None)
+                    .expect("direct evaluator fixture image prepares"),
+            );
+            let direct_slot = direct_heap
+                .acquire(image_id)
+                .expect("direct evaluator fixture slot is available");
+            Some(
+                NativeMaterialTextureBindingOwner::build(
+                    trace_device.clone(),
+                    &queue,
+                    &direct_images,
+                    &direct_heap,
+                )
+                .expect("a bindless evaluator needs a device-sized authored-image heap"),
+            )
+        } else {
+            None
+        };
 
         let bvh = Bvh::build(&[Triangle::new(
             [-1.0, -1.0, -1.0],
@@ -3922,11 +4141,23 @@ mod tests {
             11,
         );
         material.closure_mask = 0;
-        material.textures = vec![
+        material.textures = vec![if bindless {
+            let slot = direct_heap
+                .slot_of(prism_asset::AssetId::<prism_image::Image>::new(
+                    prism_asset::AssetIndex::from_parts(991, 1),
+                ))
+                .expect("direct evaluator fixture slot remains resident");
+            prism_render_material::GpuMaterialTexture::non_virtual(
+                slot.index,
+                slot.generation,
+                0,
+                slot.index,
+            )
+        } else {
             prism_render_material::GpuMaterialTexture::with_virtual_texture(
                 0, 1, 0, 0, 8, 64, 64, 64,
-            ),
-        ];
+            )
+        }];
         let mut header = material.header(0, 0, 23);
         header.execution_plan_index = 0;
         header.execution_program_index = 0;
@@ -4035,6 +4266,11 @@ mod tests {
             1,
             7,
         );
+        let lobe_sample_budget = device.create_buffer(&BufferDescriptor::new(
+            32,
+            BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        ));
+        queue.write_buffer(lobe_sample_budget, 0, bytemuck::cast_slice(&[0u32; 8]));
         let evaluator = NativeGiMaterialEvaluatorInput {
             config: NativeGiMaterialEvaluatorConfig {
                 abi_version: NATIVE_GI_MATERIAL_EVALUATOR_ABI_VERSION,
@@ -4078,7 +4314,10 @@ mod tests {
             registered_response_wgsl: Arc::<str>::from(""),
             vt: Some(NativeGiMaterialEvaluatorVtInput::from_lease(&lease)),
             direct_textures: None,
-        };
+            lobe_sample_budget: None,
+        }
+        .with_direct_textures(direct_texture_owner)
+        .with_lobe_sample_budget(lobe_sample_budget);
 
         let hits = device.create_buffer(&BufferDescriptor::new(
             HIT_WORDS as u64 * 4,
@@ -4166,6 +4405,15 @@ mod tests {
                 entry_state: BufferState::initial(),
             },
         );
+        let lobe_budget_binding = recorder.lobe_sample_budget.expect("evaluator lobe budget");
+        let lobe_sample_budget_buffer = graph.import_buffer(
+            "evaluator-lobe-sample-budget",
+            BufferDesc::new(lobe_budget_binding.size_bytes, BufferUsages::UNIFORM),
+            ImportedBuffer {
+                buffer: lobe_budget_binding.id,
+                entry_state: BufferState::initial(),
+            },
+        );
         let mut evaluation_buffer = import(
             &mut graph,
             "evaluator-output",
@@ -4200,6 +4448,7 @@ mod tests {
                     builder.read_storage_buffer(hit_buffer);
                     builder.read_storage_buffer(execution_table_buffer);
                     builder.read_uniform(evaluator_config_buffer);
+                    builder.read_uniform(lobe_sample_budget_buffer);
                     builder.read_storage_buffer(header_buffer);
                     builder.read_storage_buffer(parameter_buffer);
                     builder.read_storage_buffer(texture_buffer);
@@ -4219,7 +4468,8 @@ mod tests {
             .validate()
             .expect("GPU evaluator must publish a valid record");
         // CPU oracle: the fixture is unlit, base color is the default 0.8,
-        // and the resident VT tile is exact sRGB red.
+        // and either the direct heap image or the resident VT tile is exact
+        // sRGB red, depending on the adapter's binding model.
         for (actual, expected) in result.response_rgb.into_iter().zip([0.8, 0.0, 0.0]) {
             assert!((actual - expected).abs() < 2.0e-3, "{actual} != {expected}");
         }
@@ -4242,6 +4492,7 @@ mod tests {
             programs,
             page_table,
             vt_config,
+            lobe_sample_budget,
         ] {
             device.destroy_buffer(buffer);
         }
