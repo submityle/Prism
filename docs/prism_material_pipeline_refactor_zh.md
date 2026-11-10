@@ -9,7 +9,7 @@
 > 核心命题：**没有全局硬顶，不做运行时塌缩，也不做 per-pixel 预算裁剪。模型开放可扩展，每材质按声明静态特化成它确切需要的瓣集与特征——"界"是每材质编译期事实，不是全局天花板。分层在烘焙期解析成同参数化纹理空间混合（层数天然不限）；距离/性能靠纹理预过滤 + 高光抗锯齿 + 静态置换 + 采样缩放，全程无损、确定、跨平台。**
 > 规范参数化：**运行时 über 以 OpenPBR Surface（ASWF/Adobe/Autodesk 2024）为规范核心，Prism über 是 OpenPBR 的真超集**——`Prism über = OpenPBR Surface（全字段） ∪ { NPR_FACE 私有瓣 } ∪ { 开放词汇表后续瓣 }`。现有 7 瓣只是今天未补齐的实现子集；补齐缺口（thin_film 虹彩、coat/fuzz/subsurface 全字段等）是对开放词汇表的**加法扩充**，不是改架构。超集成立的三条硬约束见 §4.5（纯 OpenPBR 子集合规对拍 / 扩展位段隔离 / 向下投影）。NPR_FACE 作为 OpenPBR 之外的 Prism 私有瓣服务 NPR。
 > 四线正交：**PBR / NPR / 混合 / 自定义不是四条管线，而是同一条 OpenPBR über 上的正交响应模式**，由 `axis.rs` 的 `illumination` 轴 + `render_class` + 可选 `custom_program` 钩子选择；共享同一套参数解包、per-tile 分类与降级。
-> 最后更新：2026-11-10（Native composite 当前状态以核验文档 §0.0/§7.19 为准；P2-h 原理化分层 BSDF 核心公式已完成，`reference_pt/openpbr.rs` 已有多瓣响应与混合采样实现，剩余是 adapter/生产链的组合 parity、GPU/backend 与场景级验收；GI evaluator 已进入生产调度但仍是无纹理 builtin Unlit 切片。作者层新增受限 `nodedef` → `author_node` 语义闭环：`plus`/`mult`/`blend` 只作为 `add`/`multiply`/`mix` 的作者语法别名，不产生新的 runtime identity；完整 MaterialX 图、编辑器与 MaterialArtifact 接入仍未完成。）
+> 最后更新：2026-11-11（Native composite 当前状态以核验文档 §0.0/§7.19 为准；P2-h 原理化分层 BSDF 核心公式已完成，`reference_pt/openpbr.rs` 已有多瓣响应、混合采样和固定多 bounce CPU golden，adapter 的受限多瓣 CPU parity 切片已通过；剩余是实时 GPU ↔ reference 图像 parity、GPU/backend、真实纹理/材质提取及生产 integrator 组合验收；GI evaluator 已进入生产调度但仍是无纹理 builtin Unlit 切片。作者层新增受限 `nodedef` → `author_node` 语义闭环：`plus`/`mult`/`blend` 只作为 `add`/`multiply`/`mix` 的作者语法别名，不产生新的 runtime identity；完整 MaterialX 图、编辑器与 MaterialArtifact 接入仍未完成。）
 
 ---
 
@@ -1619,7 +1619,7 @@ fn respond_custom(surface: Surface, inc: IncomingRadiance, aux: CustomAux, view:
 
 物理上 **coat 之下的 base 应收到 coat 透射后的能量**（coat 反射掉的不再喂 base），且 coat 吸收会使底色变暗（`coat_darkening`）。本节的实时核心语义已落地，不再是“现有 über 倾向纯瓣求和”的待实现提案。
 
-**实现与现存边界**：实时 CPU/WESL 已使用 coat Fresnel 两程/闭式 slab 透射进行 base 能量耦合，并由 `coat_darkening` 统一处理 reflective base 与 transmission substrate；GPU resolve 有定向 readback 证据。path-traced `reference_pt` 已实现独立的 base/EON、metallic/specular、transmission、clearcoat/darkening、sheen、subsurface、thin-film/iridescence、glint 响应，以及 `evaluate_path` 和五类 proposal 的混合 `sample/pdf`；`ReferencePtMaterialAdapter` 在活动瓣不止 clearcoat/diffuse 时会构造 `Bsdf::OpenPbr`，而不是静默退回 Lambert。adapter 的 base weight/roughness/coat-medium tint 与 16×16 小图门禁已通过（核验文档 §7.21），但当前 parity 证据仍集中于 EON/clearcoat direct slice；anisotropy、coat normal/tangent、normal variance、非一 geometry opacity/AO、emission 仍拒绝，纹理/动态通道/真实材质提取、全组合、多 bounce 场景图像与 GPU/backend parity 仍未验收。局部 CPU/GPU 切片不等于全材质生产闭环，不支持输入继续 fail-closed，不能静默丢字段。
+**实现与现存边界**：实时 CPU/WESL 已使用 coat Fresnel 两程/闭式 slab 透射进行 base 能量耦合，并由 `coat_darkening` 统一处理 reflective base 与 transmission substrate；GPU resolve 有定向 readback 证据。path-traced `reference_pt` 已实现独立的 base/EON、metallic/specular、transmission、clearcoat/darkening、sheen、subsurface、thin-film/iridescence、glint 响应，以及 `evaluate_path` 和五类 proposal 的混合 `sample/pdf`；`ReferencePtMaterialAdapter` 在活动瓣不止 clearcoat/diffuse 时会构造 `Bsdf::OpenPbr`，而不是静默退回 Lambert。旧 clearcoat-only 16×16 fixture 与新增 OpenPBR 多瓣 CPU golden 矩阵、sample/pdf/transport consistency、固定多 bounce reference image golden 已分别通过（核验文档 §7.21.2），但这不是 realtime GPU ↔ reference image parity。adapter 明确拒绝 anisotropy/anisotropy_rotation、非零 coat normal/tangent/coat roughness anisotropy、normal variance、非法 finite/range 参数；emission、geometry opacity、AO 独立保存而不混入 BRDF，不代表其与 realtime GPU 主链已完成 parity。纹理/动态通道/真实材质提取、GPU/backend/cross-adapter parity 与完整生产 integrator 组合仍未验收。局部 CPU/reference 切片不等于全材质生产闭环，不支持输入继续 fail-closed，不能静默丢字段。
 
 > 当前状态：核心分层语义已实现；P2-h 剩余是 parity 覆盖和场景级验证，不是待定公式或待建 path-traced reference。
 

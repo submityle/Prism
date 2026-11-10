@@ -198,7 +198,7 @@ impl OpenPbrMaterial {
             diffuse = diffuse.add(transmitted.mul(diffuse_weight));
         }
 
-        let transmission = transmission_brdf(self, cos_o, cos_i, view_half);
+        let transmission = transmission_brdf(self, wo, wi, cos_o, cos_i);
         let base = diffuse
             .add(specular)
             .scale(self.base_weight.clamp(0.0, 1.0) * (1.0 - self.transmission.clamp(0.0, 1.0)))
@@ -249,9 +249,14 @@ impl OpenPbrMaterial {
     ///
     /// The direct oracle above intentionally preserves the realtime OpenPBR
     /// front-facing response. Path transport additionally needs an actual
-    /// opposite-hemisphere event; that event uses the independent rough
+    /// opposite-hemisphere event; that event uses an independent rough
     /// dielectric reference lobe and therefore can continue through a second
     /// surface instead of terminating at the first transmission sample.
+    ///
+    /// The two contracts are deliberately different but explicit: `evaluate`
+    /// is the direct-light slab response (`R + T`) used by the realtime
+    /// contract, while this method is the transmitted path event (`BTDF`) and
+    /// must not add the reflected slab branch a second time.
     #[must_use]
     pub fn evaluate_path(&self, wo: Vec3, wi: Vec3, normal: Vec3) -> Vec3 {
         let normal = normal.faced_toward(wo);
@@ -269,19 +274,23 @@ impl OpenPbrMaterial {
         if transmission <= 0.0 {
             return Vec3::ZERO;
         }
-        let tint = if self.thin_walled > 0.5 {
-            self.transmission_color
-        } else {
-            self.base_color.mul(self.transmission_color)
-        };
-        RoughDielectric::new(
-            ior,
-            Vec3::ONE,
-            tint,
-            self.perceptual_roughness.clamp(MIN_ROUGHNESS, 1.0),
-        )
-        .evaluate(wo, wi, normal)
-        .scale(transmission)
+        let roughness = self.perceptual_roughness.clamp(MIN_ROUGHNESS, 1.0);
+        let mut result = [0.0; 3];
+        for (channel, value) in result.iter_mut().enumerate() {
+            let ior_c = dispersive_ior(
+                ior,
+                self.transmission_dispersion_abbe_number,
+                self.dispersion,
+                channel,
+            );
+            let medium = medium_transmittance(self, wo, wi, channel);
+            let tint = ops::powf(medium.max(0.0), 1.0 / transmitted_cosine(cos_o, ior_c));
+            let component_value =
+                RoughDielectric::new(ior_c, Vec3::ONE, Vec3::splat(tint), roughness)
+                    .evaluate(wo, wi, normal);
+            *value = component(component_value, channel) * transmission;
+        }
+        Vec3::from_array(result)
     }
 
     /// Returns the solid-angle density used by [`Self::sample`].
@@ -481,7 +490,7 @@ impl OpenPbrMaterial {
             return 0.0;
         };
         RoughDielectric::new(
-            ior,
+            self.sampling_ior(ior),
             Vec3::ONE,
             Vec3::ONE,
             self.perceptual_roughness.clamp(MIN_ROUGHNESS, 1.0),
@@ -497,13 +506,26 @@ impl OpenPbrMaterial {
     ) -> Option<Vec3> {
         let ior = finite_positive(self.index_of_refraction)?;
         RoughDielectric::new(
-            ior,
+            self.sampling_ior(ior),
             Vec3::ONE,
             Vec3::ONE,
             self.perceptual_roughness.clamp(MIN_ROUGHNESS, 1.0),
         )
         .sample(wo, normal, rng)
         .map(|sample| sample.direction)
+    }
+
+    /// Uses the green/d-line channel as the common direction proposal for an
+    /// RGB path. The returned value is still evaluated per channel, so a
+    /// single path direction carries dispersion without splitting the path
+    /// three ways.
+    fn sampling_ior(&self, ior: f32) -> f32 {
+        dispersive_ior(
+            ior,
+            self.transmission_dispersion_abbe_number,
+            self.dispersion,
+            1,
+        )
     }
 }
 
@@ -594,19 +616,11 @@ fn metal_fresnel_rgb(mu: f32, base_weight: f32, base: Vec3, weight: f32, color: 
         .scale(weight.clamp(0.0, 1.0))
 }
 
-fn transmission_brdf(m: &OpenPbrMaterial, cos_o: f32, cos_i: f32, _view_half: f32) -> Vec3 {
+fn transmission_brdf(m: &OpenPbrMaterial, wo: Vec3, wi: Vec3, cos_o: f32, cos_i: f32) -> Vec3 {
     if m.transmission <= 0.0 {
         return Vec3::ZERO;
     }
     let ior = m.index_of_refraction.max(1.0);
-    let beer = if m.thin_walled > 0.5 {
-        Vec3::ONE
-    } else {
-        m.base_color.mul(m.transmission_color)
-    };
-    let scatter = beer.add(m.transmission_scatter.sub(beer).scale(
-        (1.0 - cos_o * cos_i).sqrt() * m.transmission_scatter_anisotropy.clamp(-1.0, 1.0).abs(),
-    ));
     let mut response = [0.0; 3];
     for (channel, value) in response.iter_mut().enumerate() {
         let ior_c = dispersive_ior(
@@ -620,11 +634,57 @@ fn transmission_brdf(m: &OpenPbrMaterial, cos_o: f32, cos_i: f32, _view_half: f3
         let denom = (1.0 - fv * fl).max(1.0e-4);
         let t = (1.0 - fv) * (1.0 - fl) / denom;
         let r = fl + (1.0 - fl) * (1.0 - fl) * fv / denom;
+        let mu_t = transmitted_cosine(cos_o, ior_c);
+        let transmittance = medium_transmittance(m, wo, wi, channel);
         // Reflection is interface energy and must stay uncoloured; only the
         // refracted branch is attenuated by the OpenPBR transmission colour.
-        *value = (r + t * component(scatter, channel)) * INV_PI;
+        *value = (r + t * ops::powf(transmittance.max(0.0), 1.0 / mu_t)) * INV_PI;
     }
     Vec3::from_array(response)
+}
+
+/// The cosine after refraction for the unit-depth attenuation convention used
+/// by both the direct slab and the path event. Keeping this in one helper is
+/// important: dispersion must change both Fresnel and the Beer path length.
+fn transmitted_cosine(cos_o: f32, ior: f32) -> f32 {
+    let sin2_t = (1.0 - cos_o * cos_o).max(0.0) / (ior * ior).max(MIN_COS);
+    (1.0 - sin2_t).max(1.0e-3).sqrt()
+}
+
+/// Returns the authored medium throughput before interface Fresnel.
+///
+/// `thin_walled` is intentionally an explicit semantic branch: a thin-walled
+/// surface has no participating volume in this contract, so it skips both
+/// Beer attenuation and in-volume scatter. A solid surface uses the same
+/// unit-scene-depth convention as the realtime direct shader, then applies the
+/// normalized Henyey-Greenstein phase to the absorbed fraction.
+fn medium_transmittance(m: &OpenPbrMaterial, wo: Vec3, wi: Vec3, channel: usize) -> f32 {
+    if m.thin_walled > 0.5 {
+        return 1.0;
+    }
+    let beer = if m.thickness > 0.0 {
+        let slab = component(m.base_color, channel) * component(m.transmission_color, channel);
+        ops::powf(slab.clamp(0.0, 1.0), 1.0 / m.thickness)
+    } else {
+        component(m.transmission_color, channel).clamp(0.0, 1.0)
+    };
+    let phase = scatter_phase_ratio(
+        (-wo.dot(wi)).clamp(-1.0, 1.0),
+        m.transmission_scatter_anisotropy,
+    );
+    let scatter = component(m.transmission_scatter, channel).clamp(0.0, 1.0);
+    let in_scatter = beer + phase * scatter * (1.0 - beer);
+    in_scatter.max(0.0)
+}
+
+/// Ratio of Henyey-Greenstein phase to its isotropic (`g == 0`) value.
+///
+/// This keeps `transmission_scatter == 0` and `g == 0` exact identities while
+/// allowing forward/backward scatter to change the absorbed-light recovery.
+fn scatter_phase_ratio(cos_theta: f32, anisotropy: f32) -> f32 {
+    let g = anisotropy.clamp(-0.999, 0.999);
+    let denominator = (1.0 + g * g - 2.0 * g * cos_theta).max(1.0e-12);
+    (1.0 - g * g) / ops::powf(denominator, 1.5)
 }
 
 fn coat_absorption(color: Vec3, mu_i: f32, mu_o: f32, ior: f32, weight: f32) -> Vec3 {
@@ -769,8 +829,13 @@ fn glint_density(smooth: f32, count: f32, bin: f32, seed: u32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::super::bsdf::Bsdf;
+    use super::super::camera::PinholeCamera;
+    use super::super::compare::compare_pixels;
+    use super::super::film::render_sampled;
+    use super::super::filter::PixelFilter;
     use super::super::integrator::{Material, PathIntegrator, Scene};
     use super::super::sampler::Rng;
+    use super::super::subpixel::SubpixelSampler;
     use super::super::Vec3;
     use super::*;
 
@@ -821,6 +886,64 @@ mod tests {
         }
     }
 
+    fn fixed_multibounce_scene() -> (Scene, PinholeCamera, PathIntegrator) {
+        let positions = alloc::vec![
+            // Floor.
+            [-4.0_f32, 0.0, -4.0],
+            [4.0, 0.0, -4.0],
+            [-4.0, 0.0, 4.0],
+            // Back wall.
+            [-4.0, 0.0, -4.0],
+            [4.0, 0.0, -4.0],
+            [-4.0, 4.0, -4.0],
+            // Downward-facing emitter.
+            [-1.1, 3.4, -1.2],
+            [1.1, 3.4, -1.2],
+            [0.0, 3.4, 0.8],
+        ];
+        let indices = alloc::vec![[0u32, 1, 2], [3, 4, 5], [6, 7, 8]];
+        let mesh = crate::ray_scene::triangle_mesh::TriangleMesh::new(
+            positions,
+            alloc::vec![],
+            alloc::vec![],
+            indices,
+        )
+        .expect("valid fixed OpenPBR image mesh");
+        let mut floor = material();
+        floor.base_color = Vec3::new(0.72, 0.43, 0.19);
+        floor.clearcoat = 0.55;
+        floor.sheen = 0.28;
+        let mut wall = material();
+        wall.base_color = Vec3::new(0.18, 0.37, 0.68);
+        wall.metallic = 0.35;
+        wall.transmission = 0.12;
+        wall.clearcoat = 0.18;
+        let emitter = Material::emissive(
+            Bsdf::Lambert { albedo: Vec3::ZERO },
+            Vec3::new(5.0, 3.7, 2.4),
+        );
+        let scene = Scene::new(
+            crate::ray_scene::triangle_mesh::TriangleMeshBvh::build(mesh),
+            alloc::vec![
+                Material::new(Bsdf::OpenPbr { material: floor }),
+                Material::new(Bsdf::OpenPbr { material: wall }),
+                emitter,
+            ],
+            alloc::vec![],
+            Vec3::splat(0.025),
+        )
+        .expect("fixed OpenPBR scene");
+        let camera = PinholeCamera::look_at(
+            Vec3::new(0.0, 1.75, 5.0),
+            Vec3::new(0.0, 1.45, -0.8),
+            Vec3::new(0.0, 1.0, 0.0),
+            0.52,
+            1.0,
+        )
+        .expect("fixed OpenPBR camera");
+        (scene, camera, PathIntegrator::new(8, 3))
+    }
+
     #[test]
     fn sample_reports_the_complete_mixture_pdf_and_response() {
         let material = material();
@@ -832,7 +955,7 @@ mod tests {
                 continue;
             };
             let queried_pdf = material.pdf(wo, sample.direction, N);
-            let evaluated = material.evaluate(wo, sample.direction, N);
+            let evaluated = material.evaluate_path(wo, sample.direction, N);
             assert!(sample.pdf.is_finite() && sample.pdf > 0.0);
             assert!((sample.pdf - queried_pdf).abs() <= 1.0e-6 * sample.pdf.max(1.0));
             assert!(sample.value.sub(evaluated).length() <= 1.0e-6);
@@ -879,6 +1002,137 @@ mod tests {
             }
         }
         assert!(crossed > 8_000, "too few transmitted paths: {crossed}");
+    }
+
+    #[test]
+    fn direct_transmission_uses_dispersion_and_scatter_semantics() {
+        let mut achromatic = material();
+        achromatic.base_weight = 0.0;
+        achromatic.metallic = 0.0;
+        achromatic.specular_weight = 0.0;
+        achromatic.clearcoat = 0.0;
+        achromatic.sheen = 0.0;
+        achromatic.transmission = 1.0;
+        achromatic.base_color = Vec3::new(0.62, 0.71, 0.83);
+        achromatic.transmission_color = Vec3::new(0.84, 0.67, 0.49);
+        achromatic.transmission_scatter = Vec3::new(0.19, 0.31, 0.43);
+        achromatic.transmission_scatter_anisotropy = 0.0;
+        achromatic.thickness = 0.8;
+        let wo = Vec3::new(0.63, 0.72, 0.29).normalize_or_zero();
+        let wi = Vec3::new(-0.34, 0.91, 0.23).normalize_or_zero();
+        let no_dispersion = achromatic.evaluate(wo, wi, N);
+
+        let mut dispersive = achromatic;
+        dispersive.dispersion = 1.0;
+        dispersive.transmission_dispersion_abbe_number = 18.0;
+        let with_dispersion = dispersive.evaluate(wo, wi, N);
+        assert!(with_dispersion.is_finite());
+        assert!(
+            with_dispersion.sub(no_dispersion).length() > 1.0e-5,
+            "dispersion must alter the direct RGB response: no={no_dispersion:?} yes={with_dispersion:?}"
+        );
+
+        let mut forward = achromatic;
+        forward.transmission_scatter_anisotropy = 0.8;
+        let forward_light = Vec3::new(-0.61, 0.74, -0.28).normalize_or_zero();
+        let backward_light = Vec3::new(0.61, 0.74, 0.28).normalize_or_zero();
+        let forward_value = forward.evaluate(wo, forward_light, N);
+        let backward_value = forward.evaluate(wo, backward_light, N);
+        assert!(
+            forward_value.max_component() > backward_value.max_component(),
+            "positive scatter anisotropy must favour forward transport: forward={forward_value:?} backward={backward_value:?}"
+        );
+
+        let mut thin = achromatic;
+        thin.thin_walled = 1.0;
+        let thin_value = thin.evaluate(wo, wi, N);
+        let mut solid = achromatic;
+        solid.thin_walled = 0.0;
+        let solid_value = solid.evaluate(wo, wi, N);
+        assert!(
+            thin_value.max_component() > solid_value.max_component(),
+            "thin-walled transport must skip volume attenuation: thin={thin_value:?} solid={solid_value:?}"
+        );
+    }
+
+    #[test]
+    fn path_transmission_uses_the_same_medium_semantics_per_channel() {
+        let mut material = material();
+        material.base_weight = 0.0;
+        material.metallic = 0.0;
+        material.specular_weight = 0.0;
+        material.clearcoat = 0.0;
+        material.sheen = 0.0;
+        material.transmission = 1.0;
+        material.base_color = Vec3::new(0.55, 0.72, 0.91);
+        material.transmission_color = Vec3::new(0.72, 0.58, 0.41);
+        material.transmission_scatter = Vec3::ZERO;
+        material.transmission_scatter_anisotropy = 0.0;
+        material.transmission_dispersion_abbe_number = 24.0;
+        material.dispersion = 1.0;
+        material.thickness = 0.7;
+        let wo = Vec3::new(0.48, 0.86, 0.16).normalize_or_zero();
+        let wi = Vec3::new(-0.31, -0.93, 0.19).normalize_or_zero();
+        let value = material.evaluate_path(wo, wi, N);
+        assert!(
+            value.is_finite() && value.x.min(value.y).min(value.z) >= 0.0,
+            "path transmission must stay finite and non-negative: {value:?}"
+        );
+        assert!(
+            (value.x - value.y).abs() > 1.0e-5 || (value.y - value.z).abs() > 1.0e-5,
+            "dispersion/scatter must survive into the transmitted path value: {value:?}"
+        );
+
+        let mut thin = material;
+        thin.thin_walled = 1.0;
+        let thin_value = thin.evaluate_path(wo, wi, N);
+        assert!(
+            thin_value.sub(value).length() > 1.0e-5,
+            "thin-walled path must skip volume attenuation: thin={thin_value:?} solid={value:?}"
+        );
+    }
+
+    #[test]
+    fn sample_pdf_and_transport_are_consistent_for_dispersive_multilobe_material() {
+        let mut material = material();
+        material.transmission = 0.48;
+        material.dispersion = 0.9;
+        material.transmission_dispersion_abbe_number = 32.0;
+        material.transmission_color = Vec3::new(0.83, 0.67, 0.52);
+        material.transmission_scatter = Vec3::new(0.08, 0.22, 0.37);
+        material.transmission_scatter_anisotropy = -0.41;
+        material.thickness = 0.6;
+        material.subsurface = 0.24;
+        material.iridescence = 0.31;
+        material.iridescence_thickness_nm = 390.0;
+        material.glint_weight = 0.13;
+        material.glint_roughness = 0.22;
+        material.glint_density = 3.0;
+        material.glint_bin_half_width = 0.08;
+        material.glint_footprint_area = 0.4;
+        let wo = Vec3::new(0.35, 0.91, -0.12).normalize_or_zero();
+        let mut rng = Rng::seed(0x0B_B6);
+        let mut valid = 0u32;
+        let mut reflected = 0u32;
+        let mut transmitted = 0u32;
+        for _ in 0..30_000 {
+            let Some(sample) = material.sample(wo, N, &mut rng) else {
+                continue;
+            };
+            let pdf = material.pdf(wo, sample.direction, N);
+            let expected = material.evaluate_path(wo, sample.direction, N);
+            assert!((sample.pdf - pdf).abs() <= 1.0e-5 * sample.pdf.max(1.0));
+            assert!(sample.value.sub(expected).length() <= 2.0e-6);
+            assert!(sample.value.is_finite() && sample.pdf.is_finite() && sample.pdf > 0.0);
+            if N.dot(sample.direction) < 0.0 {
+                transmitted += 1;
+            } else {
+                reflected += 1;
+            }
+            valid += 1;
+        }
+        assert!(valid > 25_000, "too many invalid mixed samples: {valid}");
+        assert!(reflected > 500 && transmitted > 500);
     }
 
     #[test]
@@ -1011,6 +1265,83 @@ mod tests {
         assert!(
             deep_sum > 1_000.0,
             "transmission did not reach the second surface: {deep_sum}"
+        );
+    }
+
+    #[test]
+    fn openpbr_multibounce_fixed_scene_image_matches_golden() {
+        let (scene, camera, integrator) = fixed_multibounce_scene();
+        let film = render_sampled(
+            &scene,
+            &camera,
+            &integrator,
+            4,
+            4,
+            16,
+            0x0B_B7,
+            PixelFilter::Box,
+            SubpixelSampler::Halton,
+        );
+        let expected = alloc::vec![
+            Vec3::new(0.024069134, 0.02407038, 0.024069697),
+            Vec3::new(1.2687497, 0.9437498, 0.6187499),
+            Vec3::new(0.9578124, 0.7140626, 0.47031257),
+            Vec3::new(0.025000004, 0.025000004, 0.025000004),
+            Vec3::new(0.020241925, 0.019743118, 0.019975048),
+            Vec3::new(0.028056093, 0.027067833, 0.027404746),
+            Vec3::new(0.024476958, 0.024658084, 0.02485072),
+            Vec3::new(0.025000004, 0.025000004, 0.025000004),
+            Vec3::new(0.045199912, 0.03098694, 0.023484422),
+            Vec3::new(0.067022175, 0.04191285, 0.0300887),
+            Vec3::new(0.05063971, 0.03565316, 0.027862774),
+            Vec3::new(0.025424229, 0.024372572, 0.024175217),
+            Vec3::new(0.0641537, 0.035670172, 0.020181134),
+            Vec3::new(0.049739733, 0.034545656, 0.026621234),
+            Vec3::new(0.025000004, 0.025000004, 0.025000004),
+            Vec3::new(0.025000004, 0.025000004, 0.025000004),
+        ];
+        let metrics = compare_pixels(&expected, film.pixels()).expect("fixed image dimensions");
+        assert!(
+            metrics.max_abs <= 5.0e-6,
+            "multi-bounce OpenPBR image drift: {metrics:?}"
+        );
+
+        let repeat = render_sampled(
+            &scene,
+            &camera,
+            &integrator,
+            4,
+            4,
+            16,
+            0x0B_B7,
+            PixelFilter::Box,
+            SubpixelSampler::Halton,
+        );
+        assert_eq!(
+            film.pixels(),
+            repeat.pixels(),
+            "reference image is not deterministic"
+        );
+
+        // A one-bounce render is a control, not the golden. The fixed scene
+        // must exercise indirect transport rather than only the old direct
+        // clearcoat fixture or a first-hit emitter.
+        let shallow = render_sampled(
+            &scene,
+            &camera,
+            &PathIntegrator::new(1, 3),
+            4,
+            4,
+            16,
+            0x0B_B7,
+            PixelFilter::Box,
+            SubpixelSampler::Halton,
+        );
+        let bounce_delta =
+            compare_pixels(film.pixels(), shallow.pixels()).expect("same fixed image dimensions");
+        assert!(
+            bounce_delta.mae > 1.0e-4,
+            "fixed image did not contain a measurable multi-bounce contribution: {bounce_delta:?}"
         );
     }
 }

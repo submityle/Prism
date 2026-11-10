@@ -6,11 +6,12 @@
 //! represented without changing their meaning; silently dropping them would
 //! make a passing image comparison misleading.
 //!
-//! This maps the dedicated `evaluate_clearcoat_direct` model, NOT every
-//! production LIT closure. In particular the principled coat's Schlick/slab
-//! energy redistribution is not the reference's exact-Fresnel/two-pass model.
-//! A production-resolve comparison must expose that difference, not replace
-//! the independent reference evaluation with the realtime BSDF.
+//! The adapter has two deliberately separate mappings. Clearcoat/diffuse-only
+//! inputs use the dedicated `ClearcoatDiffuse` oracle; any active OpenPBR
+//! response lobe uses `OpenPbrMaterial`. Neither mapping is the realtime
+//! evaluator: the reference has its own Fresnel, slab, sampling, and path
+//! transport code. A production-resolve comparison must expose differences,
+//! not replace the independent reference evaluation with the realtime BSDF.
 
 use prism_render_architecture::reference_pt::bsdf::{Bsdf, BsdfSample};
 use prism_render_architecture::reference_pt::openpbr::OpenPbrMaterial;
@@ -1207,6 +1208,117 @@ mod tests {
                 .evaluate(NORMAL, NORMAL, NORMAL)
                 .iter()
                 .all(|value| value.is_finite()));
+        }
+    }
+
+    #[test]
+    fn openpbr_cpu_golden_matrix_is_distinct_from_clearcoat_fixture() {
+        // This matrix is intentionally separate from the clearcoat-only 16x16
+        // fixture above. It pins three genuinely multi-lobe OpenPBR mappings
+        // over three view/light pairs, including dispersion/scatter inputs.
+        let mut materials = [openpbr_surface(); 3];
+        materials[1].metallic = 0.86;
+        materials[1].transmission = 0.0;
+        materials[1].subsurface = 0.0;
+        materials[1].sheen = 0.62;
+        materials[1].iridescence = 0.0;
+        materials[1].glint_weight = 0.0;
+        materials[2].metallic = 0.08;
+        materials[2].transmission = 0.77;
+        materials[2].transmission_color = [0.77, 0.61, 0.42];
+        materials[2].transmission_scatter = [0.13, 0.27, 0.46];
+        materials[2].transmission_scatter_anisotropy = 0.54;
+        materials[2].thickness = 0.71;
+        materials[2].dispersion = 1.0;
+        materials[2].transmission_dispersion_abbe_number = 23.0;
+        let directions = [
+            (normalize([0.2, 0.97, 0.1]), normalize([0.4, 0.9, -0.1])),
+            (normalize([-0.45, 0.84, 0.3]), normalize([0.2, 0.96, 0.17])),
+            (
+                normalize([0.65, 0.72, -0.2]),
+                normalize([-0.35, 0.88, 0.32]),
+            ),
+        ];
+        let expected = [
+            [
+                [0.074073195, 0.06629787, 0.07675927],
+                [0.071048126, 0.05813247, 0.06294348],
+                [0.06986547, 0.054551564, 0.052732833],
+            ],
+            [
+                [0.030591026, 0.019127227, 0.015000621],
+                [0.038387436, 0.021924024, 0.015549844],
+                [0.094673246, 0.045642767, 0.02472153],
+            ],
+            [
+                [0.06257485, 0.03767831, 0.035851326],
+                [0.06295971, 0.038641453, 0.0371988],
+                [0.066668905, 0.04551283, 0.04692006],
+            ],
+        ];
+        let expected_pdf = [
+            [0.13999282, 0.1581955, 0.23138532],
+            [0.20105067, 0.23128083, 0.3604911],
+            [0.108905345, 0.122773655, 0.1798538],
+        ];
+        for (material_index, surface) in materials.into_iter().enumerate() {
+            let adapter = ReferencePtMaterialAdapter::from_surface(surface).unwrap();
+            for (direction_index, (view, light)) in directions.into_iter().enumerate() {
+                let actual = adapter.evaluate(view, light, NORMAL);
+                for channel in 0..3 {
+                    assert!(
+                        (actual[channel] - expected[material_index][direction_index][channel])
+                            .abs()
+                            <= 3.0e-6,
+                        "OpenPBR golden drift: material={material_index} direction={direction_index} channel={channel} actual={actual:?} expected={:?}",
+                        expected[material_index][direction_index]
+                    );
+                }
+                let pdf = adapter.pdf(view, light, NORMAL);
+                assert!((pdf - expected_pdf[material_index][direction_index]).abs() <= 3.0e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn openpbr_path_golden_matrix_covers_transmission_transport() {
+        let mut surface = openpbr_surface();
+        surface.base_weight = 0.08;
+        surface.transmission = 0.77;
+        surface.transmission_color = [0.77, 0.61, 0.42];
+        surface.transmission_scatter = [0.13, 0.27, 0.46];
+        surface.transmission_scatter_anisotropy = 0.54;
+        surface.thickness = 0.71;
+        surface.dispersion = 1.0;
+        surface.transmission_dispersion_abbe_number = 23.0;
+        let adapter = ReferencePtMaterialAdapter::from_surface(surface).unwrap();
+        let directions = [
+            (normalize([0.2, 0.97, 0.1]), normalize([-0.2, -0.97, -0.1])),
+            (
+                normalize([-0.45, 0.84, 0.3]),
+                normalize([0.45, -0.84, -0.3]),
+            ),
+            (
+                normalize([0.65, 0.72, -0.2]),
+                normalize([-0.65, -0.72, 0.2]),
+            ),
+        ];
+        let expected = [
+            [4.213745, 8.117438, 13.534451],
+            [0.3424032, 0.6870612, 1.1815869],
+            [0.18799822, 0.39065626, 0.6898017],
+        ];
+        let expected_pdf = [5.8719397, 0.4138248, 0.19754508];
+        for (index, (view, light)) in directions.into_iter().enumerate() {
+            let actual = adapter.evaluate_path(view, light, NORMAL);
+            for channel in 0..3 {
+                assert!(
+                    (actual[channel] - expected[index][channel]).abs() <= 3.0e-5,
+                    "OpenPBR path golden drift: index={index} channel={channel} actual={actual:?} expected={:?}",
+                    expected[index]
+                );
+            }
+            assert!((adapter.pdf(view, light, NORMAL) - expected_pdf[index]).abs() <= 3.0e-5);
         }
     }
 }

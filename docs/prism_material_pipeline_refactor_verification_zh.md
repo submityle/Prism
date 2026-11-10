@@ -712,15 +712,62 @@ thin-film/iridescence 与 glint；`evaluate_path` 提供反向半球的粗糙介
 `ReferencePtMaterialAdapter` 的当前行为也已扩大：当活动瓣不止 clearcoat/diffuse 时，
 它把 production `SurfaceSample` 的 metallic/specular、transmission、sheen、subsurface、
 iridescence 与 glint 字段写入 `OpenPbrMaterial`，而不是把它们静默压成 Lambert；仅
-clearcoat/diffuse 输入才走 `Bsdf::ClearcoatDiffuse`。但 adapter 仍明确拒绝
-anisotropy、coat normal/tangent、normal variance、非一 geometry opacity/AO 和 emission，
-且 `SurfaceSample` 本身不携带纹理、动态通道或完整材质提取上下文。
+clearcoat/diffuse 输入才走 `Bsdf::ClearcoatDiffuse`。adapter 明确拒绝
+`anisotropy`/`anisotropy_rotation`、非零 `coat_normal`/`coat_tangent`/
+`coat_roughness_anisotropy`、`normal_variance`，以及非法 finite/range 参数；这些错误分别
+返回 `UnsupportedAnisotropy`、`UnsupportedCoatFrame`、`UnsupportedNormalVariance`、
+`NonFiniteParameter` 或 `ParameterOutOfRange`（clearcoat 粗糙度低于 parity floor 则返回
+`CoatRoughnessBelowParityFloor`）。`emissive`、`geometry_opacity` 与 `ambient_occlusion`
+不会被拒绝，也不会混入 BRDF，而是由 adapter 独立保存供 integrator/coverage 消费；这不
+代表 reference integrator 已完成 emission、AO 或 coverage 与 realtime GPU 主链的 parity。
+`SurfaceSample` 本身仍不携带纹理、动态通道或完整材质提取上下文。
 
 因此当前裁决是：**reference 响应实现已存在，受限 adapter CPU parity 已存在；完整
 realtime/reference parity 尚未验收**。已有 EON/clearcoat 直光对拍、采样/PDF 与白炉门禁
 不能上推为 metallic/transmission/SSS 等每一瓣的实时 GPU 对拍、真实材质提取、多 bounce
 场景图像 parity 或跨 backend parity。7.20 的“当时仍缺多瓣 reference”保留为历史切片，
 不再作为当前代码状态。
+
+### 7.21.2 2026-11-11 OpenPBR 多瓣 path-traced reference parity 切片
+
+本轮只在允许写集内补齐独立 reference 的生产/测试代码与本节记录：
+`pkg/prism_render_architecture/src/reference_pt/openpbr.rs`、
+`pkg/prism_render_shading/src/reference_pt_adapter.rs` 及其 reference/parity tests。
+旧的 clearcoat-only `16×16` fixture 仍保留作历史/局部 coat 契约门禁，但本轮新增的
+OpenPBR 矩阵和场景测试均使用独立名称与输入，不能把两者合并计算。
+
+本轮新增并已在独立 target 验证：
+
+- `openpbr_cpu_golden_matrix_is_distinct_from_clearcoat_fixture`：3 组真正多瓣
+  OpenPBR adapter 输入 × 3 组 view/light 方向，固定 RGB direct response 与 PDF golden；
+- `openpbr_path_golden_matrix_covers_transmission_transport`：3 组反向半球方向，固定 RGB
+  path transport 与 PDF golden；
+- `sample_pdf_and_transport_are_consistent_for_dispersive_multilobe_material`：多瓣
+  mixture sample 的 response、PDF 与 `evaluate_path` 一致，并覆盖反射/透射两侧；
+- `openpbr_multibounce_fixed_scene_image_matches_golden`：floor + back wall + downward
+  emitter 的固定 4×4、16 spp、Halton、固定 seed 场景；重复渲染逐位确定，并与 one-bounce
+  control 比较确认存在可测 indirect contribution。它不是旧 clearcoat-only fixture。
+
+对应命令和结果：
+
+```text
+CARGO_TARGET_DIR=/private/tmp/prism-reference-parity-target CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test -p prism_render_architecture reference_pt::openpbr --lib --jobs 1 -- --nocapture
+10 passed; 0 failed
+
+CARGO_TARGET_DIR=/private/tmp/prism-reference-parity-target CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test -p prism_render_shading reference_pt_adapter --lib --jobs 1 -- --nocapture
+18 passed; 0 failed
+```
+
+透射语义现在由 direct/path 两条明确契约共同覆盖：per-channel dispersion 与 Abbe number
+参与 Fresnel、path IOR 和 direction proposal；thickness 参与介质衰减；`thin_walled` 跳过
+体积衰减与 in-volume scatter；transmission scatter 使用归一化 Henyey–Greenstein phase。
+direct `evaluate` 是 front-facing slab 的 `R + T` 响应，path `evaluate_path` 是反向半球
+BTDF 事件，不重复加入反射 slab 分支。
+
+本切片仍不宣称 realtime GPU ↔ reference image parity、GPU/backend/cross-adapter parity，
+也不覆盖纹理、动态通道、真实材质提取/打包、anisotropic base/coat frame/normal variance
+或完整生产 integrator 的 emission/AO/coverage 组合。reference 实现存在、多瓣 CPU golden
+通过与 realtime GPU parity 是三个独立结论。
 
 ### 7.22 2026-11-10 GI 次级命中 evaluator 消费契约（历史快照；当前修正见下文）
 
