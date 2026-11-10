@@ -21,7 +21,9 @@ import prism_render_app::shaders::brdf::{
     SurfaceSample,
     principled_direct_channels_with,
     principled_pre,
+    stylized_direct,
 };
+import prism_render_app::shaders::lighting::StylizedParams;
 import prism_render_material::shaders::material_virtual_texture::{
     MaterialVirtualTextureConfig,
     material_vt_atlas_uv,
@@ -38,9 +40,11 @@ const HIT_WORDS: u32 = 32u;
 const HIT_ATTRIBUTE_WORDS: u32 = 40u;
 const MATERIAL_EVALUATOR_ABI_VERSION: u32 = 1u;
 const RESPONSE_PROGRAM_KIND_UNLIT: u32 = 2u;
+const RESPONSE_PROGRAM_KIND_NPR: u32 = 1u;
 const RESPONSE_PROGRAM_KIND_LIT: u32 = 0u;
 const RESPONSE_PROGRAM_KIND_CUSTOM: u32 = 3u;
 const BUILTIN_UNLIT_PROGRAM_ID: u32 = 2u;
+const BUILTIN_NPR_PROGRAM_ID: u32 = 1u;
 const BUILTIN_LIT_PROGRAM_ID: u32 = 0u;
 const TEXTURE_SEMANTIC_BASE_COLOR: u32 = 0u;
 const TEXTURE_SEMANTIC_EMISSIVE: u32 = 1u;
@@ -60,6 +64,26 @@ const MASK_KIND_DYNAMIC_CHANNEL: u32 = 5u;
 const BLEND_DOMAIN_FULL_RADIANCE: u32 = 0u;
 const BLEND_DOMAIN_DIRECT_ONLY: u32 = 1u;
 const BLEND_DOMAIN_CUSTOM_CHANNELS: u32 = 2u;
+const RESPONSE_CHANNEL_DIRECT: u32 = 1u;
+const RESPONSE_CHANNEL_INDIRECT_DIFFUSE: u32 = 2u;
+const RESPONSE_CHANNEL_REFLECTION: u32 = 4u;
+const RESPONSE_CHANNEL_TRANSMISSION: u32 = 8u;
+const RESPONSE_CHANNEL_EMISSION: u32 = 16u;
+const RESPONSE_CHANNEL_RADIANCE: u32 = RESPONSE_CHANNEL_DIRECT
+    | RESPONSE_CHANNEL_INDIRECT_DIFFUSE
+    | RESPONSE_CHANNEL_REFLECTION
+    | RESPONSE_CHANNEL_TRANSMISSION
+    | RESPONSE_CHANNEL_EMISSION;
+const PRISM_LOBE_EMISSION: u32 = 1u;
+const PRISM_LOBE_CLEARCOAT: u32 = 2u;
+const PRISM_LOBE_ANISOTROPY: u32 = 4u;
+const PRISM_LOBE_SHEEN: u32 = 8u;
+const PRISM_LOBE_SUBSURFACE: u32 = 16u;
+const PRISM_LOBE_TRANSMISSION: u32 = 32u;
+const PRISM_LOBE_THIN_FILM: u32 = 64u;
+const PRISM_LOBE_NPR_FACE: u32 = 65536u;
+const PRISM_LOBE_GLINT: u32 = 131072u;
+const PRISM_LOBE_MEASURED_BRDF: u32 = 262144u;
 
 fn finite(value: f32) -> bool {
     return (bitcast<u32>(value) & 0x7f800000u) != 0x7f800000u;
@@ -279,6 +303,18 @@ fn execution_program_at(index: u32) -> ExecutionProgramRow {
     );
 }
 
+fn native_execution_table_is_valid() -> bool {
+    let table_words = arrayLength(&execution_table);
+    let plan_count = evaluator_config.execution_plan_count;
+    let program_count = evaluator_config.execution_program_count;
+    if plan_count > table_words / 8u {
+        return false;
+    }
+    let plan_words = plan_count * 8u;
+    let remaining_words = table_words - plan_words;
+    return program_count <= remaining_words / 5u;
+}
+
 struct TextureSample {
     valid: bool,
     value: vec4<f32>,
@@ -307,6 +343,7 @@ fn invalid_native_response() -> NativeResponse {
     out.value = vec4<f32>(0.0);
     if row.generation == 0u
         || evaluator_config.vt_page_table_word_count == 0u
+        || evaluator_config.vt_page_table_word_count > arrayLength(&material_vt_page_table)
         || !(evaluator_config.vt_generation_low != 0u
             || evaluator_config.vt_generation_high != 0u)
         || material_vt_config.enabled == 0u
@@ -399,15 +436,69 @@ fn invalid_native_response() -> NativeResponse {
 
 @if(MATERIAL_BINDLESS) fn sample_texture_row(row: PrismMaterialTexture, uv: vec2<f32>) -> TextureSample {
     var out: TextureSample;
-    out.valid = row.generation != 0u;
+    out.valid = native_texture_row_binding_is_valid(row);
     out.value = vec4<f32>(0.0);
     if (!out.valid) { return out; }
+    // The shared bindless sampler deliberately falls back to the authored
+    // image when a VT request misses. That policy is valid for the main
+    // surface resolve, but it would hide a stale/mismatched Native GI row.
+    // Native GI therefore admits only rows whose source contract is direct;
+    // a VT row is evaluated by the strict non-bindless path below instead of
+    // silently changing semantic sources.
+    if row.virtual_texture_id != NO_VIRTUAL_TEXTURE { return out; }
     out.value = sample_texture_slot(row, uv, 0.0);
     out.valid = finite(out.value.x)
         && finite(out.value.y)
         && finite(out.value.z)
         && finite(out.value.w);
     return out;
+}
+
+fn native_texture_binding_contract_is_valid() -> bool {
+    @if(MATERIAL_BINDLESS) {
+        // The generation table is the runtime-sized proof for both binding
+        // arrays; the host must publish the same dense capacity in the config.
+        if evaluator_config.texture_slot_count == 0u
+            || evaluator_config.texture_slot_count != arrayLength(&material_texture_generation_table) {
+            return false;
+        }
+    }
+    @if(!MATERIAL_BINDLESS) {
+        // Non-bindless devices have no authored-image arrays. Every authored
+        // row must therefore resolve through the published VT resources.
+        if evaluator_config.texture_slot_count != 0u {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn native_texture_row_binding_is_valid(row: PrismMaterialTexture) -> bool {
+    if row.generation == 0u || row.index == INVALID || row.sampler_index == INVALID {
+        return false;
+    }
+    @if(MATERIAL_BINDLESS) {
+        if row.index >= evaluator_config.texture_slot_count
+            || row.sampler_index >= evaluator_config.texture_slot_count
+            || row.index >= arrayLength(&material_texture_generation_table)
+            || row.sampler_index >= arrayLength(&material_texture_generation_table)
+            || material_texture_generation_table[row.index] != row.generation
+            || material_texture_generation_table[row.sampler_index] != row.generation {
+            return false;
+        }
+    }
+    @if(!MATERIAL_BINDLESS) {
+        // The portable evaluator has no authored-image heap. A non-VT row or
+        // incomplete VT metadata would otherwise be folded through an
+        // identity semantic fallback by the shared sampler.
+        if row.virtual_texture_id == NO_VIRTUAL_TEXTURE
+            || row.virtual_texture_width == 0u
+            || row.virtual_texture_height == 0u
+            || row.virtual_texture_page_size == 0u {
+            return false;
+        }
+    }
+    return true;
 }
 
 fn prism_native_registered_evaluate(
@@ -442,7 +533,12 @@ fn registered_light(lighting: RegisteredLightingContext, index: u32) -> Register
     invalid.visibility = 0.0;
     invalid.valid = 0.0;
     if index >= native_registered_light_count(lighting) { return invalid; }
-    return invalid;
+    return RegisteredLight(
+        native_normalize_or(lighting.frame.normal, vec3<f32>(0.0, 1.0, 0.0)),
+        vec3<f32>(1.0),
+        1.0,
+        1.0,
+    );
 }
 
 fn registered_area(lighting: RegisteredLightingContext, index: u32) -> RegisteredArea {
@@ -462,7 +558,11 @@ fn registered_custom_word(custom: RegisteredCustomData, index: u32) -> u32 {
     return material_parameters[custom.header.parameter_offset + index];
 }
 
-fn native_registered_surface(surface: PrismSurfaceParameters) -> RegisteredSurface {
+fn native_registered_surface(
+    surface: PrismSurfaceParameters,
+    sampled: SampledMaterial,
+    frame: ShadingFrame,
+) -> RegisteredSurface {
     return RegisteredSurface(
         surface.base_color.xyz, surface.base_weight, surface.base_diffuse_roughness,
         surface.base_metalness, surface.specular_roughness, surface.specular_weight,
@@ -473,15 +573,35 @@ fn native_registered_surface(surface: PrismSurfaceParameters) -> RegisteredSurfa
         surface.coat_darkening, surface.subsurface_scatter_anisotropy, surface.ambient_occlusion,
         surface.emission_color.xyz * surface.emission_luminance, surface.coat_weight,
         surface.coat_roughness, surface.coat_ior, surface.coat_color.xyz,
-        vec3<f32>(0.0), surface.coat_roughness_anisotropy, vec3<f32>(0.0),
+        select(
+            vec3<f32>(0.0),
+            native_apply_tangent_normal(sampled.clearcoat_normal_tangent, frame, frame.normal),
+            sampled.has_clearcoat_normal,
+        ),
+        surface.coat_roughness_anisotropy, frame.tangent,
         surface.fuzz_weight, surface.fuzz_roughness, surface.fuzz_color.xyz,
         surface.subsurface_weight, surface.subsurface_color.xyz, surface.subsurface_radius,
         surface.subsurface_radius_scale.xyz, surface.thickness, surface.anisotropy,
-        surface.anisotropy_rotation, 0.0, surface.thin_film_weight,
+        surface.anisotropy_rotation, sampled.offline_normal_variance, surface.thin_film_weight,
         surface.thin_film_thickness * 1000.0, surface.thin_film_ior, surface.glint_weight,
         surface.glint_roughness, surface.glint_density, surface.glint_bin_half_width,
         -1.0, vec2<f32>(0.0), 0.0,
     );
+}
+
+fn native_folded_surface(
+    surface: PrismSurfaceParameters,
+    sampled: SampledMaterial,
+) -> PrismSurfaceParameters {
+    var folded = surface;
+    folded.base_color = vec4<f32>(sampled.base_color, sampled.base_alpha);
+    folded.emission_color = vec4<f32>(sampled.emissive, surface.emission_color.w);
+    folded.base_metalness = sampled.metallic;
+    folded.specular_roughness = sampled.perceptual_roughness;
+    folded.ambient_occlusion = sampled.occlusion;
+    folded.coat_weight = sampled.clearcoat;
+    folded.coat_roughness = sampled.clearcoat_roughness;
+    return folded;
 }
 
 fn native_registered_parameters(surface: PrismSurfaceParameters) -> RegisteredParameters {
@@ -526,35 +646,43 @@ fn native_registered_header(header: PrismMaterialHeader) -> RegisteredHeader {
 
 fn native_registered_response(
     surface: PrismSurfaceParameters,
+    sampled: SampledMaterial,
+    frame_input: ShadingFrame,
     header: PrismMaterialHeader,
-    normal: vec3<f32>,
-    view_direction: vec3<f32>,
     uv: vec2<f32>,
     program_id: u32,
     permutation_low: u32,
     permutation_high: u32,
 ) -> NativeResponse {
     var out = invalid_native_response();
-    let frame = RegisteredFrame(normal, view_direction, vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 1.0));
-    let geometry = RegisteredGeometry(vec3<f32>(0.0), normal, frame.tangent, frame.bitangent, uv, 0u);
+    let folded = native_folded_surface(surface, sampled);
+    let frame = RegisteredFrame(
+        frame_input.normal, frame_input.view, frame_input.tangent, frame_input.bitangent,
+    );
+    let geometry = RegisteredGeometry(
+        vec3<f32>(0.0), frame_input.normal, frame_input.tangent, frame_input.bitangent, uv, 0u,
+    );
     let environment = RegisteredEnvironment(
-        vec3<f32>(0.0), 0u,
+        vec3<f32>(0.0), 1u,
         array<vec4<f32>, 9>(vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0)),
         0u, 0u, 1.0, 0u,
         RegisteredStylizedParams(1u, 0.0, 0.0, 0.5, 0.1, 0.0, 0.5, 0.1, vec3<f32>(1.0), 0.0, vec3<f32>(1.0), 1.0),
     );
     let lighting = RegisteredLightingContext(
-        environment, frame, vec3<f32>(0.0), 0u, 0u, 0u, 0u, 0u,
+        environment, frame, vec3<f32>(0.0), 1u, 0u, 0u, 0u, 0u,
         vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(1.0),
     );
     let view = RegisteredView(
-        view_direction, vec2<u32>(0u), vec2<u32>(0u), 0u,
+        frame_input.view, vec2<u32>(0u), vec2<u32>(0u), 0u,
         mat4x4<f32>(vec4<f32>(1.0, 0.0, 0.0, 0.0), vec4<f32>(0.0, 1.0, 0.0, 0.0), vec4<f32>(0.0, 0.0, 1.0, 0.0), vec4<f32>(0.0, 0.0, 0.0, 1.0)),
         mat4x4<f32>(vec4<f32>(1.0, 0.0, 0.0, 0.0), vec4<f32>(0.0, 1.0, 0.0, 0.0), vec4<f32>(0.0, 0.0, 1.0, 0.0), vec4<f32>(0.0, 0.0, 0.0, 1.0)),
     );
     let custom = RegisteredCustomData(native_registered_header(header), permutation_low, permutation_high);
     let response = prism_native_registered_evaluate(
-        RegisteredSurfaceData(native_registered_surface(surface), frame, geometry, native_registered_parameters(surface)),
+        RegisteredSurfaceData(
+            native_registered_surface(folded, sampled, frame_input), frame, geometry,
+            native_registered_parameters(folded),
+        ),
         lighting, view, custom, program_id, permutation_low, permutation_high,
     );
     let value = response.direct + response.indirect_diffuse + response.reflection
@@ -681,7 +809,47 @@ fn native_surface_sample(
     return surface;
 }
 
+fn native_lobe_mask_is_supported(response_kind: u32, lobe_mask: u32) -> bool {
+    var supported = 0u;
+    if response_kind == RESPONSE_PROGRAM_KIND_UNLIT {
+        supported = PRISM_LOBE_EMISSION;
+    } else if response_kind == RESPONSE_PROGRAM_KIND_NPR {
+        supported = PRISM_LOBE_EMISSION | PRISM_LOBE_NPR_FACE;
+    } else if response_kind == RESPONSE_PROGRAM_KIND_LIT {
+        supported = PRISM_LOBE_EMISSION
+            | PRISM_LOBE_CLEARCOAT
+            | PRISM_LOBE_ANISOTROPY
+            | PRISM_LOBE_TRANSMISSION
+            | PRISM_LOBE_THIN_FILM
+            | PRISM_LOBE_GLINT;
+    } else if response_kind == RESPONSE_PROGRAM_KIND_CUSTOM {
+        supported = PRISM_LOBE_ALL;
+    }
+    return (lobe_mask & ~supported) == 0u;
+}
+
+fn native_response_channels(response_kind: u32) -> u32 {
+    if response_kind == RESPONSE_PROGRAM_KIND_LIT {
+        return RESPONSE_CHANNEL_RADIANCE;
+    }
+    if response_kind == RESPONSE_PROGRAM_KIND_NPR
+        || response_kind == RESPONSE_PROGRAM_KIND_UNLIT {
+        return RESPONSE_CHANNEL_DIRECT | RESPONSE_CHANNEL_EMISSION;
+    }
+    if response_kind == RESPONSE_PROGRAM_KIND_CUSTOM {
+        return RESPONSE_CHANNEL_RADIANCE;
+    }
+    return 0u;
+}
+
+fn native_channels_are_supported(response_kind: u32, channels: u32) -> bool {
+    return channels != 0u
+        && (channels & ~RESPONSE_CHANNEL_RADIANCE) == 0u
+        && (channels & ~native_response_channels(response_kind)) == 0u;
+}
+
 fn native_builtin_response(
+    parameters: PrismSurfaceParameters,
     surface: SurfaceSample,
     alpha: f32,
     frame: ShadingFrame,
@@ -692,8 +860,30 @@ fn native_builtin_response(
         out.direct = surface.base_color;
         out.emission = surface.emissive;
         out.alpha = alpha;
-        out.valid = all(finite3(surface.base_color + surface.emissive))
+        out.valid = finite3(surface.base_color + surface.emissive)
             && out.alpha >= 0.0 && out.alpha <= 1.0;
+        return out;
+    }
+    if response_kind == RESPONSE_PROGRAM_KIND_NPR {
+        var stylized = StylizedParams(
+            4u, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.05,
+            vec3<f32>(1.0), 0.0, vec3<f32>(1.0), 4.0,
+        );
+        stylized.ramp_softness = stylized.ramp_softness
+            * clamp(parameters.npr_stylized_ramp_softness, 0.0, 1.0);
+        stylized.specular_intensity = stylized.specular_intensity
+            * max(parameters.npr_stylized_specular_scale, 0.0);
+        stylized.rim_intensity = stylized.rim_intensity
+            * max(parameters.npr_stylized_rim_scale, 0.0);
+        var direct_surface = surface;
+        direct_surface.emissive = vec3<f32>(0.0);
+        let light = DirectLightSample(frame.normal, vec3<f32>(1.0), 1.0);
+        out.direct = stylized_direct(direct_surface, frame, light, stylized);
+        out.emission = surface.emissive;
+        out.alpha = alpha;
+        let response = out.direct + out.emission;
+        out.valid = finite3(response) && all(response >= vec3<f32>(0.0))
+            && finite(out.alpha) && out.alpha >= 0.0 && out.alpha <= 1.0;
         return out;
     }
     if response_kind != RESPONSE_PROGRAM_KIND_LIT {
@@ -713,7 +903,7 @@ fn native_builtin_response(
     out.emission = surface.emissive;
     out.alpha = alpha;
     let response = out.direct + out.transmission + out.emission;
-    out.valid = all(finite3(response)) && all(response >= vec3<f32>(0.0))
+    out.valid = finite3(response) && all(response >= vec3<f32>(0.0))
         && finite(out.alpha) && out.alpha >= 0.0 && out.alpha <= 1.0;
     return out;
 }
@@ -739,8 +929,7 @@ fn native_execution_program_is_valid(
     permutation_low: u32,
     permutation_high: u32,
 ) -> bool {
-    if program.response_kind == 1u
-        || program.response_kind > RESPONSE_PROGRAM_KIND_CUSTOM
+    if program.response_kind > RESPONSE_PROGRAM_KIND_CUSTOM
         || (program.response_kind == RESPONSE_PROGRAM_KIND_LIT
             && program.program_id != BUILTIN_LIT_PROGRAM_ID)
         || (program.response_kind == RESPONSE_PROGRAM_KIND_UNLIT
@@ -752,6 +941,19 @@ fn native_execution_program_is_valid(
         return false;
     }
     return true;
+}
+
+fn native_execution_arm_is_valid(
+    program: ExecutionProgramRow,
+    permutation_low: u32,
+    permutation_high: u32,
+) -> bool {
+    if program.package_index == INVALID {
+        return false;
+    }
+    return native_execution_program_is_valid(
+        program, program.package_index, permutation_low, permutation_high,
+    );
 }
 
 fn native_arm_response(
@@ -767,18 +969,21 @@ fn native_arm_response(
 ) -> NativeResponse {
     if program.response_kind == RESPONSE_PROGRAM_KIND_CUSTOM {
         return native_registered_response(
-            parameters, header, frame.normal, frame.view, uv, program.program_id,
+            parameters, sampled_surface, frame, header, uv, program.program_id,
             permutation_low, permutation_high,
         );
     }
     if program.response_kind == RESPONSE_PROGRAM_KIND_LIT && program.program_id != BUILTIN_LIT_PROGRAM_ID {
         return invalid_native_response();
     }
+    if program.response_kind == RESPONSE_PROGRAM_KIND_NPR && program.program_id != BUILTIN_NPR_PROGRAM_ID {
+        return invalid_native_response();
+    }
     if program.response_kind == RESPONSE_PROGRAM_KIND_UNLIT && program.program_id != BUILTIN_UNLIT_PROGRAM_ID {
         return invalid_native_response();
     }
     return native_builtin_response(
-        sampled_surface, alpha, frame, program.response_kind,
+        parameters, sampled_surface, alpha, frame, program.response_kind,
     );
 }
 
@@ -812,16 +1017,23 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         || evaluator_config.material_header_count > arrayLength(&material_headers)
         || evaluator_config.parameter_word_count > arrayLength(&material_parameters)
         || evaluator_config.texture_row_count > arrayLength(&material_texture_rows)
-        || evaluator_config.execution_plan_count * 8u
-            + evaluator_config.execution_program_count * 5u > arrayLength(&execution_table)
         || (evaluator_config.vt_page_table_word_count != 0u)
             != (evaluator_config.vt_generation_low != 0u
                 || evaluator_config.vt_generation_high != 0u)
         || (evaluator_config.vt_page_table_word_count != 0u
             && (evaluator_config.vt_page_table_word_count < 4u
-                || (evaluator_config.vt_page_table_word_count & 3u) != 0u))
+                || (evaluator_config.vt_page_table_word_count & 3u) != 0u
+                || evaluator_config.vt_page_table_word_count > arrayLength(&material_vt_page_table)))
         || evaluator_config.flags != 0u
         || any(evaluator_config.padding != vec2<u32>(0u))) {
+        evaluations[ray_index] = result;
+        return;
+    }
+    if !native_texture_binding_contract_is_valid() {
+        evaluations[ray_index] = result;
+        return;
+    }
+    if !native_execution_table_is_valid() {
         evaluations[ray_index] = result;
         return;
     }
@@ -874,7 +1086,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         || (header.parameter_size & 3u) != 0u
         || header.texture_offset > evaluator_config.texture_row_count
         || header.texture_count > evaluator_config.texture_row_count - header.texture_offset
-        || header.texture_offset + header.texture_count > arrayLength(&material_texture_rows)) {
+        || header.texture_offset + header.texture_count > arrayLength(&material_texture_rows)
+        || header.sampler_offset != header.texture_offset
+        || header.sampler_count != header.texture_count
+        || header.sampler_offset > evaluator_config.texture_row_count
+        || header.sampler_count > evaluator_config.texture_row_count - header.sampler_offset
+        || header.sampler_offset + header.sampler_count > arrayLength(&material_texture_rows)) {
         evaluations[ray_index] = result;
         return;
     }
@@ -882,7 +1099,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let plan = execution_plan_at(plan_index);
     if (plan.reserved != 0u
         || plan.execution_family > EXECUTION_FAMILY_COMPOSITION
-        || plan.left_program != program_index
         || plan.left_program >= evaluator_config.execution_program_count
         || (plan.right_program != INVALID && (plan.right_program >= evaluator_config.execution_program_count)
         )
@@ -893,50 +1109,71 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         evaluations[ray_index] = result;
         return;
     }
+    if plan.left_program != program_index && plan.right_program != program_index {
+        evaluations[ray_index] = result;
+        return;
+    }
+
     let program = execution_program_at(program_index);
-    if !native_execution_program_is_valid(program, package_index, permutation_low, permutation_high) {
+    if !native_execution_program_is_valid(program, package_index, permutation_low, permutation_high)
+        || !native_lobe_mask_is_supported(program.response_kind, header.lobe_mask) {
         evaluations[ray_index] = result;
         return;
     }
-    if plan.right_program == INVALID
-        && ((program.response_kind == RESPONSE_PROGRAM_KIND_LIT
+    let left_program = execution_program_at(plan.left_program);
+    if !native_execution_arm_is_valid(left_program, permutation_low, permutation_high)
+        || !native_lobe_mask_is_supported(left_program.response_kind, header.lobe_mask) {
+        evaluations[ray_index] = result;
+        return;
+    }
+    if plan.right_program == INVALID {
+        if plan.execution_family == EXECUTION_FAMILY_COMPOSITION
+            || plan.blended_channels != 0u
+            || plan.mask_kind != 0u
+            || plan.mask_index != 0u
+            || plan.blend_domain != 0u
+            || (left_program.response_kind == RESPONSE_PROGRAM_KIND_LIT
                 && plan.execution_family != EXECUTION_FAMILY_FUSED_BUILTIN)
-            || (program.response_kind == RESPONSE_PROGRAM_KIND_UNLIT
-                && plan.execution_family != EXECUTION_FAMILY_SPLIT_RESPONSE)
-            || (program.response_kind == RESPONSE_PROGRAM_KIND_CUSTOM
-                && plan.execution_family != EXECUTION_FAMILY_SPLIT_RESPONSE)) {
-        evaluations[ray_index] = result;
-        return;
-    }
-    var right_program = program;
-    if (plan.right_program != INVALID) {
-        right_program = execution_program_at(plan.right_program);
-        if !native_execution_program_is_valid(
-            right_program, package_index, permutation_low, permutation_high,
-        ) {
+            || ((left_program.response_kind == RESPONSE_PROGRAM_KIND_NPR
+                || left_program.response_kind == RESPONSE_PROGRAM_KIND_UNLIT
+                || left_program.response_kind == RESPONSE_PROGRAM_KIND_CUSTOM)
+                && plan.execution_family != EXECUTION_FAMILY_SPLIT_RESPONSE) {
             evaluations[ray_index] = result;
             return;
         }
-        let builtin_pair = program.response_kind != RESPONSE_PROGRAM_KIND_CUSTOM
-            && right_program.response_kind != RESPONSE_PROGRAM_KIND_CUSTOM;
-        let both_lit = program.response_kind == RESPONSE_PROGRAM_KIND_LIT
-            && right_program.response_kind == RESPONSE_PROGRAM_KIND_LIT;
-        if ((builtin_pair
-                && ((both_lit && plan.execution_family != EXECUTION_FAMILY_FUSED_BUILTIN)
-                    || (!both_lit && plan.execution_family != EXECUTION_FAMILY_COMPOSITION)))
-            || (!builtin_pair && plan.execution_family != EXECUTION_FAMILY_COMPOSITION)
-            || plan.execution_family == EXECUTION_FAMILY_SPLIT_RESPONSE
-            || plan.blended_channels == 0u || plan.blended_channels > 31u
+    } else {
+        let right_program = execution_program_at(plan.right_program);
+        if !native_execution_arm_is_valid(right_program, permutation_low, permutation_high)
+            || !native_lobe_mask_is_supported(right_program.response_kind, header.lobe_mask)
+            || plan.blended_channels == 0u
+            || (plan.blended_channels & ~RESPONSE_CHANNEL_RADIANCE) != 0u
+            || !native_channels_are_supported(left_program.response_kind, plan.blended_channels)
+            || !native_channels_are_supported(right_program.response_kind, plan.blended_channels)
             || plan.blend_domain > BLEND_DOMAIN_CUSTOM_CHANNELS
-            || plan.mask_kind != MASK_KIND_DYNAMIC_CHANNEL || plan.mask_index > 3u) {
+            || plan.mask_kind != MASK_KIND_DYNAMIC_CHANNEL || plan.mask_index > 3u
+            || plan.execution_family == EXECUTION_FAMILY_SPLIT_RESPONSE {
             evaluations[ray_index] = result;
             return;
         }
-        if (plan.blend_domain == BLEND_DOMAIN_FULL_RADIANCE && plan.blended_channels != 31u) {
+        let builtin_pair = left_program.response_kind != RESPONSE_PROGRAM_KIND_CUSTOM
+            && right_program.response_kind != RESPONSE_PROGRAM_KIND_CUSTOM;
+        let both_lit = left_program.response_kind == RESPONSE_PROGRAM_KIND_LIT
+            && right_program.response_kind == RESPONSE_PROGRAM_KIND_LIT;
+        if (plan.execution_family == EXECUTION_FAMILY_FUSED_BUILTIN
+            && (!builtin_pair || !both_lit))
+            || (plan.execution_family == EXECUTION_FAMILY_COMPOSITION
+                && (builtin_pair && both_lit))
+            || (plan.execution_family != EXECUTION_FAMILY_FUSED_BUILTIN
+                && plan.execution_family != EXECUTION_FAMILY_COMPOSITION) {
             evaluations[ray_index] = result;
             return;
         }
-        if (plan.blend_domain == BLEND_DOMAIN_DIRECT_ONLY && plan.blended_channels != 1u) {
+        if (plan.blend_domain == BLEND_DOMAIN_FULL_RADIANCE
+            && plan.blended_channels != RESPONSE_CHANNEL_RADIANCE)
+            || (plan.blend_domain == BLEND_DOMAIN_DIRECT_ONLY
+                && plan.blended_channels != RESPONSE_CHANNEL_DIRECT)
+            || (plan.blend_domain == BLEND_DOMAIN_CUSTOM_CHANNELS
+                && plan.blended_channels == 0u) {
             evaluations[ray_index] = result;
             return;
         }
@@ -967,7 +1204,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var sampled = sampled_material_defaults(surface);
     for (var row_index = 0u; row_index < header.texture_count; row_index += 1u) {
         let row = material_texture_rows[header.texture_offset + row_index];
-        if !native_texture_semantic_is_supported(row.semantic) {
+        if !native_texture_row_binding_is_valid(row)
+            || !native_texture_semantic_is_supported(row.semantic) {
             // A semantic that this evaluator cannot fold is a missing material
             // input, never an identity/white texture.
             evaluations[ray_index] = result;
@@ -1019,7 +1257,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let sampled_surface = native_surface_sample(surface, sampled, sampled_frame);
     let alpha = clamp(sampled.base_alpha * surface.geometry_opacity, 0.0, 1.0);
     let left = native_arm_response(
-        surface, sampled_surface, header, program, sampled_frame, uv, alpha,
+        surface, sampled_surface, header, left_program, sampled_frame, uv, alpha,
         permutation_low, permutation_high,
     );
     if !left.valid {
@@ -1028,6 +1266,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     var response = left;
     if plan.right_program != INVALID {
+        let right_program = execution_program_at(plan.right_program);
         let right = native_arm_response(
             surface, sampled_surface, header, right_program, sampled_frame, uv, alpha,
             permutation_low, permutation_high,

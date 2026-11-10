@@ -17,8 +17,9 @@ use prism_render_architecture::lighting::raygen::{
     append_surface_gi_rays, GiRay, SurfaceRayGenInput,
 };
 use prism_render_architecture::ray_scene::{
-    GpuBvhBuffers, NativeGiMaterialEvaluationRecord, NativeGiMaterialEvaluatorConfig,
-    RayHitAttributeRecord, RayHitMaterialSnapshot, NATIVE_GI_MATERIAL_EVALUATOR_ABI_VERSION,
+    native_material_evaluator::native_gi_texture_row_is_valid, GpuBvhBuffers,
+    NativeGiMaterialEvaluationRecord, NativeGiMaterialEvaluatorConfig, RayHitAttributeRecord,
+    RayHitMaterialSnapshot, NATIVE_GI_MATERIAL_EVALUATOR_ABI_VERSION,
     NATIVE_GI_MATERIAL_EVALUATOR_CONFIG_WORDS, NODE_WORDS, TRIANGLE_WORDS,
 };
 use prism_render_driver as rhi;
@@ -685,6 +686,14 @@ impl NativeGiMaterialEvaluatorInput {
             return Err(TraceGpuError::InvalidMaterialEvaluator);
         }
         if self.material_texture_rows.size_bytes < required_texture_bytes {
+            return Err(TraceGpuError::InvalidMaterialTextureRows);
+        }
+        let texture_row_stride =
+            core::mem::size_of::<prism_render_material::GpuMaterialTexture>() as u64;
+        if self.material_texture_rows.size_bytes % texture_row_stride != 0
+            || u64::from(self.config.texture_row_count)
+                > self.material_texture_rows.size_bytes / texture_row_stride
+        {
             return Err(TraceGpuError::InvalidMaterialTextureRows);
         }
         if self
@@ -3611,7 +3620,9 @@ mod tests {
         );
         assert!(
             source.contains("evaluator_config.texture_slot_count == 0u")
-                && source.contains("evaluator_config.texture_slot_count > arrayLength(&material_texture_generation_table)"),
+                && source.contains(
+                    "evaluator_config.texture_slot_count != arrayLength(&material_texture_generation_table)"
+                ),
             "bindless evaluation must require an in-range dense heap"
         );
         assert!(
@@ -3633,9 +3644,26 @@ mod tests {
         assert!(
             source.contains(
                 "@if(MATERIAL_BINDLESS) fn sample_texture_row(row: PrismMaterialTexture, uv: vec2<f32>) -> TextureSample {"
-            ) && source.contains("out.value = sample_texture_slot(row, uv, 0.0);"),
-            "bindless rows must use the published authored-image heap"
+            ) && source.contains("if row.virtual_texture_id != NO_VIRTUAL_TEXTURE { return out; }")
+                && source.contains("out.value = sample_texture_slot(row, uv, 0.0);"),
+            "bindless rows must use only a validated direct authored-image heap"
         );
+        for required in [
+            "native_execution_table_is_valid",
+            "if plan.left_program != program_index && plan.right_program != program_index",
+            "native_execution_arm_is_valid",
+            "native_channels_are_supported(left_program.response_kind, plan.blended_channels)",
+            "if !native_texture_row_binding_is_valid(row)",
+            "row.generation == 0u || row.index == INVALID || row.sampler_index == INVALID",
+            "header.sampler_offset != header.texture_offset",
+            "header.sampler_count != header.texture_count",
+            "supported = PRISM_LOBE_EMISSION | PRISM_LOBE_NPR_FACE",
+        ] {
+            assert!(
+                source.contains(required),
+                "missing evaluator hardening: {required}"
+            );
+        }
     }
 
     #[test]
@@ -3653,8 +3681,9 @@ mod tests {
         let queue = prism_render_driver_null::NullQueue::new();
         let images = crate::RenderAssets::<crate::GpuImage>::new();
         let heap = crate::TextureSlotHeap::new(MATERIAL_TEXTURE_HEAP_CAPACITY);
-        let owner = NativeMaterialTextureBindingOwner::build(device.clone(), &queue, &images, &heap)
-            .expect("the test device publishes the complete dense heap");
+        let owner =
+            NativeMaterialTextureBindingOwner::build(device.clone(), &queue, &images, &heap)
+                .expect("the test device publishes the complete dense heap");
         let slot_count = owner.slot_count();
         let lobe_sample_budget = device.create_buffer(&BufferDescriptor::new(
             32,
@@ -3725,6 +3754,122 @@ mod tests {
         non_bindless.config.texture_slot_count = 0;
         non_bindless.direct_textures = None;
         assert_eq!(non_bindless.validate(false), Ok(()));
+    }
+
+    #[test]
+    fn native_material_evaluator_cpu_texture_row_proof_rejects_stale_resources() {
+        let table = [0, 1, 1, 7, 7, 7];
+        let row = prism_render_material::GpuMaterialTexture::non_virtual(3, 7, 0, 4);
+        assert!(native_gi_texture_row_is_valid(
+            row.index,
+            row.generation,
+            row.sampler_index,
+            table.len() as u32,
+            &table,
+        ));
+
+        let cases = [
+            (
+                u32::MAX,
+                row.generation,
+                row.sampler_index,
+                table.len() as u32,
+                &table[..],
+            ),
+            (
+                row.index,
+                row.generation + 1,
+                row.sampler_index,
+                table.len() as u32,
+                &table[..],
+            ),
+            (
+                row.index,
+                row.generation,
+                u32::MAX,
+                table.len() as u32,
+                &table[..],
+            ),
+            (row.index, row.generation, 2, table.len() as u32, &table[..]),
+            (row.index, row.generation, row.sampler_index, 5, &table[..]),
+            (
+                row.index,
+                row.generation,
+                row.sampler_index,
+                table.len() as u32,
+                &table[..5],
+            ),
+        ];
+        for (index, generation, sampler_index, slot_count, generations) in cases {
+            assert!(!native_gi_texture_row_is_valid(
+                index,
+                generation,
+                sampler_index,
+                slot_count,
+                generations,
+            ));
+        }
+    }
+
+    #[test]
+    fn native_material_evaluator_rejects_misaligned_texture_row_bindings() {
+        let row_bytes = core::mem::size_of::<prism_render_material::GpuMaterialTexture>() as u64;
+        let evaluator = || NativeGiMaterialEvaluatorInput {
+            config: NativeGiMaterialEvaluatorConfig {
+                abi_version: NATIVE_GI_MATERIAL_EVALUATOR_ABI_VERSION,
+                material_epoch_low: 1,
+                execution_table_version: 1,
+                material_header_count: 1,
+                parameter_word_count: 1,
+                texture_row_count: 2,
+                execution_plan_count: 1,
+                execution_program_count: 1,
+                ..NativeGiMaterialEvaluatorConfig::empty()
+            },
+            material_headers: TraceGraphBuffer {
+                id: rhi::BufferId::from_parts(0, 0),
+                size_bytes: core::mem::size_of::<prism_render_material::GpuMaterialHeader>() as u64,
+            },
+            material_parameters: TraceGraphBuffer {
+                id: rhi::BufferId::from_parts(0, 0),
+                size_bytes: 4,
+            },
+            material_texture_rows: TraceGraphBuffer {
+                id: rhi::BufferId::from_parts(0, 0),
+                size_bytes: row_bytes * 2,
+            },
+            execution_plans: TraceGraphBuffer {
+                id: rhi::BufferId::from_parts(0, 0),
+                size_bytes: (EXECUTION_PLAN_ROW_WORDS * 4) as u64,
+            },
+            execution_programs: TraceGraphBuffer {
+                id: rhi::BufferId::from_parts(0, 0),
+                size_bytes: (EXECUTION_PROGRAM_ROW_WORDS * 4) as u64,
+            },
+            execution_plan_rows: Arc::new(vec![[0; EXECUTION_PLAN_ROW_WORDS]]),
+            execution_program_rows: Arc::new(vec![[0; EXECUTION_PROGRAM_ROW_WORDS]]),
+            registered_response_wgsl: Arc::<str>::from(""),
+            vt: None,
+            direct_textures: None,
+            lobe_sample_budget: Some(TraceGraphBuffer {
+                id: rhi::BufferId::from_parts(0, 0),
+                size_bytes: 32,
+            }),
+        };
+
+        let mut too_short = evaluator();
+        too_short.material_texture_rows.size_bytes = row_bytes * 2 - 1;
+        assert_eq!(
+            too_short.validate(false),
+            Err(TraceGpuError::InvalidMaterialTextureRows)
+        );
+
+        let mut misaligned = evaluator();
+        misaligned.material_texture_rows.size_bytes = row_bytes * 2 + 1;
+        assert_eq!(
+            misaligned.validate(false),
+            Err(TraceGpuError::InvalidMaterialTextureRows)
+        );
     }
 
     #[test]

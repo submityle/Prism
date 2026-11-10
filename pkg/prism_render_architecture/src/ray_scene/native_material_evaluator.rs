@@ -68,6 +68,33 @@ pub const NATIVE_GI_SAMPLER_HEAP_BINDING: u32 = u32::MAX;
 /// See [`NATIVE_GI_TEXTURE_HEAP_BINDING`]. Row generations are carried inline.
 pub const NATIVE_GI_TEXTURE_GENERATIONS_BINDING: u32 = u32::MAX;
 
+/// Returns whether one authored texture row names the exact texture/sampler
+/// generation published for the evaluator dispatch.
+///
+/// This is the CPU contract twin of the Native evaluator's WGSL row check.
+/// `generation_table` is indexed by both the texture and sampler indices; a
+/// row is never authorized by index bounds alone because a recycled slot must
+/// not silently sample a different resource.
+#[must_use]
+pub fn native_gi_texture_row_is_valid(
+    index: u32,
+    generation: u32,
+    sampler_index: u32,
+    slot_count: u32,
+    generation_table: &[u32],
+) -> bool {
+    if generation == 0 || slot_count == 0 || generation_table.len() != slot_count as usize {
+        return false;
+    }
+    let Some(texture_generation) = generation_table.get(index as usize) else {
+        return false;
+    };
+    let Some(sampler_generation) = generation_table.get(sampler_index as usize) else {
+        return false;
+    };
+    *texture_generation == generation && *sampler_generation == generation
+}
+
 /// Configuration stamped beside the resources of one coherent material frame.
 ///
 /// All counts are logical element/word counts, not allocation capacities. The
@@ -450,6 +477,19 @@ mod tests {
             config.validate(),
             Err(NativeGiMaterialEvaluatorConfigError::IncompleteTextureOrVtState)
         );
+    }
+
+    #[test]
+    fn texture_row_proof_rejects_generation_index_and_sampler_mismatches() {
+        let table = [0, 1, 1, 7, 7, 7];
+        assert!(native_gi_texture_row_is_valid(3, 7, 4, 6, &table));
+        assert!(!native_gi_texture_row_is_valid(3, 8, 4, 6, &table));
+        assert!(!native_gi_texture_row_is_valid(u32::MAX, 7, 4, 6, &table));
+        assert!(!native_gi_texture_row_is_valid(3, 7, u32::MAX, 6, &table));
+        assert!(!native_gi_texture_row_is_valid(3, 7, 2, 6, &table));
+        assert!(!native_gi_texture_row_is_valid(3, 7, 4, 5, &table));
+        assert!(!native_gi_texture_row_is_valid(3, 7, 4, 6, &table[..5]));
+        assert!(!native_gi_texture_row_is_valid(3, 0, 4, 6, &table));
     }
 
     #[test]
