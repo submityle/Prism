@@ -4,6 +4,22 @@
 
 > **2026-11-09 目标边界（当前权威）**：本系列的目标实现与验收只走 Prism 原生 prism_render_app、Prism RHI 和 prism_render_graph/RenderGraph。Bevy、Bevy RenderApp、prism_render_scene 的 Bevy 集成路径、SceneRhi 与 legacy-bevy 均为历史记录或排除项，不是当前实现前提，也不构成当前验收证据。下文保留这些名称时，仅表示历史证据、对照或明确排除的路线；原生全帧证据必须来自同一 Prism RHI 设备与原生 RenderGraph 的真实调用链。
 
+## 当前审计结论（2026-11-10，native Prism）
+
+本篇的“已完成”只指当前 checkout 中有源码和相匹配的 native Prism 证据；契约、CPU 单测、null backend、Bevy/SceneRhi 历史记录不能升级为 native 全帧完成。
+
+**已确认的 native 证据**：
+
+- Surface/schema、Rust/WESL mirror、`ShadingPlan`、execution binding 以及 native lobe-budget ABI 有源码和定向契约测试；`lighting_gpu::composite_contract_tests::lobe_budget_native_uniform_matches_the_wesl_eight_word_abi` 已通过。
+- 同一 Prism RHI 设备上的 `physical_gpu_surface_encode_gbuffer_readback_and_composite_close_the_contract` 有 Metal 局部 GBuffer/composite readback 通过记录。这只证明该局部 producer/consumer 合同，不证明材质网格输出或完整帧。
+- native RenderApp 的 prepare/graph record/submit/completion 及失败关闭语义有实现和生命周期测试；这仍不是非空场景的视觉验收。
+
+**当前明确未完成/未证实**：
+
+- Metal native 非空 draw readback 仍失败：`tests::the_frame_draws_a_queued_mesh_on_a_gpu` 与 `tests::the_spine_draws_the_visible_set_on_a_gpu` 的统计都显示 draw 已记录，但目标纹理 readback 仍为全黑，分别没有得到测试期望的红色/白色中心像素。不能把 draw 计数当成像素输出完成。
+- `pkg/prism_render_app/tests/native_full_frame_acceptance.rs` 的 `native_app_update_drives_full_frame_and_fail_closed_recovery` 使用 `DeferredInstance`、`NullAdapter`/`NullDevice`/`NullQueue`，只生成没有可渲染对象的相机；源码明确断言 `draws_queued == 0`、`draws_recorded == 0`。它只证明空/null fixture 的提交、失败和恢复语义。
+- 因而 native 材质/网格/PSO/bind-group 到真实输出、统一全帧、多域 fan-out、设备丢失/resize/退休、第二 physical adapter、图像 parity 及 P50/P95/P99 性能仍未完成。Bevy、SceneRhi、CPU 或 null 证据均不计入这些条目。
+
 ## 0. 一句话
 
 Prism 的材质链路是：

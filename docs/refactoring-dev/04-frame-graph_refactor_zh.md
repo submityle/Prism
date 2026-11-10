@@ -2,6 +2,14 @@
 
 > **2026-11-09 目标边界（当前权威）**：Frame Graph 的目标实现与验收只走 Prism 原生 prism_render_app、Prism RHI 与唯一的 prism_render_graph/RenderGraph。Bevy、Bevy RenderApp、prism_render_scene 的 Bevy 集成路径、SceneRhi 与 legacy-bevy 是历史/排除项，不是 31-pass 生产入口、资源导入或 GPU 验收前提。所有未完成项按原生 compile → prepare → record → submit → completion 重新核验。
 
+## 当前审计结论（2026-11-10，native Prism）
+
+**已确认**：`prism_render_graph` 的声明/compile/prepare/execute 以及 native RenderApp 的 graph record/submit/completion 和失败关闭语义有当前源码证据；Metal 上 GBuffer encode/readback/composite 的局部图合同已通过。`passes_declared > 0` 只说明图被声明，不能替代真实非空 draw 的像素结果。
+
+**当前未完成**：Metal 上 `tests::the_frame_draws_a_queued_mesh_on_a_gpu` 与 `tests::the_spine_draws_the_visible_set_on_a_gpu` 均出现 draw 已记录但 readback 全黑，native graph 到真实 mesh/material output 仍未闭合。`pkg/prism_render_app/tests/native_full_frame_acceptance.rs` 的全帧名称容易误导：它使用 `DeferredInstance` 的 `NullAdapter`/`NullDevice`/`NullQueue`，相机没有可渲染对象，并断言 `draws_queued == 0`、`draws_recorded == 0`；它只覆盖空/null 的 lifecycle 和 fail-closed recovery。
+
+因此，文中 8 + 23 = 31 的 inventory、CPU graph tests、Bevy/SceneRhi 记录和 null fixture 不得写成 native 31-pass GPU 全帧完成。当前仍缺统一 native 非空场景的完整 pass 调度、所有资源导入与绑定、真实输出/readback、全域 fan-out、completion-gated retirement、第二 physical adapter、图像 parity 与 P50/P95/P99。
+
 > 文档口径：以当前源码、测试和已合入历史为准的实现审计。本文描述统一编译内核、shading graph 拓扑、生成式后处理清单和调度边界。
 > 上层导航：[`00-overview_refactor_zh.md`](00-overview_refactor_zh.md)
 > 相关文档：[`02-response-composition_refactor_zh.md`](02-response-composition_refactor_zh.md)、[`03-shader-package_refactor_zh.md`](03-shader-package_refactor_zh.md)

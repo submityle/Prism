@@ -2,6 +2,16 @@
 
 > **2026-11-09 目标边界（当前权威）**：当前目标只走 Prism 原生 prism_render_app、Prism RHI 与 prism_render_graph/RenderGraph。Bevy、Bevy RenderApp、prism_render_scene 的 Bevy 集成路径、SceneRhi 与 legacy-bevy 均为历史/排除项；它们不能作为当前 Fabric 实现或验收前提。原生全场景统一 recorder 与完整验收仍未闭合。
 
+## 当前审计结论（2026-11-10，native Prism）
+
+本篇的 Render Fabric 完成度必须按 native Prism 单独记账；Bevy/SceneRhi/`legacy-bevy` 的 owner、recorder、fixture、CPU compiler 或历史 GPU 记录不计入当前目标。
+
+**当前已确认的 native 范围**：Prism 原生 RenderApp、RHI、RenderGraph 的资源/帧生命周期与失败关闭语义存在；Surface/response/composite 的 ABI、契约和局部 Metal GBuffer/composite readback 有证据。它们是局部基础，不是 Render Fabric 全场景完成。
+
+**当前硬失败与空 fixture**：Metal native 非空 draw readback 中，`tests::the_frame_draws_a_queued_mesh_on_a_gpu` 与 `tests::the_spine_draws_the_visible_set_on_a_gpu` 均报告 draw 已记录，但目标纹理 readback 全黑，不能把 draw count 当作真实输出。`pkg/prism_render_app/tests/native_full_frame_acceptance.rs` 使用 `DeferredInstance`、`NullAdapter`/`NullDevice`/`NullQueue`，只放入没有 renderable object 的相机，并断言 `draws_queued == 0`、`draws_recorded == 0`；它验证的是空/null 提交、未完成 submission、失败和恢复，不是全帧视觉验收。
+
+**仍未完成**：native 的 material/mesh/shader package/PSO/bind-group 到非空像素的完整链路；统一全场景 recorder、真实 31-pass 等价入口、Surface/Particle/Water/Volume/Hair/Decal 等域的同帧资源导入与多视图 fan-out；设备丢失/resize/资源退休；第二 physical adapter；全帧图像 parity、资源峰值/队列等待/吞吐及 P50/P95/P99。后文的局部契约和历史切片必须保持“局部/历史/排除”标签，不得表述为整个 Render Fabric 或重构系统已完成。
+
 > 状态：Render Fabric 目标规范与实现证据审计（允许破坏性重构，不保留旧 API）；2026-11-09：Bevy RenderApp/SceneFabric/SceneRhi 接线已归档为历史/排除项，不再作为目标实现或验收前提；当前只以 Prism 原生 prism_render_app、Prism RHI 与 prism_render_graph/RenderGraph 判断，原生全场景统一 recorder 与完整验收仍未闭合
 > 上层导航：[`00-overview_refactor_zh.md`](00-overview_refactor_zh.md)
 > 范围：六层渲染装配与四个权威的职责切分、三个正交轴的术语收敛（`RenderDomain` / `ResponseProgram` / `ExecutionFamily`）、特性的三层声明（`FeatureDefinition` / `FeatureVariant` / `PassTemplate`）、变体的确定性选择规则、语义 ID 与帧图 ID 的分离（`ResourceKey` / `ResourceId`）、`ResourceUse` 的完整访问描述、服务依赖的两层模型与服务提供者校验、`FeatureCatalog`、`FrameRenderItem` 与域负载、三份并行服务集与两份 `ShadingFrontend` 的删除、跨子系统回边的一帧延迟契约

@@ -2,6 +2,14 @@
 
 > **2026-11-09 目标边界（当前权威）**：Surface ABI 的目标消费者是 Prism 原生 prism_render_app、Prism RHI 与 prism_render_graph。Bevy、Bevy RenderApp、prism_render_scene 的 Bevy 集成路径、SceneRhi 与 legacy-bevy 只作为历史/排除项保留；它们不作为 ABI 实现、资源提供者或验收前提。当前未完成项必须按原生提取、绑定、RenderGraph 编译/录制/提交和 GPU 证据重新列出。
 
+## 当前审计结论（2026-11-10，native Prism）
+
+**已完成的范围**：`surface.toml` → Rust/WESL codegen、Surface mirror、header dense execution binding、lobe/slot/word 校验和 native lobe-budget 32-byte uniform ABI 有当前源码与定向契约证据。Metal 上 GBuffer encode/readback/composite 的局部 native 合同也有通过记录。
+
+**尚未完成的范围**：ABI 对齐不等于真实材质输出。Metal 上 `tests::the_frame_draws_a_queued_mesh_on_a_gpu` 与 `tests::the_spine_draws_the_visible_set_on_a_gpu` 都出现 `draws_recorded == 1` 但目标纹理 readback 全黑的结果；因此 mesh vertex/material binding、PSO、bind group 到最终像素的 native 消费链仍未闭合。`native_full_frame_acceptance.rs` 使用 `DeferredInstance` 和 Null backend，并且是无 renderable object 的空相机 fixture（`draws_queued == 0`、`draws_recorded == 0`），不能作为 ABI 的硬件材质输出证据。
+
+本篇后文的 schema、layout、CPU mirror、null/contract 测试继续作为局部证据记录；不得把它们或 Bevy/SceneRhi 路径写成 native full-frame、跨适配器或图像 parity 完成。剩余项包括真实非空材质/网格 ABI 消费、全帧资源绑定和 completion/resize/device-loss 语义，以及第二 physical adapter 与性能分位数。
+
 > 本文记录当前 Surface ABI 的真源、字段边界、身份语义和可复现门禁。响应程序与组合规则见 [`02-response-composition_refactor_zh.md`](02-response-composition_refactor_zh.md)。
 
 ## 1. ABI 真源与职责
