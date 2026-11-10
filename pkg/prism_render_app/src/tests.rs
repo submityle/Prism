@@ -61,9 +61,9 @@ use prism_render_architecture::shader_package::{
 use prism_render_architecture::view_family::ViewKind;
 use prism_render_material::{
     fallback_material_record, material_pipeline_state, BuiltinProgram, ChannelMask, CompiledEntry,
-    GpuSurfaceParameters, MaterialBlendMode, MaterialDepthTest, MaterialExecutionTables,
-    MaterialRegistry, MaterialRenderClass, MaterialRenderPhase, MaterialRenderTarget, ProgramRef,
-    RenderDomain, ShadingPlan,
+    GpuSurfaceParameters, MaterialBlendMode, MaterialDepthTest, MaterialExecutionBinding,
+    MaterialExecutionTables, MaterialRegistry, MaterialRenderClass, MaterialRenderPhase,
+    MaterialRenderTarget, ProgramRef, RenderDomain, ShadingPlan,
 };
 use prism_render_shading::{
     evaluate_principled_direct, surface_sample_from_parameters, DirectLightSample, ShadingFrame,
@@ -193,12 +193,12 @@ fn evaluate_principled_gpu_oracle(
     radiance
 }
 
-/// Builds the smallest real material/execution snapshot that the production
-/// identity and composite passes accept.  The permanent fallback row is
-/// intentionally unbound, so a lighting fixture must use a published row with
-/// a verified builtin-Lit execution tuple rather than pretending slot zero is
-/// shadeable.
-fn lighting_test_material_registry() -> MaterialRegistry {
+/// Builds the smallest verified builtin execution table used by native
+/// production-frame fixtures. The table is shared by the material registry and
+/// the identity/composite inputs so their dense indices cannot drift.
+fn lighting_test_execution_tables(
+    program_kind: BuiltinProgram,
+) -> (MaterialExecutionTables, MaterialExecutionBinding) {
     use prism_render_architecture::{
         abi::{AbiHash, AbiVersion},
         shader_package::{
@@ -244,7 +244,7 @@ fn lighting_test_material_registry() -> MaterialRegistry {
         .expect("lighting fixture package registers");
     let program = tables
         .register_program(
-            ProgramRef::Builtin(BuiltinProgram::Lit),
+            ProgramRef::Builtin(program_kind),
             &compiled,
             package,
             ModuleId(0),
@@ -253,10 +253,13 @@ fn lighting_test_material_registry() -> MaterialRegistry {
         .expect("lighting fixture builtin program registers");
     let plan = tables
         .register_plan(
-            ShadingPlan::single_builtin(BuiltinProgram::Lit),
+            ShadingPlan::single_builtin(program_kind),
             program,
             None,
-            ExecutionFamily::FusedBuiltin,
+            match program_kind {
+                BuiltinProgram::Lit => ExecutionFamily::FusedBuiltin,
+                BuiltinProgram::Npr | BuiltinProgram::Unlit => ExecutionFamily::SplitResponse,
+            },
             ChannelMask::default(),
         )
         .expect("lighting fixture builtin plan registers");
@@ -264,6 +267,16 @@ fn lighting_test_material_registry() -> MaterialRegistry {
         .bind_raw(plan.get(), program.get(), package.get(), 0)
         .expect("lighting fixture binding validates");
 
+    (tables, binding)
+}
+
+/// Builds the smallest real material/execution snapshot that the production
+/// identity and composite passes accept. The permanent fallback row is
+/// intentionally unbound, so a lighting fixture must use a published row with
+/// a verified builtin-Lit execution tuple rather than pretending slot zero is
+/// shadeable.
+fn lighting_test_material_registry() -> MaterialRegistry {
+    let (tables, binding) = lighting_test_execution_tables(BuiltinProgram::Lit);
     let mut registry = MaterialRegistry::new(2);
     let handle = registry
         .allocate()
@@ -2145,6 +2158,41 @@ fn install_lighting_test_material_tables(app: &mut App) {
         .expect("the fallback material accepts the canonical execution table");
 }
 
+/// Rebinds the real scene fixture to one published builtin-Lit row before the
+/// production frame runs. The visibility scene, SceneRegistry and material ABI
+/// must carry the same handle and revision or queue admission correctly fails
+/// closed before the identity pass can shade the GBuffer pixel.
+fn install_native_builtin_scene_material(app: &mut App, program_kind: BuiltinProgram) {
+    let handle = GenerationalHandle::new(2, 1);
+    let mut record = fallback_material_record(handle, 2);
+    record.response_plan = ShadingPlan::single_builtin(program_kind);
+    record.surface.base_color = [1.0; 4];
+
+    app.world_mut()
+        .resource_mut::<crate::visibility::PrismRenderScene>()
+        .insert_material(record.clone());
+
+    let (tables, binding) = lighting_test_execution_tables(program_kind);
+    let render = app.sub_app_mut(RenderApp).expect("the render sub-app");
+    render
+        .world
+        .resource_mut::<SceneRegistry>()
+        .insert_material(record.clone());
+    let materials = render.world.resource_mut::<RenderMaterials>();
+    materials
+        .registry_mut()
+        .install_execution_tables(&tables)
+        .expect("native scene fixture tables install");
+    materials
+        .registry_mut()
+        .publish(record)
+        .expect("native scene fixture material republishes");
+    materials
+        .registry_mut()
+        .set_execution_binding(handle, binding)
+        .expect("native scene fixture binding installs");
+}
+
 #[test]
 fn lighting_extraction_does_not_create_a_missing_canonical_scene() {
     let mut app = app_on_null_backend(RenderAppConfig::new(EXTENT));
@@ -2315,10 +2363,9 @@ pub(super) fn write_lighting_test_gbuffer_pixel(
             (1.0 - oct[0].abs()) * if oct[1] >= 0.0 { 1.0 } else { -1.0 },
         ];
     }
-    let sampled_material_c =
-        (u32::from(((oct[0] * 0.5 + 0.5) * 255.0).round() as u8)
-            | (u32::from(((oct[1] * 0.5 + 0.5) * 255.0).round() as u8) << 8)
-            | (255_u32 << 24))
+    let sampled_material_c = (u32::from(((oct[0] * 0.5 + 0.5) * 255.0).round() as u8)
+        | (u32::from(((oct[1] * 0.5 + 0.5) * 255.0).round() as u8) << 8)
+        | (255_u32 << 24))
         .to_le_bytes();
     upload(target.surface_material_c_texture(), &sampled_material_c);
     surface
@@ -7034,7 +7081,7 @@ fn plugin_bridges_device_loss_to_the_app_event() {
         "the bridge drains the signal (no loss reported since)"
     );
 }
-/// The spine draws on hardware: a mesh prepared into GPU buffers is queued as a
+/// A native scene mesh draws on hardware: a mesh prepared into GPU buffers is queued as a
 /// phase item, the frame's opaque pass records it with the layout the mesh
 /// derived, and the pixels land where the mesh's vertices say.
 ///
@@ -7141,7 +7188,9 @@ fn the_frame_draws_a_queued_mesh_on_a_gpu() {
                 draw: crate::draw::canonical::MESH_UNBOUND,
                 geometry: GenerationalHandle::new(1, 1),
                 vertices,
-                vertex_sizes: vec![index_count as u64 * 4],
+                // The bound range covers all four vertices referenced by the
+                // indexed quad; index count is not a vertex-buffer byte size.
+                vertex_sizes: vec![4 * core::mem::size_of::<[f32; 3]>() as u64],
                 indices: Some((indices, prism_render_driver::IndexFormat::Uint16)),
                 index_size: Some(index_count as u64 * 2),
                 first: 0,
@@ -7187,8 +7236,8 @@ fn the_frame_draws_a_queued_mesh_on_a_gpu() {
     );
     assert_eq!(
         pixel(0, 0),
-        [0.0, 0.0, 0.0, 1.0],
-        "outside the quad the frame's clear is what remains"
+        [0.0, 0.0, 0.0, 0.0],
+        "outside the quad the frame's transparent clear is what remains"
     );
 }
 /// Stable identifiers for the real camera/renderable queue fixture.
@@ -7280,7 +7329,14 @@ pub(super) fn queue_scene_fixture(app: &mut App) -> GenerationalHandle {
                 fallback: true,
             }],
         });
-        scene.insert_material(prism_render_material::fallback_material_record(material, 1));
+        let mut material_record = prism_render_material::fallback_material_record(material, 1);
+        // Keep this raster acceptance fixture independent of scene lighting:
+        // the assertion is about mesh/material binding and pixel coverage.
+        material_record.response_plan = prism_render_material::ShadingPlan::single_builtin(
+            prism_render_material::BuiltinProgram::Unlit,
+        );
+        material_record.surface.base_color = [1.0; 4];
+        scene.insert_material(material_record);
     }
     let mut camera = crate::visibility::PrismCamera::new(Mat4::IDENTITY, [0, 0, 8, 8]);
     camera.layer_mask = 1;
@@ -7342,7 +7398,12 @@ pub(super) fn queue_scene_fixture(app: &mut App) -> GenerationalHandle {
                 fallback: false,
             }],
         });
-        registry.insert_material(prism_render_material::fallback_material_record(material, 1));
+        let mut material_record = prism_render_material::fallback_material_record(material, 1);
+        material_record.response_plan = prism_render_material::ShadingPlan::single_builtin(
+            prism_render_material::BuiltinProgram::Unlit,
+        );
+        material_record.surface.base_color = [1.0; 4];
+        registry.insert_material(material_record);
         registry.bind_geometry_mesh(geometry, mesh_id);
     }
     {
@@ -7357,8 +7418,13 @@ pub(super) fn queue_scene_fixture(app: &mut App) -> GenerationalHandle {
             .allocate()
             .expect("the material fixture has room for the scene slot");
         assert_eq!(published, material);
+        let mut material_record = prism_render_material::fallback_material_record(material, 1);
+        material_record.response_plan = prism_render_material::ShadingPlan::single_builtin(
+            prism_render_material::BuiltinProgram::Unlit,
+        );
+        material_record.surface.base_color = [1.0; 4];
         materials
-            .publish(prism_render_material::fallback_material_record(material, 1))
+            .publish(material_record)
             .expect("the scene material publishes into the canonical registry");
     }
     render
@@ -7770,7 +7836,7 @@ fn the_queue_stage_keeps_valid_camera_when_another_camera_is_invalid() {
 /// specialized, and the pixels land in the frame target — no test pushing items
 /// into the queue and no test registering a mesh class by hand.
 #[test]
-fn the_spine_draws_the_visible_set_on_a_gpu() {
+fn native_scene_mesh_draws_the_visible_set_on_a_gpu() {
     const SIZE: u32 = 8;
     let extent = Extent3d::new_2d(SIZE, SIZE);
     if RenderRuntime::<prism_render_driver_wgpu::WgpuInstance>::wgpu(extent).is_err() {
@@ -7802,24 +7868,157 @@ fn the_spine_draws_the_visible_set_on_a_gpu() {
         "the draw completes on the GPU"
     );
 
-    let target = *render.world.resource::<RenderTarget>();
+    // Camera-local graph targets are distinct from the legacy/manual target;
+    // inspect the target that actually consumed this camera's queue.
+    let target = *render
+        .world
+        .resource::<crate::surface_view_targets::SurfaceViewTargets<
+            prism_render_driver_wgpu::WgpuDevice,
+        >>()
+        .iter(runtime.runtime())
+        .next()
+        .map(|(_, target)| target)
+        .expect("the camera graph owns a native target");
     let pixels = runtime
         .runtime()
         .queue()
         .read_texture_rgba16f(target.texture(), SIZE, SIZE)
         .expect("visible mesh HDR target readback must complete");
+    let normals = runtime
+        .runtime()
+        .queue()
+        .read_texture_rgba16f(target.normal_texture(), SIZE, SIZE)
+        .expect("visible mesh normal readback must complete");
+    let albedo = runtime
+        .runtime()
+        .queue()
+        .read_texture_rgba8(target.albedo_texture(), SIZE, SIZE)
+        .expect("visible mesh albedo readback must complete");
     assert_eq!(pixels.len(), (SIZE * SIZE) as usize);
+    assert_eq!(normals.len(), (SIZE * SIZE) as usize);
+    assert_eq!(albedo.len(), (SIZE * SIZE * 4) as usize);
     let pixel = |x: u32, y: u32| pixels[(y * SIZE + x) as usize];
+    let normal = |x: u32, y: u32| normals[(y * SIZE + x) as usize];
+    let albedo_pixel = |x: u32, y: u32| {
+        let start = (y * SIZE + x) as usize * 4;
+        [
+            albedo[start],
+            albedo[start + 1],
+            albedo[start + 2],
+            albedo[start + 3],
+        ]
+    };
     assert_eq!(
-        pixel(SIZE / 2, SIZE / 2),
-        [1.0; 4],
-        "the visible mesh was drawn (the spine's flat pipeline)"
+        normal(SIZE / 2, SIZE / 2),
+        [0.0, 0.0, 1.0, 1.0],
+        "the visible mesh wrote its native geometry GBuffer"
+    );
+    assert_eq!(
+        albedo_pixel(SIZE / 2, SIZE / 2),
+        [255, 255, 255, 255],
+        "the visible mesh wrote its native material GBuffer"
     );
     assert_eq!(
         pixel(0, 0),
-        [0.0, 0.0, 0.0, 1.0],
-        "outside the mesh the frame's clear remains"
+        [0.0, 0.0, 0.0, 0.0],
+        "without a lighting/composite producer the HDR target remains transparent"
     );
+}
+
+/// The production native frame must carry the same material/VT snapshot from
+/// extraction through Surface identity reconstruction and the final composite.
+/// This is separate from the GBuffer-only scene test so a transparent HDR clear
+/// cannot masquerade as a successful final-frame response.
+#[test]
+fn native_scene_mesh_reaches_composite_hdr_on_a_gpu() {
+    const SIZE: u32 = 8;
+    let extent = Extent3d::new_2d(SIZE, SIZE);
+    if RenderRuntime::<prism_render_driver_wgpu::WgpuInstance>::wgpu(extent).is_err() {
+        assert!(
+            !require_gpu(),
+            "PRISM_REQUIRE_GPU is set but no adapter was found"
+        );
+        return;
+    }
+
+    let mut app = App::new();
+    app.add_plugins(PrismRenderPlugin::with_config(
+        prism_render_driver_wgpu::WgpuInstance::new(),
+        RenderAppConfig::new(extent),
+    ));
+    queue_scene_fixture(&mut app);
+    // Keep this smoke test independent of scene-light authoring: Unlit must
+    // produce authored radiance while still traversing identity and composite.
+    install_native_builtin_scene_material(&mut app, BuiltinProgram::Unlit);
+    app.world_mut()
+        .insert_resource(crate::LightingLightScene::default());
+    {
+        let inputs = app.world_mut().resource_mut::<LightingSceneInputs>();
+        inputs.surfaces = vec![LightingSurfaceInput {
+            position: [0.0, 0.0, 0.0],
+            normal: [0.0, 0.0, 1.0],
+            albedo: [1.0; 3],
+            ambient: [0.0; 3],
+        }];
+        // queue_scene_fixture publishes the material into canonical slot 2;
+        // the identity pass must consume the same explicit mapping.
+        inputs.surface_material_indices = vec![2];
+        inputs.gi_candidates = vec![Vec::new()];
+        inputs.mark_changed(1, ChangeFields::LIGHTING);
+    }
+
+    app.update();
+
+    let render = app.get_sub_app(RenderApp).expect("the render sub-app");
+    let stats = render.world.resource::<RenderFrameStats>();
+    assert_eq!(stats.draws_queued, 1);
+    assert_eq!(stats.draws_recorded, 1);
+    assert!(
+        stats.lighting_gpu_passes_recorded > 0,
+        "the production frame did not record its identity/composite dispatch"
+    );
+    let runtime = render
+        .world
+        .resource::<RenderRuntimeResource<prism_render_driver_wgpu::WgpuInstance>>();
+    assert!(runtime.runtime().wait_idle());
+    let target = *render
+        .world
+        .resource::<crate::surface_view_targets::SurfaceViewTargets<
+            prism_render_driver_wgpu::WgpuDevice,
+        >>()
+        .iter(runtime.runtime())
+        .next()
+        .map(|(_, target)| target)
+        .expect("the camera graph owns a native target");
+    let pixels = runtime
+        .runtime()
+        .queue()
+        .read_texture_rgba16f(target.texture(), SIZE, SIZE)
+        .expect("final native HDR readback must complete");
+    let center_index = ((SIZE / 2) * SIZE + SIZE / 2) as usize;
+    let normals = runtime
+        .runtime()
+        .queue()
+        .read_texture_rgba16f(target.normal_texture(), SIZE, SIZE)
+        .expect("native normal GBuffer readback must complete");
+    let albedo = runtime
+        .runtime()
+        .queue()
+        .read_texture_rgba8(target.albedo_texture(), SIZE, SIZE)
+        .expect("native albedo GBuffer readback must complete");
+    let surface_ids = runtime
+        .runtime()
+        .queue()
+        .read_texture_r32uint(target.surface_id_texture(), SIZE, SIZE)
+        .expect("native surface identity readback must complete");
+    assert_eq!(normals[center_index], [0.0, 0.0, 1.0, 1.0]);
+    assert_eq!(
+        &albedo[center_index * 4..center_index * 4 + 4],
+        &[255, 255, 255, 255]
+    );
+    assert_eq!(surface_ids[center_index], 2);
+    let center = pixels[center_index];
+    assert_eq!(center, [1.0, 1.0, 1.0, 1.0]);
 }
 fn mark_prepare_assets(mut log: ResMut<OrderLog>) {
     log.0.push("prepare-assets");
