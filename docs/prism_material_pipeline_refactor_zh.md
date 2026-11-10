@@ -1765,7 +1765,7 @@ schema **只声明布局 + 元数据 + 契约**（在哪、多宽、谁消费、
 
 ## 18. 2026-11-11 当前 code-truth（不改写历史）
 
-本节只覆盖当前工作树的材质切片状态；历史路线图、旧验证快照和旧结论保留原样。`HEAD` 为 `05f0df73a9`，其 Native composite 相关测试期望与当前工作树 layout/shader 已发生差异；本节按当前工作树源码记录，不把 HEAD 的旧契约期望当作当前通过证据。
+本节只覆盖当前工作树的材质切片状态；历史路线图、旧验证快照和旧结论保留原样。当前 `HEAD` 为 `8a7417b34`，并包含 `481580ed0` 的 Native Unlit 场景 fixture 修正；本节按当前工作树源码记录，不把未重新运行的旧二进制结果当作当前通过证据。
 
 ### 已完成的局部切片
 
@@ -1777,15 +1777,15 @@ schema **只声明布局 + 元数据 + 契约**（在哪、多宽、谁消费、
 ### 部分完成
 
 - **Native composite**：group 2 当前只绑定 material headers/parameters；composite 消费 group 1 已写入的 sampled material planes，并执行 SurfaceIdentity admission、builtin Lit/Unlit/有限 NPR/MaskBlend 与 finite fail-closed。texture rows/VT 资源仍由 producer、frame graph 和 GI evaluator 持有/消费，不应写成 composite shader 已直接完成完整 VT resolver。
-- **GI evaluator**：已有生产 `prepare_with_material_evaluator`、trace 后 evaluator dispatch、candidate 依赖、texture rows/VT bind group 和 shader-side VT sampling/代际校验；但响应范围仍是受限 builtin Unlit/有限 texture semantic 子集，`texture_slot_count` 等完整语义和注册/MaskBlend/Lit 组合尚未闭合。
+- **GI evaluator**：已有生产 `prepare_with_material_evaluator`、trace 后 evaluator dispatch、candidate 依赖、texture rows/VT bind group、shader-side VT sampling/代际校验和完整 page-table allocation 校验；相关 evaluator CPU/契约测试已达到 22 项通过。但 shader 仍拒绝非零 `texture_slot_count`，实际材质响应仍限 builtin Unlit/有限 texture semantic 子集，注册/MaskBlend/Lit 组合和硬件 readback parity 尚未闭合。
 - **MaterialX/authoring**：受限 `author_node`、canonical alias、procedural/VT artifact 和定向 CPU/契约门禁已存在；完整 MaterialX vocabulary、任意图语义、编辑器集成和完整 artifact→response/reference parity 仍未完成。
 
 ### 仍未完成
 
-- 默认 Native 主 render pass 的完整 material extraction → Surface encode → response/composite → HDR 输出 GPU readback，以及与 CPU golden 的全帧 parity。
+- 默认 Native 主 render pass 的完整 material extraction → Surface encode → response/composite → HDR 输出 GPU readback，以及与 CPU golden 的全帧 parity；`481580ed0` 只修正了 Unlit fixture，不等于主链 parity 已完成。
 - 完整 Lit/registered/MaskBlend/channel/domain 组合、完整 texture semantic/VT resolver、UV1、真实动态通道和真实材质提取/打包。
 - GI evaluator 的真实 GPU dispatch/readback 与 CPU oracle parity，以及其对完整材质响应的覆盖。
-- realtime GPU 与 path-traced reference 的图像级 parity、完整生产多 bounce integrator、GPU/backend/cross-adapter parity。
+- realtime GPU 与 path-traced reference 的图像级 parity、完整生产多 bounce integrator、GPU/backend/cross-adapter parity；当前受限 parity fixture 仍未获得成功的硬件 readback。
 - 完整 MaterialX 图/编辑器闭环，以及性能 P50/P95/P99 和多适配器证据。
 
 ### 下一验收命令（当前均未在本节记录为已执行）

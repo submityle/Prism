@@ -835,9 +835,9 @@ CARGO_INCREMENTAL=0 cargo test -p prism_render_architecture --lib ray_scene::nat
 ## 7.23 2026-11-11 当前 code-truth（权威覆盖；不改写历史）
 
 本节只覆盖当前工作树的材质切片状态，覆盖前文与当前源码冲突的“当前结论”；§0.x 和
-§7.20–§7.22 的历史运行记录不删除、不改写。当前 `HEAD` 为 `05f0df73a9`，其 Native
-composite 相关测试期望仍与当前工作树的 `[0,1]` group-2 layout/shader 收敛状态不同，
-因此以下按当前工作树源码记录，未运行的命令不计为通过。
+§7.20–§7.22 的历史运行记录不删除、不改写。当前 `HEAD` 为 `8a7417b34`，并包含
+`481580ed0` 的 Native Unlit 场景 fixture 修正；因此以下按当前工作树源码记录，未运行的
+命令不计为通过。
 
 ### 已完成的局部切片
 
@@ -864,9 +864,10 @@ composite 相关测试期望仍与当前工作树的 `[0,1]` group-2 layout/shad
   producer、frame graph 和 GI evaluator 持有/消费，不能写成 composite shader 已直接完成完整
   canonical texture/VT resolver。
 - **GI evaluator**：已有生产 `prepare_with_material_evaluator`、trace 后 evaluator dispatch、
-  candidate 依赖、texture rows/VT bind group、shader-side VT sampling 和代际校验；但响应
-  仍限 builtin Unlit/有限 texture semantic 子集，`texture_slot_count` 仍为零，Lit、registered、
-  完整 MaskBlend/channel/domain 组合及 GPU readback/CPU oracle parity 尚未闭合。
+  candidate 依赖、texture rows/VT bind group、shader-side VT sampling、代际校验和完整
+  page-table allocation 校验；相关 evaluator CPU/契约测试已达到 22 项通过。但 shader 仍
+  拒绝非零 `texture_slot_count`，响应仍限 builtin Unlit/有限 texture semantic 子集，Lit、
+  registered、完整 MaskBlend/channel/domain 组合及 GPU readback/CPU oracle parity 尚未闭合。
 - **MaterialX/authoring**：受限 `author_node`、`plus`/`mult`/`blend` canonical alias、
   procedural/VT artifact 和定向 CPU/契约门禁已存在；完整 MaterialX vocabulary、任意图语义、
   编辑器集成及 artifact→response/reference parity 仍未完成。
@@ -879,7 +880,7 @@ composite 相关测试期望仍与当前工作树的 `[0,1]` group-2 layout/shad
    真实动态通道和真实材质提取/打包。
 3. GI evaluator 的真实 GPU dispatch/readback、CPU oracle parity，以及完整材质响应覆盖。
 4. realtime GPU ↔ path-traced reference 图像级 parity、完整生产多 bounce integrator、
-   GPU/backend/cross-adapter parity。
+   GPU/backend/cross-adapter parity；当前受限 parity fixture 尚未获得成功的硬件 readback。
 5. 完整 MaterialX 图/编辑器闭环，以及多适配器和性能 P50/P95/P99 证据。
 
 ### 下一验收命令（本节未执行；不得视为通过）
@@ -888,7 +889,7 @@ composite 相关测试期望仍与当前工作树的 `[0,1]` group-2 layout/shad
 # CPU/source contract; not GPU parity.
 cargo test -p prism_render_app --lib composite_contract_tests -- --nocapture
 
-# Native Surface encode/GBuffer/composite vertical slice.
+# Native Surface encode/GBuffer/composite vertical slice; rerun on the current HEAD.
 PRISM_REQUIRE_GPU=1 WGPU_BACKEND=metal cargo test -p prism_render_app --lib physical_gpu_surface_encode_gbuffer_readback_and_composite_close_the_contract -- --nocapture
 
 # Native GI trace -> evaluator -> candidate vertical slice.
