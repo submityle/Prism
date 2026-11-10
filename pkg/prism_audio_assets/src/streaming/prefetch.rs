@@ -17,6 +17,7 @@ use alloc::vec::Vec;
 use prism_audio_core::math::Sample;
 
 use crate::codec::decoder::DecodeError;
+use crate::codec::metadata::AudioStreamInfo;
 use crate::codec::registry::BoxedDecoder;
 use crate::streaming::ring::{FrameRing, ReadResult};
 
@@ -92,6 +93,13 @@ impl PrefetchStream {
         self.channels
     }
 
+    /// Returns the decoder-verified stream metadata.
+    #[inline]
+    #[must_use]
+    pub fn info(&self) -> AudioStreamInfo {
+        self.decoder.info()
+    }
+
     /// Returns the resident prefetch segment (interleaved frames).
     #[inline]
     #[must_use]
@@ -159,6 +167,19 @@ impl PrefetchStream {
     #[must_use]
     pub fn is_finished(&self) -> bool {
         self.decoder_exhausted && self.ring.is_empty()
+    }
+
+    /// Seeks to an arbitrary decoder frame and clears already buffered data.
+    /// Frame zero uses the resident prefetch path so restart remains
+    /// allocation-free and preserves the zero-latency first segment.
+    pub fn seek(&mut self, frame: u64) -> Result<(), DecodeError> {
+        if frame == 0 {
+            return self.restart();
+        }
+        self.ring.clear();
+        self.decoder.seek(frame)?;
+        self.decoder_exhausted = self.decoder.is_exhausted();
+        Ok(())
     }
 
     /// Restarts playback from the beginning using the resident segment.

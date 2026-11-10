@@ -234,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn resolved_asset_waits_for_source_route_without_fake_voice() {
+    fn resolved_streaming_asset_publishes_a_real_route_without_a_fake_voice() {
         let mut app = test_app();
         app.world_mut()
             .resource_mut::<AudioAssetStore>()
@@ -246,9 +246,13 @@ mod tests {
         ));
         app.update();
         let player = app.world().get::<AudioPlayer>(entity).expect("player");
-        assert_eq!(player.state, AudioPlaybackState::AwaitingSourceRoute);
+        assert_eq!(player.state, AudioPlaybackState::Ready);
         assert_eq!(player.playhead, 0);
         assert!(app.world().get::<AudioEmitter>(entity).is_none());
+        assert!(app
+            .world()
+            .resource::<crate::source_route::AudioGraphRouteState>()
+            .is_initialized());
     }
 
     #[test]

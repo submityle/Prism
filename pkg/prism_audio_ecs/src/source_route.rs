@@ -1,18 +1,21 @@
 //! ECS-to-graph source routing.
 //!
-//! This module is the resident-media route supplied by the ECS crate. It keeps
-//! the boundary deliberately narrow: the asset store supplies decoder-verified
-//! PCM, the core graph supplies DSP nodes, and this crate only reconciles ECS
-//! playback state with that graph. Streaming decoders and project-specific
-//! event/container policies remain explicit extension points rather than fake
-//! successful voices.
+//! The asset store supplies decoder-verified resident PCM or retained encoded
+//! media. Resident sources are copied into the graph at publication time;
+//! streaming sources use a bounded background decoder and a lock-free chunk
+//! queue, so the render callback only consumes already-decoded samples.
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::OnceLock;
+use std::thread;
+use std::time::Duration;
 
+use crossbeam_queue::ArrayQueue;
 use prism_audio_assets::asset::{AudioAssetHandle, AudioAssetResidency};
+use prism_audio_assets::streaming::prefetch::PrefetchStream;
 use prism_audio_core::buffer::ChannelLayout;
 use prism_audio_core::graph::{
     AudioGraph, AudioNode, GraphError, PortRef, ProcessIo, RenderContext,
@@ -48,7 +51,7 @@ impl Default for AudioOutputLayout {
     }
 }
 
-/// Errors that prevent a compiled resident route from being published.
+/// Errors that prevent a compiled source route from being published.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AudioGraphRouteError {
     /// The runtime host was not installed in the world.
@@ -65,7 +68,7 @@ pub enum AudioGraphRouteError {
     PublishRejected,
 }
 
-/// Control-side state for the resident graph hand-off.
+/// Control-side state for the ECS graph hand-off.
 ///
 /// The state also owns the small lock-free progress bridges written by routed
 /// source nodes. The audio callback never touches ECS or this resource; it only
@@ -97,6 +100,7 @@ impl AudioGraphRouteState {
 struct RouteProgress {
     playhead: AtomicU64,
     finished: AtomicBool,
+    failed: AtomicBool,
 }
 
 #[derive(Debug)]
@@ -174,6 +178,385 @@ impl AudioNode for RoutedSampleNode {
             .playhead
             .store(self.start_frame as u64, Ordering::Relaxed);
         self.progress.finished.store(false, Ordering::Relaxed);
+    }
+}
+
+const STREAM_CHUNK_FRAMES: usize = 1024;
+const STREAM_QUEUE_CHUNKS: usize = 8;
+
+/// Lock-free hand-off between one decoder producer and one graph consumer.
+/// The queues carry preallocated sample vectors, so the consumer never
+/// allocates or locks while rendering.
+struct StreamBridge {
+    ready: ArrayQueue<Vec<Sample>>,
+    free: ArrayQueue<Vec<Sample>>,
+    stop: AtomicBool,
+    ended: AtomicBool,
+    failed: AtomicBool,
+    worker: OnceLock<thread::Thread>,
+}
+
+struct StreamingSource {
+    bridge: Arc<StreamBridge>,
+    channels: usize,
+    sample_rate: u32,
+}
+
+enum ProducedChunk {
+    Produced,
+    NoBuffer,
+    Ended,
+}
+
+fn produce_stream_chunk(
+    stream: &mut PrefetchStream,
+    bridge: &StreamBridge,
+    chunk_frames: usize,
+) -> Result<ProducedChunk, prism_audio_assets::codec::decoder::DecodeError> {
+    let Some(mut buffer) = bridge.free.pop() else {
+        return Ok(ProducedChunk::NoBuffer);
+    };
+    if stream.buffered_frames() == 0 && !stream.is_finished() {
+        stream.pump(chunk_frames)?;
+    }
+    let frames = stream.buffered_frames().min(chunk_frames);
+    if frames == 0 {
+        let _ = bridge.free.push(buffer);
+        return Ok(ProducedChunk::Ended);
+    }
+
+    buffer.clear();
+    buffer.resize(frames * stream.channels(), 0.0);
+    let result = stream.read(&mut buffer);
+    if result.frames_silenced != 0 || result.frames_from_data != frames {
+        let _ = bridge.free.push(buffer);
+        return Err(prism_audio_assets::codec::decoder::DecodeError::UnexpectedEof);
+    }
+    match bridge.ready.push(buffer) {
+        Ok(()) => Ok(ProducedChunk::Produced),
+        Err(buffer) => {
+            let _ = bridge.free.push(buffer);
+            Ok(ProducedChunk::Produced)
+        }
+    }
+}
+
+fn wait_for_stream_consumer(bridge: &StreamBridge) {
+    if bridge.worker.get().is_some() {
+        thread::park_timeout(Duration::from_millis(1));
+    } else {
+        thread::yield_now();
+    }
+}
+
+fn run_stream_worker(
+    mut stream: PrefetchStream,
+    bridge: Arc<StreamBridge>,
+    looping: bool,
+    chunk_frames: usize,
+) {
+    loop {
+        if bridge.stop.load(Ordering::Acquire) {
+            return;
+        }
+        if bridge.ready.len() >= STREAM_QUEUE_CHUNKS {
+            wait_for_stream_consumer(&bridge);
+            continue;
+        }
+        match produce_stream_chunk(&mut stream, &bridge, chunk_frames) {
+            Ok(ProducedChunk::Produced) => {}
+            Ok(ProducedChunk::NoBuffer) => wait_for_stream_consumer(&bridge),
+            Ok(ProducedChunk::Ended) => {
+                if looping {
+                    if stream.restart().is_err() {
+                        bridge.failed.store(true, Ordering::Release);
+                        bridge.ended.store(true, Ordering::Release);
+                        return;
+                    }
+                } else {
+                    bridge.ended.store(true, Ordering::Release);
+                    return;
+                }
+            }
+            Err(_) => {
+                bridge.failed.store(true, Ordering::Release);
+                bridge.ended.store(true, Ordering::Release);
+                return;
+            }
+        }
+    }
+}
+
+impl StreamingSource {
+    fn new(
+        mut stream: PrefetchStream,
+        start_frame: u64,
+        mode: PlaybackMode,
+    ) -> Result<Self, AudioSourceRouteError> {
+        if start_frame != 0 {
+            stream
+                .seek(start_frame)
+                .map_err(|_| AudioSourceRouteError::StreamingWorkerUnavailable)?;
+        }
+        let channels = stream.channels();
+        let sample_rate = stream.info().sample_rate.max(1);
+        let bridge = Arc::new(StreamBridge {
+            ready: ArrayQueue::new(STREAM_QUEUE_CHUNKS),
+            free: ArrayQueue::new(STREAM_QUEUE_CHUNKS + 2),
+            stop: AtomicBool::new(false),
+            ended: AtomicBool::new(false),
+            failed: AtomicBool::new(false),
+            worker: OnceLock::new(),
+        });
+        let chunk_samples = STREAM_CHUNK_FRAMES
+            .checked_mul(channels)
+            .ok_or(AudioSourceRouteError::StreamingWorkerUnavailable)?;
+        for _ in 0..(STREAM_QUEUE_CHUNKS + 2) {
+            bridge
+                .free
+                .push(Vec::with_capacity(chunk_samples))
+                .map_err(|_| AudioSourceRouteError::StreamingWorkerUnavailable)?;
+        }
+
+        // Fill the first chunk synchronously so publication has deterministic
+        // zero-latency startup; subsequent chunks are produced in the worker.
+        match produce_stream_chunk(&mut stream, &bridge, STREAM_CHUNK_FRAMES) {
+            Ok(ProducedChunk::Produced) if !mode.loops() && stream.is_finished() => {
+                bridge.ended.store(true, Ordering::Release);
+            }
+            Ok(ProducedChunk::Produced) => {}
+            Ok(ProducedChunk::NoBuffer) => {}
+            Ok(ProducedChunk::Ended) => bridge.ended.store(true, Ordering::Release),
+            Err(_) => {
+                bridge.failed.store(true, Ordering::Release);
+                bridge.ended.store(true, Ordering::Release);
+            }
+        }
+
+        let worker_bridge = Arc::clone(&bridge);
+        let chunk_frames = STREAM_CHUNK_FRAMES;
+        let worker = thread::Builder::new()
+            .name("prism-audio-stream".into())
+            .spawn(move || run_stream_worker(stream, worker_bridge, mode.loops(), chunk_frames))
+            .map_err(|_| AudioSourceRouteError::StreamingWorkerUnavailable)?;
+        let _ = bridge.worker.set(worker.thread().clone());
+        drop(worker);
+        Ok(Self {
+            bridge,
+            channels,
+            sample_rate,
+        })
+    }
+}
+
+struct RoutedStreamingNode {
+    source: StreamingSource,
+    fifo: Vec<Sample>,
+    fifo_capacity_frames: usize,
+    read_frame: usize,
+    write_frame: usize,
+    buffered_frames: usize,
+    pending: Option<Vec<Sample>>,
+    pending_frame: usize,
+    source_position: f64,
+    rendered_frames: u64,
+    initial_playing: bool,
+    playing: bool,
+    progress: Arc<RouteProgress>,
+}
+
+impl RoutedStreamingNode {
+    fn new(
+        source: StreamingSource,
+        start_frame: u64,
+        playing: bool,
+        max_block: usize,
+        progress: Arc<RouteProgress>,
+    ) -> Self {
+        let fifo_capacity_frames = max_block
+            .saturating_mul(8)
+            .max(STREAM_CHUNK_FRAMES.saturating_mul(2));
+        let fifo = alloc::vec![0.0; fifo_capacity_frames * source.channels];
+        progress.playhead.store(start_frame, Ordering::Relaxed);
+        progress.finished.store(false, Ordering::Relaxed);
+        progress.failed.store(false, Ordering::Relaxed);
+        Self {
+            source,
+            fifo,
+            fifo_capacity_frames,
+            read_frame: 0,
+            write_frame: 0,
+            buffered_frames: 0,
+            pending: None,
+            pending_frame: 0,
+            source_position: 0.0,
+            rendered_frames: start_frame,
+            initial_playing: playing,
+            playing,
+            progress,
+        }
+    }
+
+    fn return_chunk(&self, chunk: Vec<Sample>) {
+        let _ = self.source.bridge.free.push(chunk);
+        if let Some(worker) = self.source.bridge.worker.get() {
+            worker.unpark();
+        }
+    }
+
+    fn fill_fifo(&mut self) {
+        loop {
+            if self.pending.is_none() {
+                self.pending = self.source.bridge.ready.pop();
+                self.pending_frame = 0;
+            }
+            let Some(chunk) = self.pending.as_ref() else {
+                return;
+            };
+            let chunk_frames = chunk.len() / self.source.channels;
+            if chunk_frames == 0 {
+                if let Some(chunk) = self.pending.take() {
+                    self.return_chunk(chunk);
+                }
+                continue;
+            }
+            let writable = (self.fifo_capacity_frames - self.buffered_frames)
+                .min(chunk_frames.saturating_sub(self.pending_frame));
+            if writable == 0 {
+                return;
+            }
+            for frame in 0..writable {
+                let source_frame = self.pending_frame + frame;
+                let destination_frame = (self.write_frame + frame) % self.fifo_capacity_frames;
+                let source_start = source_frame * self.source.channels;
+                let destination_start = destination_frame * self.source.channels;
+                self.fifo[destination_start..destination_start + self.source.channels]
+                    .copy_from_slice(&chunk[source_start..source_start + self.source.channels]);
+            }
+            self.write_frame = (self.write_frame + writable) % self.fifo_capacity_frames;
+            self.buffered_frames += writable;
+            self.pending_frame += writable;
+            if self.pending_frame == chunk_frames {
+                let Some(chunk) = self.pending.take() else {
+                    return;
+                };
+                self.pending_frame = 0;
+                self.return_chunk(chunk);
+            }
+        }
+    }
+
+    #[inline]
+    fn sample(&self, frame: usize, channel: usize) -> Option<Sample> {
+        if frame >= self.buffered_frames || channel >= self.source.channels {
+            return None;
+        }
+        let index = ((self.read_frame + frame) % self.fifo_capacity_frames) * self.source.channels
+            + channel;
+        Some(self.fifo[index])
+    }
+
+    fn consume(&mut self, frames: usize) {
+        let consumed = frames.min(self.buffered_frames);
+        self.read_frame = (self.read_frame + consumed) % self.fifo_capacity_frames;
+        self.buffered_frames -= consumed;
+        self.rendered_frames = self.rendered_frames.saturating_add(consumed as u64);
+    }
+
+    fn publish_progress(&self) {
+        self.progress
+            .playhead
+            .store(self.rendered_frames, Ordering::Relaxed);
+        if self.source.bridge.failed.load(Ordering::Acquire) {
+            self.progress.failed.store(true, Ordering::Release);
+        }
+        if self.source.bridge.ended.load(Ordering::Acquire)
+            && self.buffered_frames == 0
+            && self.pending.is_none()
+        {
+            self.progress.finished.store(true, Ordering::Release);
+        }
+    }
+}
+
+impl AudioNode for RoutedStreamingNode {
+    fn process(&mut self, ctx: &RenderContext, io: &mut ProcessIo<'_>) {
+        let out = io.output(0);
+        for channel in 0..out.channels() {
+            out.channel_mut(channel).fill(0.0);
+        }
+        if !self.playing {
+            self.publish_progress();
+            return;
+        }
+        let ratio = f64::from(self.source.sample_rate) / f64::from(ctx.sample_rate.max(1));
+        for frame in 0..out.active_frames() {
+            self.fill_fifo();
+            let base = self.source_position as usize;
+            if base >= self.buffered_frames {
+                if self.source.bridge.ended.load(Ordering::Acquire) {
+                    self.playing = false;
+                }
+                continue;
+            }
+            let frac = self.source_position - base as f64;
+            for channel in 0..out.channels().min(self.source.channels) {
+                let a = self.sample(base, channel).unwrap_or(0.0);
+                let b = self.sample(base.saturating_add(1), channel).unwrap_or(a);
+                out.channel_mut(channel)[frame] = a + (b - a) * frac as Sample;
+            }
+            self.source_position += ratio;
+            let consumed = self.source_position as usize;
+            if consumed != 0 {
+                let actual = consumed.min(self.buffered_frames);
+                self.consume(consumed);
+                self.source_position -= actual as f64;
+                if self.source_position < 0.0 {
+                    self.source_position = 0.0;
+                }
+            }
+        }
+        self.publish_progress();
+    }
+
+    fn reset(&mut self) {
+        // `AudioGraph::compile` calls reset after the source has been built.
+        // Keep the synchronously prefetched queue available for that first
+        // block; clearing it here would turn a valid stream into silence.
+        self.playing = self.initial_playing;
+        self.source_position = 0.0;
+        self.read_frame = 0;
+        self.write_frame = 0;
+        self.buffered_frames = 0;
+        self.progress
+            .playhead
+            .store(self.rendered_frames, Ordering::Relaxed);
+        self.progress.finished.store(false, Ordering::Release);
+        self.progress.failed.store(false, Ordering::Release);
+    }
+}
+
+impl Drop for RoutedStreamingNode {
+    fn drop(&mut self) {
+        self.source.bridge.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.source.bridge.worker.get() {
+            worker.unpark();
+        }
+        if let Some(chunk) = self.pending.take() {
+            self.return_chunk(chunk);
+        }
+        while let Some(chunk) = self.source.bridge.ready.pop() {
+            self.return_chunk(chunk);
+        }
+    }
+}
+
+impl Drop for StreamingSource {
+    fn drop(&mut self) {
+        self.bridge.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.bridge.worker.get() {
+            worker.unpark();
+        }
     }
 }
 
@@ -293,7 +676,11 @@ fn sync_route_progress(world: &mut World) -> bool {
         let external_seek = player.playhead != last_synced_playhead;
         if !external_seek {
             player.playhead = progress.playhead.load(Ordering::Acquire);
-            if progress.finished.load(Ordering::Acquire) && player.playing {
+            if progress.failed.load(Ordering::Acquire) {
+                player.state = AudioPlaybackState::AwaitingSourceRoute;
+                player.playing = false;
+                player.stop_requested = true;
+            } else if progress.finished.load(Ordering::Acquire) && player.playing {
                 player.playing = false;
                 player.stop_requested = true;
             }
@@ -364,17 +751,24 @@ fn source_error_state(error: AudioSourceRouteError) -> AudioPlaybackState {
     match error {
         AudioSourceRouteError::NotLoaded => AudioPlaybackState::WaitingForAsset,
         AudioSourceRouteError::StreamingRequiresBackend
+        | AudioSourceRouteError::StreamingDecode(_)
+        | AudioSourceRouteError::StreamingWorkerUnavailable
         | AudioSourceRouteError::InvalidStreamMetadata
         | AudioSourceRouteError::InvalidResidentPcm
         | AudioSourceRouteError::UnsupportedChannelCount => AudioPlaybackState::AwaitingSourceRoute,
     }
 }
 
+enum RouteSource {
+    Resident(ResidentAudioSource),
+    Streaming(StreamingSource),
+}
+
 fn build_graph(
     sample_rate: u32,
     max_block: usize,
     output: ChannelLayout,
-    sources: Vec<(Candidate, ResidentAudioSource)>,
+    sources: Vec<(Candidate, RouteSource)>,
 ) -> Result<BuiltGraph, AudioGraphRouteError> {
     if !sources.is_empty() && output != ChannelLayout::Stereo {
         return Err(AudioGraphRouteError::UnsupportedOutputLayout(output));
@@ -387,7 +781,52 @@ fn build_graph(
     );
     let mut bindings = Vec::with_capacity(sources.len());
     for (index, (candidate, source)) in sources.into_iter().enumerate() {
-        let channels = source.channels.len();
+        let (channels, source_node, progress) = match source {
+            RouteSource::Resident(source) => {
+                let channels = source.channels.len();
+                let progress = Arc::new(RouteProgress::default());
+                let node = graph.add_node(
+                    Box::new(RoutedSampleNode::new(
+                        source,
+                        candidate.start_frame,
+                        candidate.active,
+                        candidate.mode,
+                        Arc::clone(&progress),
+                    )),
+                    Vec::new(),
+                    vec![match channels {
+                        1 => ChannelLayout::Mono,
+                        2 => ChannelLayout::Stereo,
+                        _ => {
+                            return Err(AudioGraphRouteError::UnsupportedSourceChannels(channels));
+                        }
+                    }],
+                );
+                (channels, node, progress)
+            }
+            RouteSource::Streaming(source) => {
+                let channels = source.channels;
+                let progress = Arc::new(RouteProgress::default());
+                let node = graph.add_node(
+                    Box::new(RoutedStreamingNode::new(
+                        source,
+                        candidate.start_frame,
+                        candidate.active,
+                        max_block,
+                        Arc::clone(&progress),
+                    )),
+                    Vec::new(),
+                    vec![match channels {
+                        1 => ChannelLayout::Mono,
+                        2 => ChannelLayout::Stereo,
+                        _ => {
+                            return Err(AudioGraphRouteError::UnsupportedSourceChannels(channels));
+                        }
+                    }],
+                );
+                (channels, node, progress)
+            }
+        };
         let source_layout = match channels {
             1 => ChannelLayout::Mono,
             2 => ChannelLayout::Stereo,
@@ -395,22 +834,10 @@ fn build_graph(
                 return Err(AudioGraphRouteError::UnsupportedSourceChannels(channels));
             }
         };
-        let progress = Arc::new(RouteProgress::default());
-        let source_node = graph.add_node(
-            Box::new(RoutedSampleNode::new(
-                source,
-                candidate.start_frame,
-                candidate.active,
-                candidate.mode,
-                Arc::clone(&progress),
-            )),
-            Vec::new(),
-            vec![source_layout],
-        );
         let output_node = if channels == 1 {
             let pan = graph.add_node(
                 Box::new(StereoPanNode::new(candidate.pan)),
-                vec![ChannelLayout::Mono],
+                vec![source_layout],
                 vec![ChannelLayout::Stereo],
             );
             graph
@@ -444,7 +871,7 @@ fn build_graph(
     Ok(BuiltGraph { graph, bindings })
 }
 
-/// Reconciles resident asset-backed players into the real render graph.
+/// Reconciles asset-backed players into the real render graph.
 ///
 /// The function is intentionally infallible at the ECS-system boundary. Any
 /// build or publication failure is retained in [`AudioGraphRouteState`] and the
@@ -522,14 +949,6 @@ pub fn sync_audio_source_routes(world: &mut World) {
             source_error_entities.push(candidate.entity);
             continue;
         }
-        if !matches!(resolved.residency, AudioAssetResidency::Resident) {
-            source_errors.push((
-                candidate.entity,
-                AudioSourceRouteError::StreamingRequiresBackend,
-            ));
-            source_error_entities.push(candidate.entity);
-            continue;
-        }
         if !matches!(resolved.stream.channels, 1 | 2) {
             source_errors.push((
                 candidate.entity,
@@ -539,14 +958,39 @@ pub fn sync_audio_source_routes(world: &mut World) {
             continue;
         }
         if candidate.active {
-            match store.resident_source(candidate.handle) {
-                Ok(source) => {
-                    sources.push((*candidate, source));
-                    ready_entities.push(candidate.entity);
-                }
-                Err(error) => {
-                    source_errors.push((candidate.entity, error));
-                    source_error_entities.push(candidate.entity);
+            match resolved.residency {
+                AudioAssetResidency::Resident => match store.resident_source(candidate.handle) {
+                    Ok(source) => {
+                        sources.push((*candidate, RouteSource::Resident(source)));
+                        ready_entities.push(candidate.entity);
+                    }
+                    Err(error) => {
+                        source_errors.push((candidate.entity, error));
+                        source_error_entities.push(candidate.entity);
+                    }
+                },
+                AudioAssetResidency::Streaming => {
+                    match store.open_stream(candidate.handle, STREAM_CHUNK_FRAMES.saturating_mul(2))
+                    {
+                        Ok(stream) => match StreamingSource::new(
+                            stream,
+                            candidate.start_frame,
+                            candidate.mode,
+                        ) {
+                            Ok(source) => {
+                                sources.push((*candidate, RouteSource::Streaming(source)));
+                                ready_entities.push(candidate.entity);
+                            }
+                            Err(error) => {
+                                source_errors.push((candidate.entity, error));
+                                source_error_entities.push(candidate.entity);
+                            }
+                        },
+                        Err(error) => {
+                            source_errors.push((candidate.entity, error));
+                            source_error_entities.push(candidate.entity);
+                        }
+                    }
                 }
             }
         } else {
@@ -703,7 +1147,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_media_awaits_a_stream_route_backend() {
+    fn streaming_media_publishes_real_pcm_and_reaches_end_of_stream() {
         let mut app = app();
         let handle = load_bank(
             &mut app,
@@ -720,8 +1164,91 @@ mod tests {
                 .get::<AudioPlayer>(entity)
                 .expect("player")
                 .state,
-            AudioPlaybackState::AwaitingSourceRoute
+            AudioPlaybackState::Ready
         );
+        let output = pump(&mut app, 2);
+        assert!(
+            output.channel(0).iter().any(|sample| *sample > 0.1),
+            "stream output: {:?}, route: {:?}",
+            output.channel(0),
+            app.world().resource::<AudioGraphRouteState>().last_error()
+        );
+        app.update();
+        let player = app.world().get::<AudioPlayer>(entity).expect("player");
+        assert!(!player.playing);
+        assert_eq!(player.state, AudioPlaybackState::Ready);
+    }
+
+    #[test]
+    fn streaming_loop_restarts_from_the_decoder_without_fake_voice() {
+        let mut app = app();
+        let handle = load_bank(
+            &mut app,
+            Residency::Streaming { prefetch_frames: 1 },
+            &[16_384, 8_192],
+        );
+        let entity = app.world_mut().spawn((
+            AudioPlayer::from_asset(handle, VoiceGroup(0)),
+            PlaybackSettings::LOOP.non_spatial(),
+            GlobalTransform::default(),
+        ));
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<AudioPlayer>(entity)
+                .expect("player")
+                .state,
+            AudioPlaybackState::Ready
+        );
+        let output = pump(&mut app, 1);
+        assert!(
+            output.channel(0)[0] > 0.1,
+            "stream output: {:?}, route: {:?}",
+            output.channel(0),
+            app.world().resource::<AudioGraphRouteState>().last_error()
+        );
+        app.update();
+        let player = app.world().get::<AudioPlayer>(entity).expect("player");
+        assert!(player.playing);
+        assert!(!player.stop_requested);
+    }
+
+    #[test]
+    fn streaming_route_decodes_chunks_after_the_initial_prefetch() {
+        let mut app = app();
+        let mut samples = vec![16_384i16; 2];
+        samples.extend(vec![-16_384i16; 1_500]);
+        let handle = load_bank(
+            &mut app,
+            Residency::Streaming { prefetch_frames: 2 },
+            &samples,
+        );
+        let entity = app.world_mut().spawn((
+            AudioPlayer::from_asset(handle, VoiceGroup(0)),
+            PlaybackSettings::ONCE.non_spatial(),
+            GlobalTransform::default(),
+        ));
+        app.update();
+        let first = pump(&mut app, 2);
+        assert!(first.channel(0).iter().all(|sample| *sample > 0.1));
+
+        let mut saw_decoded_tail = false;
+        for _ in 0..64 {
+            thread::yield_now();
+            let output = pump(&mut app, 64);
+            if output.channel(0).iter().any(|sample| *sample < -0.1) {
+                saw_decoded_tail = true;
+                break;
+            }
+        }
+        assert!(
+            saw_decoded_tail,
+            "background decoder never published the tail"
+        );
+        assert!(app
+            .world()
+            .get::<AudioPlayer>(entity)
+            .is_some_and(|player| player.state == AudioPlaybackState::Ready));
     }
 
     #[test]

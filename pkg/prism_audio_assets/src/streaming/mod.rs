@@ -125,6 +125,22 @@ mod tests {
     }
 
     #[test]
+    fn prefetch_seek_discards_old_ring_and_reports_decoder_metadata() {
+        let decoder = Box::new(pcm_decoder(1000));
+        let mut stream = PrefetchStream::new(decoder, 32, 128).unwrap();
+        assert_eq!(stream.info().channels, 1);
+        assert_eq!(stream.info().sample_rate, 48_000);
+        stream.seek(500).unwrap();
+        assert_eq!(stream.buffered_frames(), 0);
+        stream.pump(1).unwrap();
+        let mut out = [0.0f32; 1];
+        let result = stream.read(&mut out);
+        assert_eq!(result.frames_from_data, 1);
+        let expected = 500.0f32 * 37.0 / 32_768.0;
+        assert!((out[0] - expected).abs() < EPSILON);
+    }
+
+    #[test]
     fn prefetch_streams_adpcm_asset() {
         // Encode a mono ramp with IMA ADPCM, then stream-decode it.
         let samples_per_block = 505;

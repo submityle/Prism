@@ -3,8 +3,9 @@
 //! [`prism_scene::AudioSourceNode`] is intentionally data-only. This module is
 //! the explicit runtime boundary: it resolves the stable bank/entry identity
 //! into an [`AudioPlayer`] and [`PlaybackSettings`]. Asset loading and graph
-//! publication remain separate steps, so an unresolved or streaming asset
-//! cannot become a fake successful voice.
+//! publication remain separate steps, so an unresolved asset waits for the
+//! store while a resolved streaming asset is handed to the real bounded
+//! decoder route rather than becoming a fake successful voice.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;

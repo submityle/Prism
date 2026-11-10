@@ -16,6 +16,7 @@ prism_audio_rt = { path = "../prism_audio_rt" }
 prism_audio_assets = { path = "../prism_audio_assets" }
 prism_audio_device = { path = "../prism_audio_device", default-features = false }
 prism_scene = { path = "../prism_scene", default-features = false }
+crossbeam-queue = { version = "0.3", default-features = false, features = ["std"] }
 libm = "0.2"
 
 [features]

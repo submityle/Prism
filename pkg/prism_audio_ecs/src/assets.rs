@@ -3,8 +3,10 @@
 use alloc::vec::Vec;
 use prism_audio_assets::asset::{resolve_audio_asset, AudioAssetHandle, ResolvedAudioAsset};
 use prism_audio_assets::bank::{BankId, BankManifest, BankRegistry, BankRegistryError};
+use prism_audio_assets::codec::decoder::DecodeError;
 use prism_audio_assets::codec::metadata::AudioStreamInfo;
 use prism_audio_assets::codec::registry::DecoderRegistry;
+use prism_audio_assets::streaming::prefetch::PrefetchStream;
 use prism_audio_core::math::Sample;
 use prism_ecs::prelude::Resource;
 
@@ -27,12 +29,17 @@ pub struct ResidentAudioSource {
 }
 
 /// Why an asset could not become a real source route.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AudioSourceRouteError {
     /// The bank or entry is not currently loaded.
     NotLoaded,
-    /// Streaming decode is not yet connected to an `AudioGraph` source node.
+    /// The caller requested a resident route for media that is stream-backed,
+    /// or requested a stream from media that is resident-only.
     StreamingRequiresBackend,
+    /// The retained streaming bytes could not construct or prefetch a decoder.
+    StreamingDecode(DecodeError),
+    /// The platform could not create the bounded streaming producer.
+    StreamingWorkerUnavailable,
     /// The decoder reported no valid channel count or sample rate.
     InvalidStreamMetadata,
     /// The resident payload has an invalid interleaved shape.
@@ -148,5 +155,29 @@ impl AudioAssetStore {
             channels: planar,
             stream,
         })
+    }
+
+    /// Opens a decoder-backed streaming source for an already loaded entry.
+    ///
+    /// Decoder construction and the initial prefetch happen on the control
+    /// thread. The returned stream is then moved to a bounded background
+    /// producer by the graph route; the audio callback never invokes a
+    /// decoder or acquires a lock.
+    pub fn open_stream(
+        &self,
+        handle: AudioAssetHandle,
+        ring_capacity_frames: usize,
+    ) -> Result<PrefetchStream, AudioSourceRouteError> {
+        let media = self
+            .banks
+            .media(handle.bank, handle.entry)
+            .ok_or(AudioSourceRouteError::NotLoaded)?;
+        if !media.is_streaming() {
+            return Err(AudioSourceRouteError::StreamingRequiresBackend);
+        }
+        media
+            .open_stream(&self.decoders, ring_capacity_frames)
+            .ok_or(AudioSourceRouteError::StreamingRequiresBackend)?
+            .map_err(AudioSourceRouteError::StreamingDecode)
     }
 }
