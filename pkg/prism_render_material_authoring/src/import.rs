@@ -11,8 +11,22 @@ pub struct RuntimeSurface {
     pub source_category: String,
     /// Canonical Prism runtime parameter block.
     pub parameters: GpuSurfaceParameters,
+    /// MaterialX image/normal-map inputs retained as explicit texture
+    /// bindings. The numeric adapter never turns a texture into a default
+    /// scalar; artifact construction resolves these names to VT rows.
+    pub texture_inputs: Vec<RuntimeTextureInput>,
     /// Fields applied, fields not represented, and warnings.
     pub report: AdapterReport,
+}
+
+/// One authored surface field whose value is supplied by a material texture
+/// row instead of a scalar parameter.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeTextureInput {
+    /// Canonical Prism surface field name.
+    pub field: String,
+    /// MaterialX image or normal-map node name.
+    pub node: String,
 }
 
 /// Loss report for a successful MaterialX-to-runtime conversion.
@@ -23,6 +37,10 @@ pub struct AdapterReport {
     /// Canonical Prism parameter names with an explicit literal or supported
     /// constant connection. Supported but omitted inputs keep OpenPBR defaults.
     pub applied_fields: Vec<String>,
+    /// Canonical fields supplied by an explicit texture row.
+    pub textured_fields: Vec<String>,
+    /// Texture bindings retained during an artifact-aware adaptation.
+    pub texture_inputs: Vec<RuntimeTextureInput>,
     /// Authored source fields without a runtime mapping.
     pub unsupported_fields: Vec<String>,
     /// Non-fatal diagnostics for unsupported-but-preserved source semantics.
@@ -41,6 +59,29 @@ pub fn adapt_openpbr_surface(
     document: &Document,
     nodegraph: &str,
     node_name: &str,
+) -> Result<RuntimeSurface, AuthoringError> {
+    adapt_surface(document, nodegraph, node_name, None)
+}
+
+/// Adapt a surface while retaining explicitly bound image inputs.
+///
+/// `texture_nodes` is an authoring-time binding map. Only image/normal-map
+/// connections found in that map are accepted; every other unresolved
+/// connection keeps the normal structured error from [`adapt_openpbr_surface`].
+pub(crate) fn adapt_openpbr_surface_with_textures(
+    document: &Document,
+    nodegraph: &str,
+    node_name: &str,
+    texture_nodes: &BTreeMap<String, u32>,
+) -> Result<RuntimeSurface, AuthoringError> {
+    adapt_surface(document, nodegraph, node_name, Some(texture_nodes))
+}
+
+fn adapt_surface(
+    document: &Document,
+    nodegraph: &str,
+    node_name: &str,
+    texture_nodes: Option<&BTreeMap<String, u32>>,
 ) -> Result<RuntimeSurface, AuthoringError> {
     let graph = document
         .nodegraphs
@@ -86,7 +127,31 @@ pub fn adapt_openpbr_surface(
             continue;
         };
         report.supported_fields.push(field.to_owned());
-        if let Some(value) = resolve_input(&evaluation_index, document, graph, input)? {
+        let value = match resolve_input(&evaluation_index, document, graph, input) {
+            Ok(value) => value,
+            Err(error) => {
+                let Some(texture_node) = texture_source_node(document, graph, input) else {
+                    return Err(error);
+                };
+                let Some(texture_nodes) = texture_nodes else {
+                    return Err(error);
+                };
+                if !texture_nodes.contains_key(&texture_node) {
+                    return Err(error);
+                }
+                if !texture_field_accepts(field) {
+                    return Err(error);
+                }
+                report.supported_fields.push(field.to_owned());
+                report.textured_fields.push(field.to_owned());
+                report.texture_inputs.push(RuntimeTextureInput {
+                    field: field.to_owned(),
+                    node: texture_node,
+                });
+                continue;
+            }
+        };
+        if let Some(value) = value {
             if let (Some(input_type), Some(source_type)) =
                 (input.type_name.as_deref(), value_type(&value))
                 && source_type != input_type
@@ -113,6 +178,8 @@ pub fn adapt_openpbr_surface(
     report.supported_fields.sort();
     report.supported_fields.dedup();
     report.applied_fields.sort();
+    report.textured_fields.sort();
+    report.textured_fields.dedup();
     report.unsupported_fields.sort();
     report.unsupported_fields.dedup();
     report.diagnostics = report
@@ -130,6 +197,7 @@ pub fn adapt_openpbr_surface(
     Ok(RuntimeSurface {
         source_category: node.category.clone(),
         parameters,
+        texture_inputs: report.texture_inputs.clone(),
         report,
     })
 }
@@ -210,6 +278,51 @@ fn resolve_input<'a>(
     input: &'a crate::Input,
 ) -> Result<Option<TypedValue>, AuthoringError> {
     crate::evaluator::evaluate_input_indexed(index, document, graph, input)
+}
+
+fn texture_field_accepts(field: &str) -> bool {
+    matches!(
+        field,
+        "base_color"
+            | "emission_color"
+            | "specular_color"
+            | "coat_color"
+            | "fuzz_color"
+            | "subsurface_color"
+            | "subsurface_radius_scale"
+            | "transmission_color"
+            | "transmission_scatter"
+            | "base_metalness"
+            | "specular_roughness"
+            | "ambient_occlusion"
+            | "normal_scale"
+            | "coat_weight"
+            | "coat_roughness"
+    )
+}
+
+fn texture_source_node(
+    document: &Document,
+    graph: &crate::NodeGraph,
+    input: &crate::Input,
+) -> Option<String> {
+    let connection = input.connection.as_ref()?;
+    let target = connection
+        .nodegraph
+        .as_deref()
+        .and_then(|name| document.nodegraphs.iter().find(|item| item.name == name))
+        .unwrap_or(graph);
+    let node_name = connection.node.as_deref()?;
+    let node = target.nodes.iter().find(|node| node.name == node_name)?;
+    match node.category.as_str() {
+        "image" => Some(node.name.clone()),
+        "normalmap" => node
+            .inputs
+            .iter()
+            .find(|input| matches!(input.name.as_str(), "in" | "input" | "normal"))
+            .and_then(|input| texture_source_node(document, target, input)),
+        _ => None,
+    }
 }
 
 fn value_type(value: &TypedValue) -> Option<&str> {

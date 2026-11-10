@@ -35,6 +35,16 @@ const NODE_ATTRIBUTES: &[&str] = &[
     "namespace",
     // Bounded procedural curve/ramp nodes carry their control points here.
     "points",
+    // MaterialX image and texture nodes use these attributes to identify the
+    // external source and its sampling interpretation. They remain authored
+    // data until a MaterialArtifact supplies an immutable VT source.
+    "file",
+    "colorspace",
+    "channels",
+    "layer",
+    "uaddressmode",
+    "vaddressmode",
+    "default",
 ];
 
 /// Parses the explicitly supported MaterialX subset.
@@ -220,7 +230,8 @@ fn parse_nodegraph(
 
 fn parse_node(xml: &XmlDocument<'_>, element: XmlNode<'_, '_>) -> Result<Node, AuthoringError> {
     let name = required(xml, element, "name")?;
-    let category = if element.tag_name().name() == "node" {
+    let generic_element = element.tag_name().name() == "node";
+    let category = if generic_element {
         element.attribute("type").unwrap_or("").to_owned()
     } else {
         element.tag_name().name().to_owned()
@@ -300,6 +311,7 @@ fn parse_node(xml: &XmlDocument<'_>, element: XmlNode<'_, '_>) -> Result<Node, A
     Ok(Node {
         name,
         category,
+        generic_element,
         value,
         inputs,
         outputs,

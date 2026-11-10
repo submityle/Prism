@@ -19,7 +19,14 @@
 
 - 审计材质/渲染范围内的可执行 `TODO`、`todo!`、`unimplemented!`、placeholder/stub 命中后，未发现字面 TODO 或 panic 占位分支；`texture_upload.rs` 中仍有一处把已存在的 portable non-bindless fallback 称为 “stub” 的陈旧注释，属于命名清理项，不是本轮 authoring slice 的实现缺口。仍开放的项目是文档中明确列出的受限边界。
 - 本轮关闭一个真实契约缺口：parser/procedural allowlist 已接受的 `plus`、`mult`、`blend` 别名现在分别归一化为 `add`、`multiply`、`mix`，再通过同一 PCM `author_node` manifest、schema identity 和 evaluator 执行；别名不会产生第二个 runtime identity。
-- 证据：`CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test -p prism_render_material_authoring --test evaluator -- --nocapture`：**11 passed / 0 failed**，其中新增测试同时断言三个别名的 PCM UID 与求值结果。该门禁只覆盖受限纯数值作者子集，不宣称完整 MaterialX 图、VT/MaterialArtifact、编辑器或 response/reference parity 已完成。
+- 证据：`CARGO_TARGET_DIR=/private/tmp/prism-material-authoring-impl cargo test -p prism_render_material_authoring --all-targets --jobs 1`：**49 passed / 0 failed**（archetypes 2、artifact 6、evaluator 11、materialx 28、procedural 2）。其中 artifact 门禁同时覆盖 generic `<node type="...">` 结构往返、canonical `author_node` UID、image → existing Material-VT source/`GpuMaterialTexture` row → `MaterialRecord`、procedural `MaterialGraph` → `MaterialVtSourceSnapshot` bake，以及缺少绑定/错误 semantic 的结构化错误。该门禁仍只覆盖受限作者子集，不宣称完整 MaterialX 图、编辑器或 response/reference parity 已完成。
+
+## 0.0.2 2026-11-10 MaterialX nested graph / artifact authoring slice
+
+- nested graph instance 的外部参数契约已收紧：`interfacename` 只表示实现图内部的转发，不再被误当成实例提供的 concrete value；nodedef 无默认值且实例未绑定时，在 parse 阶段返回 `InvalidStructure`。实现图 interface 与 nodedef 的类型不一致同样保留结构化错误。
+- `author_node_identity()` 输出 nodedef、源 category、canonical category 和 PCM UID；`plus`/`mult`/`blend` 只映射到已有 `add`/`multiply`/`mix` runtime identity。graph-backed nodedef 保留 graph body 语义，不伪装成 builtin author node。
+- `MaterialArtifact` 复用既有 `MaterialGraph`、`MaterialVtSourceSnapshot`、`GpuMaterialTexture` 和 `MaterialRecord` 契约；没有新增平行 runtime ABI。未绑定 image、错误 semantic、重复/非法 source 和不支持的 procedural graph 均返回结构化错误，不静默变成 scalar default 或白色纹理。
+- 本切片没有修改 Native/GI 文件。独立 target 已在验证后清理；上面的全 targets 结果是本轮实际执行证据。
 
 ## 0.1 2026-10-20 工作树增量（原静态核对；后续运行证据见 §0.2 / §2.1.1）
 

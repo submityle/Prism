@@ -13,6 +13,23 @@ use crate::{AuthoringError, DiagnosticCode, Document, Node, NodeDef};
 const NODEDEF_ATTRIBUTE: &str = "nodedef";
 static MATERIAL_SCHEMA: OnceLock<Result<SurfaceSchema, String>> = OnceLock::new();
 
+/// The stable semantic binding of a direct `nodedef` author node.
+///
+/// MaterialX category spellings are authoring syntax. The canonical category
+/// and PCM UID are the identity consumed by the bake/evaluator boundary; an
+/// alias such as `plus` therefore cannot create a second runtime identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthorNodeIdentity {
+    /// The referenced MaterialX `nodedef` name.
+    pub nodedef: String,
+    /// Category written by the definition (`plus`, `add`, and so on).
+    pub source_category: String,
+    /// Canonical category used by the PCM catalogue.
+    pub canonical_category: String,
+    /// Stable identity-only PCM UID.
+    pub pcm_uid: String,
+}
+
 /// Return the stable PCM author-node manifest selected by a node instance.
 ///
 /// `None` means the node is either a built-in MaterialX category without a
@@ -26,6 +43,26 @@ pub fn author_node_manifest(
     node: &Node,
 ) -> Result<Option<&'static ExtensionManifest>, AuthoringError> {
     resolve(document, node).map(|binding| binding.map(|(_, builtin)| builtin.manifest()))
+}
+
+/// Resolve a node's direct author-node identity for artifact manifests.
+///
+/// Graph-backed definitions intentionally return `None`: their semantics are
+/// the nested graph body and are lowered/evaluated as graph instances rather
+/// than pretending to be one of the fixed PCM operator identities.
+pub fn author_node_identity(
+    document: &Document,
+    node: &Node,
+) -> Result<Option<AuthorNodeIdentity>, AuthoringError> {
+    let Some((definition, builtin)) = resolve(document, node)? else {
+        return Ok(None);
+    };
+    Ok(Some(AuthorNodeIdentity {
+        nodedef: definition.name.clone(),
+        source_category: definition.category.clone(),
+        canonical_category: builtin.category().to_owned(),
+        pcm_uid: builtin.manifest().uid().to_owned(),
+    }))
 }
 
 /// Normalize the bounded MaterialX operator vocabulary to its stable PCM
@@ -162,7 +199,15 @@ fn validate_graph_instance(
     definition: &NodeDef,
     implementation: &crate::NodeGraph,
 ) -> Result<(), AuthoringError> {
-    if node.category != definition.category {
+    let category_matches = node.category == definition.category
+        || matches!(
+            (
+                canonical_category(&node.category),
+                canonical_category(&definition.category)
+            ),
+            (Some(actual), Some(expected)) if actual == expected
+        );
+    if !node.generic_element && !category_matches {
         return Err(error(
             DiagnosticCode::InvalidStructure,
             format!(
@@ -207,14 +252,68 @@ fn validate_graph_instance(
                     ),
                 )
             })?;
-        if let (Some(actual), Some(expected)) =
-            (input.type_name.as_deref(), declared.type_name.as_deref())
-        {
+        let definition_declared = definition
+            .inputs
+            .iter()
+            .find(|candidate| candidate.name == input.name)
+            .ok_or_else(|| {
+                error(
+                    DiagnosticCode::InvalidStructure,
+                    format!(
+                        "node '{}' input '{}' is not declared by nodedef '{}'",
+                        node.name, input.name, definition.name
+                    ),
+                )
+            })?;
+        if let (Some(actual), Some(expected)) = (
+            input.type_name.as_deref(),
+            definition_declared.type_name.as_deref(),
+        ) {
             require_type_match(
                 &format!("node '{}' input '{}'", node.name, input.name),
                 actual,
                 expected,
             )?;
+        }
+        if let (Some(actual), Some(expected)) = (
+            declared.type_name.as_deref(),
+            definition_declared.type_name.as_deref(),
+        ) {
+            require_type_match(
+                &format!(
+                    "nodegraph '{}' interface '{}'",
+                    implementation.name, declared.name
+                ),
+                actual,
+                expected,
+            )?;
+        }
+    }
+
+    // An instance may omit an input only when the implementation supplies a
+    // concrete interface value/connection or the definition supplies a
+    // default. Anything else would become an evaluator-time implicit default
+    // and would make the round trip lossy.
+    for declared in &definition.inputs {
+        if node.inputs.iter().any(|input| input.name == declared.name) {
+            continue;
+        }
+        let implementation_input = implementation
+            .inputs
+            .iter()
+            .find(|input| input.name == declared.name);
+        // An `interfacename` on the implementation only forwards the value;
+        // it is not a value for an instance that omitted the parameter.
+        let has_implementation_binding = implementation_input
+            .is_some_and(|input| input.value.is_some() || input.connection.is_some());
+        if declared.value.is_none() && !has_implementation_binding {
+            return Err(error(
+                DiagnosticCode::InvalidStructure,
+                format!(
+                    "node '{}' omits unbound external parameter '{}' of nodedef '{}'",
+                    node.name, declared.name, definition.name
+                ),
+            ));
         }
     }
 

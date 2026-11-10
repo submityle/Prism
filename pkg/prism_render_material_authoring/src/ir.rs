@@ -42,6 +42,13 @@ pub struct Node {
     pub name: String,
     /// Node category, such as `constant`, `multiply`, or `open_pbr_surface`.
     pub category: String,
+    /// Whether the source used the generic `<node type="...">` spelling.
+    ///
+    /// MaterialX permits both a category element (`<add>`) and a generic node
+    /// element (`<node type="add">`). Keeping this bit in the IR is required
+    /// for a lossless semantic round trip; the two spellings have identical
+    /// runtime meaning.
+    pub generic_element: bool,
     /// Literal value carried by value-producing nodes such as `constant`.
     pub value: Option<TypedValue>,
     /// Ordered inputs (source order is preserved).
@@ -50,6 +57,15 @@ pub struct Node {
     pub outputs: Vec<Output>,
     /// Supported non-structural attributes.
     pub attributes: BTreeMap<String, String>,
+}
+
+impl Node {
+    /// Returns the source `nodedef` binding, when this node is an instance of
+    /// a declared definition.
+    #[must_use]
+    pub fn nodedef(&self) -> Option<&str> {
+        self.attributes.get("nodedef").map(String::as_str)
+    }
 }
 
 /// A graph output.
@@ -115,5 +131,13 @@ impl Document {
             .iter()
             .flat_map(|graph| &graph.nodes)
             .find(|node| node.name == name)
+    }
+
+    /// Iterates authored image nodes in deterministic graph/node order.
+    pub(crate) fn nodegraph_images(&self) -> impl Iterator<Item = &Node> {
+        self.nodegraphs
+            .iter()
+            .flat_map(|graph| graph.nodes.iter())
+            .filter(|node| node.category == "image")
     }
 }

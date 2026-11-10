@@ -69,8 +69,9 @@ fn export_nodegraph(out: &mut String, graph: &NodeGraph, indent: usize) {
 
 fn export_node(out: &mut String, node: &Node, indent: usize) {
     let mut attrs = format!(" name=\"{}\"", escape(&node.name));
-    if node.category == "node" {
-        attrs.push_str(" type=\"node\"");
+    let element = if node.generic_element { "node" } else { &node.category };
+    if node.generic_element {
+        attrs.push_str(&format!(" type=\"{}\"", escape(&node.category)));
     }
     if let Some(value) = &node.value {
         attrs.push_str(&format!(
@@ -81,17 +82,17 @@ fn export_node(out: &mut String, node: &Node, indent: usize) {
     }
     attrs.push_str(&attributes(&node.attributes));
     if node.inputs.is_empty() && node.outputs.is_empty() {
-        line(out, indent, &format!("<{}{} />", node.category, attrs));
+        line(out, indent, &format!("<{}{} />", element, attrs));
         return;
     }
-    line(out, indent, &format!("<{}{}>", node.category, attrs));
+    line(out, indent, &format!("<{}{}>", element, attrs));
     for input in &node.inputs {
         export_input(out, input, indent + 1, false);
     }
     for output in &node.outputs {
         export_output(out, output, indent + 1, false);
     }
-    line(out, indent, &format!("</{}>", node.category));
+    line(out, indent, &format!("</{}>", element));
 }
 
 fn export_input(out: &mut String, input: &Input, indent: usize, declaration: bool) {
