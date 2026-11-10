@@ -201,7 +201,7 @@ pub fn import_openpbr_surface(
 /// The `OpenPBR` Surface parameters come from [`import_openpbr_surface`]; this
 /// function only adds the format-independent packaging (render class, features,
 /// closure mask, texture rows, illumination axis). It replaces the former
-/// per-format `lower_standard_material` translator (design doc §4.4).
+/// per-format standard-material translator (design doc §4.4).
 pub fn import_standard_material(
     handle: GenerationalHandle,
     revision: u32,
