@@ -1,17 +1,15 @@
 //! The material stage: the render world's material registry, and the system
 //! that keeps the ABI buffers in step with it.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
 use prism_asset::AssetId;
 use prism_ecs::prelude::{Res, ResMut, Resource};
 use prism_image::Image;
-use prism_render_architecture::abi::GenerationalHandle;
-use prism_render_driver::{FrameSync, Instance};
+use prism_render_driver::{FrameSync, Instance, RenderDevice, RenderQueue};
 use prism_render_material::{
-    fallback_material_record, MaterialRecord, MaterialRegistry, MaterialRegistryError,
-    MaterialSnapshot,
+    MaterialRecord, MaterialRegistry, MaterialRegistryError, MaterialSnapshot,
 };
 
 /// The index of the permanent fallback material (slot zero).
@@ -19,8 +17,14 @@ pub const FALLBACK_MATERIAL_INDEX: u32 = 0;
 
 use crate::runtime_resource::RenderRuntimeResource;
 
-use super::buffers::{MaterialParameterBuffers, MaterialSyncReport};
-use super::texture_heap::{BindlessSlot, TextureFallback, TextureSlotHeap};
+use super::buffers::{
+    ExecutionTableSyncError, MaterialParameterBuffers, MaterialSyncReport,
+    NativeExecutionTableBuffers,
+};
+use super::texture_heap::{
+    BindlessSlot, TextureFallback, TextureHeapAcquireError, TextureSlotHeap,
+};
+use super::virtual_texture::{NativeMaterialVt, NativeVtError, NativeVtScheduler, NativeVtSources};
 
 /// What a material's authored texture reference asks for.
 ///
@@ -36,6 +40,27 @@ pub enum TextureRequest {
     Image(AssetId<Image>),
     /// Sample the reserved fallback texture this semantic calls for.
     Fallback(TextureFallback),
+}
+
+/// Why an authored texture update could not be resolved for a material.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TextureResolutionError {
+    /// The bounded texture heap had no free slot for this semantic.
+    CapacityExhausted {
+        /// Material row being prepared.
+        material_index: u32,
+        /// Texture semantic which could not be represented.
+        semantic: u32,
+    },
+}
+
+/// One successful acquisition, not an authored dependency or an overflow
+/// fallback. Keep the lease's slot generation so cleanup cannot release a
+/// different residency created through the mutable texture-heap API.
+#[derive(Clone)]
+struct HeldTexture {
+    image: AssetId<Image>,
+    slot: BindlessSlot,
 }
 
 /// The render world's material registry.
@@ -54,7 +79,7 @@ pub struct RenderMaterials {
     /// The images each material currently holds a slot reference for, so a
     /// republish releases exactly what it took and a retirement releases the
     /// rest.
-    held: BTreeMap<u32, Vec<AssetId<Image>>>,
+    held: BTreeMap<u32, Vec<HeldTexture>>,
 }
 
 impl RenderMaterials {
@@ -98,21 +123,54 @@ impl RenderMaterials {
     /// record carries, and `semantic` is the ABI's own number for the slot — this
     /// layer never interprets it.
     ///
-    /// The registry remembers every image a resolution touched, so republishing
-    /// the material releases exactly those references.
+    /// Resolution is transactional: if any authored image cannot acquire a
+    /// slot, newly acquired leases are rolled back and the currently published
+    /// rows/leases remain unchanged. Successful acquisitions are tracked with
+    /// their slot generations; prepare reconciles them with final published rows.
     pub fn resolve_textures(
         &mut self,
         index: u32,
         requests: impl IntoIterator<Item = (u32, TextureRequest)>,
-    ) -> Vec<prism_render_material::GpuMaterialTexture> {
-        self.release_textures(index);
+    ) -> Result<Vec<prism_render_material::GpuMaterialTexture>, TextureResolutionError> {
+        // Resolve against a private heap snapshot. This releases the old
+        // material leases before reacquiring slots, while preserving the
+        // published heap and leases if any request exceeds capacity.
+        let requests: Vec<_> = requests.into_iter().collect();
+        let requested_images: BTreeSet<_> = requests
+            .iter()
+            .filter_map(|(_, request)| match request {
+                TextureRequest::Image(image) => Some(*image),
+                TextureRequest::Fallback(_) => None,
+            })
+            .collect();
+        let previous = self.held.get(&index).cloned().unwrap_or_default();
+        let mut heap = self.textures.clone();
+        // Keep omitted old images resident until the replacement is known to
+        // fit. Releasing only images that are being re-resolved both preserves
+        // the published material on overflow and advances a same-image slot
+        // generation for stale-row rejection.
+        for held in &previous {
+            if requested_images.contains(&held.image) && heap.slot_of(held.image) == Some(held.slot)
+            {
+                heap.release(held.image);
+            }
+        }
         let mut rows = Vec::new();
-        let mut images = Vec::new();
+        let mut images: Vec<HeldTexture> = Vec::new();
         for (semantic, request) in requests {
             let slot = match request {
                 TextureRequest::Image(image) => {
-                    images.push(image);
-                    self.textures.acquire(image)
+                    let slot = match heap.acquire(image) {
+                        Ok(slot) => slot,
+                        Err(TextureHeapAcquireError::CapacityExhausted) => {
+                            return Err(TextureResolutionError::CapacityExhausted {
+                                material_index: index,
+                                semantic,
+                            });
+                        }
+                    };
+                    images.push(HeldTexture { image, slot });
+                    slot
                 }
                 TextureRequest::Fallback(fallback) => TextureSlotHeap::fallback_slot(fallback),
             };
@@ -128,10 +186,19 @@ impl RenderMaterials {
                 slot.index,
             ));
         }
+        for held in &previous {
+            if !requested_images.contains(&held.image)
+                && heap.slot_of(held.image) == Some(held.slot)
+            {
+                heap.release(held.image);
+            }
+        }
+        self.textures = heap;
+        self.held.remove(&index);
         if !images.is_empty() {
             self.held.insert(index, images);
         }
-        rows
+        Ok(rows)
     }
 
     /// The bindless slot an image currently occupies, if it is resident.
@@ -140,16 +207,79 @@ impl RenderMaterials {
         self.textures.slot_of(image)
     }
 
-    /// Drops every slot reference `index` holds. Called when a material is
-    /// republished (its new rows are resolved first) and when it retires.
+    /// Images actually referenced by final published rows with a live held
+    /// lease. Unpublished acquisitions, retired rows and stale generations do
+    /// not create streaming demand. This reads only textured material records
+    /// and never drains the registry's buffer-upload dirty queue.
+    #[must_use]
+    pub fn referenced_texture_images(&self) -> BTreeMap<AssetId<Image>, BindlessSlot> {
+        let mut images = BTreeMap::new();
+        for (&index, held) in &self.held {
+            let Some(record) = self.registry.record_at(index) else {
+                continue;
+            };
+            let rows: BTreeSet<_> = record
+                .textures
+                .iter()
+                .map(|row| (row.index, row.generation))
+                .collect();
+            for lease in held {
+                if rows.contains(&(lease.slot.index, lease.slot.generation))
+                    && self.textures.slot_of(lease.image) == Some(lease.slot)
+                {
+                    images.insert(lease.image, lease.slot);
+                }
+            }
+        }
+        images
+    }
+
+    /// Drops every tracked slot reference `index` holds, without releasing a
+    /// replacement residency with a different generation. Returns the number
+    /// of tracked leases removed, including leases that are already stale.
     pub fn release_textures(&mut self, index: u32) -> usize {
         let Some(images) = self.held.remove(&index) else {
             return 0;
         };
-        for image in &images {
-            self.textures.release(*image);
+        for held in &images {
+            if self.textures.slot_of(held.image) == Some(held.slot) {
+                self.textures.release(held.image);
+            }
         }
         images.len()
+    }
+
+    /// Reconcile ownership with the final published texture rows, rather than
+    /// relying on observing an intermediate retirement. A dirty index can be
+    /// retired, reclaimed and republished before a prepare pass sees it.
+    fn reconcile_textures(&mut self, index: u32) {
+        let Some(held) = self.held.remove(&index) else {
+            return;
+        };
+        let mut referenced = BTreeMap::<(u32, u32), usize>::new();
+        if let Some(record) = self.registry.record_at(index) {
+            for texture in &record.textures {
+                *referenced
+                    .entry((texture.index, texture.generation))
+                    .or_default() += 1;
+            }
+        }
+        let mut retained = Vec::new();
+        for lease in held {
+            if self.textures.slot_of(lease.image) != Some(lease.slot) {
+                continue;
+            }
+            let remaining = referenced.get_mut(&(lease.slot.index, lease.slot.generation));
+            if let Some(remaining) = remaining.filter(|count| **count != 0) {
+                *remaining -= 1;
+                retained.push(lease);
+            } else {
+                self.textures.release(lease.image);
+            }
+        }
+        if !retained.is_empty() {
+            self.held.insert(index, retained);
+        }
     }
 
     /// Publishes (or replaces) a material record, marking its row dirty.
@@ -186,20 +316,38 @@ impl Resource for RenderMaterials {}
 pub struct MaterialUploadStats {
     /// What the last pass did.
     pub last: MaterialSyncReport,
+    /// Whether the last VT prepare completed the publication/refresh gate.
+    pub native_vt_ready: bool,
+    /// Missing production owner/scheduler/sources is distinct from upload wait.
+    pub native_vt_missing_resources: bool,
+    /// Scheduler diagnostics from the last prepare; never silently discarded.
+    pub native_vt_errors: Vec<NativeVtError>,
+    /// Whether the registry execution-table version is published to GPU.
+    pub execution_tables_ready: bool,
+    /// Why execution-table publication was refused, if any.
+    pub execution_tables_error: Option<ExecutionTableSyncError>,
 }
 
 /// Packs the registry's dirty materials into the ABI buffers.
 ///
-/// Runs in [`RenderSystems::PrepareResources`](crate::RenderSystems::PrepareResources),
-/// before anything reads the buffers or binds them. Only dirty rows are touched,
+/// Runs in [`RenderSystems::PrepareAssets`](crate::RenderSystems::PrepareAssets),
+/// before Queue validates material identities and revisions against the header
+/// mirror, and before any draw binds the buffers. Only dirty rows are touched,
 /// so a frame where no material changed uploads nothing; a dirty index with no
-/// record is a retirement, and its row is rewritten as an inactive placeholder
+/// record is a retirement, and its row is rewritten as an inactive tombstone
 /// while its word run goes back to the heap.
 pub(crate) fn sync_material_buffers<I>(
     mut buffers: ResMut<MaterialParameterBuffers>,
+    mut execution_buffers: ResMut<NativeExecutionTableBuffers>,
     mut materials: ResMut<RenderMaterials>,
     mut stats: ResMut<MaterialUploadStats>,
     runtime: Res<RenderRuntimeResource<I>>,
+    (config, scheduler, owner, sources): (
+        Option<Res<crate::config::RenderAppConfig>>,
+        Option<Res<NativeVtScheduler>>,
+        Option<Res<NativeMaterialVt<I::Device>>>,
+        Option<Res<NativeVtSources>>,
+    ),
 ) where
     I: Instance + Send + Sync + 'static,
     I::Adapter: Send + Sync + 'static,
@@ -207,40 +355,86 @@ pub(crate) fn sync_material_buffers<I>(
     I::Queue: Send + Sync + FrameSync + 'static,
     I::Surface: Send + Sync + 'static,
 {
-    let dirty = materials.registry_mut().take_dirty();
-    if dirty.is_empty() {
+    if !crate::plugin::native_vt_resources_ready(
+        config.is_some(),
+        scheduler.as_deref(),
+        owner.is_some(),
+        sources.is_some(),
+    ) {
+        // In particular, do not drain dirty rows while revocation/publication
+        // has failed: the next successful prepare must upload those same rows.
         return;
     }
-    let epoch = materials.registry().snapshot().epoch;
-    let device = runtime.runtime().device();
-    let queue = runtime.runtime().queue();
+    let runtime_ref = runtime.runtime();
+    buffers.set_vt_publication_generation(
+        owner
+            .as_ref()
+            .map_or(0, |native_vt| native_vt.publication_generation()),
+    );
+    match execution_buffers.sync_registry(
+        runtime_ref.device_handle(),
+        runtime_ref.queue(),
+        materials.registry(),
+    ) {
+        Ok(_) => {
+            stats.execution_tables_ready = execution_buffers.execution_table_version().is_some();
+            stats.execution_tables_error = None;
+        }
+        Err(ExecutionTableSyncError::TablesUnavailable) => {
+            stats.execution_tables_ready = false;
+            stats.execution_tables_error = None;
+        }
+        Err(error) => {
+            stats.execution_tables_ready = false;
+            stats.execution_tables_error = Some(error);
+        }
+    }
+    if let Some(report) = sync_dirty_material_buffers(
+        &mut buffers,
+        &mut materials,
+        runtime_ref.device(),
+        runtime_ref.queue(),
+    ) {
+        stats.last = report;
+    }
+}
 
-    let mut records = Vec::<(u32, MaterialRecord)>::new();
-    let mut retired = Vec::<u32>::new();
+/// The production upload path, shared with headless regression tests without
+/// constructing an ECS runtime or maintaining a second copy of runtime state.
+fn sync_dirty_material_buffers<D: RenderDevice, Q: RenderQueue>(
+    buffers: &mut MaterialParameterBuffers,
+    materials: &mut RenderMaterials,
+    device: &D,
+    queue: &Q,
+) -> Option<MaterialSyncReport> {
+    let dirty = materials.registry_mut().take_dirty();
+    if dirty.is_empty() {
+        return None;
+    }
+
+    for &index in &dirty {
+        materials.reconcile_textures(index);
+    }
+    let mut report =
+        buffers.sync_registry(device, queue, materials.registry(), dirty.iter().copied());
     for index in dirty {
-        // Slot zero is the permanent fallback, not a scene material: it has no
-        // published record, and a shader that reads a stale handle must find a
-        // valid lit surface there rather than a retired row.
-        if index == FALLBACK_MATERIAL_INDEX {
-            let handle = GenerationalHandle::new(FALLBACK_MATERIAL_INDEX, 0);
-            records.push((index, fallback_material_record(handle, epoch)));
+        if index == FALLBACK_MATERIAL_INDEX || materials.registry().record_at(index).is_some() {
             continue;
         }
-        match materials.registry().record_at(index) {
-            Some(record) => records.push((index, record.clone())),
-            None => retired.push(index),
+        // The registry is authoritatively absent, but one or more generations
+        // may have been published and retired since the last upload. Remove
+        // the generation actually present in the GPU mirror, not a newer
+        // registry generation which never reached that mirror.
+        let Some(generation) = buffers.header(index).map(|row| row.generation) else {
+            continue;
+        };
+        if buffers.remove(queue, index, generation) {
+            report.headers_written += 1;
         }
     }
-
-    let mut report = buffers.sync(device, queue, records, epoch);
-    for index in retired {
-        let generation = materials.registry().generation_at(index).unwrap_or(0);
-        buffers.remove(queue, index, generation);
-        // The material is gone, so the bindless slots its rows named go back to
-        // the heap — and their generations bump, which is what stops a stale row
-        // from sampling whatever lands in the slot next.
-        materials.release_textures(index);
-        report.headers_written += 1;
-    }
-    stats.last = report;
+    Some(report)
 }
+
+#[cfg(test)]
+#[path = "runtime_tail_tests.rs"]
+mod runtime_tail_tests;

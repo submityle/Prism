@@ -17,8 +17,9 @@ use prism_image::Image;
 use prism_render_driver::{
     BindGroupDescriptor, BindGroupEntry, BindGroupId, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindGroupLayoutId, BindingResource, BindingType, BufferBindingType,
-    BufferId, Extent3d, Features, RenderDevice, RenderQueue, SamplerBindingType, SamplerId,
-    ShaderStages, TextureFormat, TextureSampleType, TextureViewDimension, TextureViewId,
+    BufferDescriptor, BufferId, BufferUsages, Extent3d, Features, RenderDevice, RenderQueue,
+    SamplerBindingType, SamplerId, ShaderStages, TextureFormat, TextureSampleType,
+    TextureViewDimension, TextureViewId,
 };
 
 use super::texture_heap::TextureSlotHeap;
@@ -89,27 +90,57 @@ impl FallbackTextures {
 pub struct MaterialTextureSlots {
     views: Vec<TextureViewId>,
     samplers: Vec<SamplerId>,
+    generations: Vec<u32>,
+    generation_buffer: Option<BufferId>,
 }
 
 impl MaterialTextureSlots {
-    /// Materializes the arrays for `heap`'s occupancy.
+    /// Materializes the arrays and generation table for `heap`'s occupancy.
     ///
     /// Entry `slot` is the resident image's prepared view and sampler, or the
     /// reserved fallback when nothing (or nothing valid) lives there. The arrays
     /// run to `heap.capacity()`, because a binding array's length is fixed at
-    /// layout time and every addressable slot has to resolve.
+    /// layout time and every addressable slot has to resolve. The generation
+    /// table uses the heap's current generation where present, zero for a
+    /// never-used dynamic slot, and uploads it through `queue` to a storage
+    /// buffer used by binding 9.
     #[must_use]
     pub fn build(
         device: &dyn RenderDevice,
+        queue: &dyn RenderQueue,
         images: &RenderAssets<GpuImage>,
         fallbacks: &FallbackTextures,
         heap: &TextureSlotHeap,
     ) -> Self {
-        let _ = device;
         let capacity = heap.capacity();
+        let byte_len = (capacity as u64)
+            .checked_mul(core::mem::size_of::<u32>() as u64)
+            .expect("material texture generation table byte size overflow");
+        let limits = device.capabilities().limits;
+        assert!(
+            byte_len <= limits.max_buffer_size,
+            "material texture generation table ({byte_len} bytes) exceeds device max_buffer_size ({})",
+            limits.max_buffer_size
+        );
+        assert!(
+            byte_len <= limits.max_storage_buffer_binding_size,
+            "material texture generation table ({byte_len} bytes) exceeds device max_storage_buffer_binding_size ({})",
+            limits.max_storage_buffer_binding_size
+        );
         let mut views = Vec::with_capacity(capacity as usize);
         let mut samplers = Vec::with_capacity(capacity as usize);
+        let mut generations = Vec::with_capacity(capacity as usize);
         for slot in 0..capacity {
+            let generation = if slot < heap.high_water() {
+                heap.generation_of(slot)
+                    .expect("every allocated slot below high-water has a generation")
+            } else {
+                // The heap stores generations only for reserved or previously
+                // allocated slots. A never-used slot must remain the shader's
+                // zero invalid sentinel, not inherit generation one.
+                0
+            };
+            generations.push(generation);
             let view = heap
                 .image_at(slot)
                 .and_then(|image| images.get(image))
@@ -129,7 +160,25 @@ impl MaterialTextureSlots {
                 }
             }
         }
-        Self { views, samplers }
+        let byte_len = usize::try_from(byte_len)
+            .expect("material texture generation table does not fit host address space");
+        let mut bytes = Vec::with_capacity(byte_len);
+        for generation in &generations {
+            bytes.extend_from_slice(&generation.to_le_bytes());
+        }
+        let generation_buffer = device.create_buffer(&BufferDescriptor {
+            label: Some("prism material texture generation table".into()),
+            size: bytes.len() as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(generation_buffer, 0, &bytes);
+        Self {
+            views,
+            samplers,
+            generations,
+            generation_buffer: Some(generation_buffer),
+        }
     }
 
     /// The view per slot, in slot order.
@@ -154,6 +203,29 @@ impl MaterialTextureSlots {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.views.is_empty()
+    }
+
+    /// Current generation per slot, in slot order. Never-used dynamic slots are
+    /// zero (the shader's invalid/stale sentinel); reserved slots are one.
+    #[must_use]
+    pub fn generations(&self) -> &[u32] {
+        &self.generations
+    }
+
+    /// The GPU generation-table buffer, if this value has not been released.
+    #[must_use]
+    pub const fn generation_buffer(&self) -> Option<BufferId> {
+        self.generation_buffer
+    }
+
+    /// Releases the owned generation-table buffer. Destroy every bind group
+    /// that references this buffer before calling this method; those groups
+    /// retain the buffer as a binding dependency until they are destroyed.
+    /// Releasing twice is harmless.
+    pub fn release(&mut self, device: &dyn RenderDevice) {
+        if let Some(buffer) = self.generation_buffer.take() {
+            device.destroy_buffer(buffer);
+        }
     }
 }
 
@@ -196,18 +268,16 @@ impl MaterialBindingLayout {
         self.layout
     }
 
-    /// Builds the group: the three ABI buffers plus the slot arrays.
-    ///
-    /// `rows` may be absent for an app that has not created the texture table yet;
-    /// the binding then carries a zero-sized view of the header buffer, because a
-    /// group must bind *something* at every slot its layout declares.
+    /// Builds the group from the three ABI buffers, slot arrays, and owned
+    /// generation table. `rows` must be the real texture-row buffer; headers are
+    /// never a valid substitute.
     #[must_use]
     pub fn create_group(
         &self,
         device: &dyn RenderDevice,
         headers: BufferId,
         parameters: BufferId,
-        rows: Option<BufferId>,
+        rows: BufferId,
         slots: &MaterialTextureSlots,
     ) -> BindGroupId {
         let buffer = |buffer: BufferId| BindingResource::Buffer {
@@ -229,7 +299,7 @@ impl MaterialBindingLayout {
                 },
                 BindGroupEntry {
                     binding: 2,
-                    resource: buffer(rows.unwrap_or(headers)),
+                    resource: buffer(rows),
                 },
                 BindGroupEntry {
                     binding: 3,
@@ -239,6 +309,14 @@ impl MaterialBindingLayout {
                     binding: 4,
                     resource: BindingResource::SamplerArray(slots.samplers().to_vec()),
                 },
+                BindGroupEntry {
+                    binding: 9,
+                    resource: buffer(
+                        slots.generation_buffer.expect(
+                            "material texture slots must be live when creating a bind group",
+                        )
+                    ),
+                },
             ],
         })
     }
@@ -247,9 +325,9 @@ impl MaterialBindingLayout {
     /// without a device.
     ///
     /// Group layout: `0` headers, `1` parameters, `2` texture rows, `3` texture
-    /// array, `4` sampler array. The two arrays carry a `count`, because an array
-    /// binding with `count = None` would silently bind a single resource where
-    /// the shader indexes dynamically.
+    /// array, `4` sampler array, and `9` slot generations. The two arrays carry a
+    /// `count`, because an array binding with `count = None` would silently bind
+    /// a single resource where the shader indexes dynamically.
     #[must_use]
     pub fn entries(slots: u32) -> alloc::vec::Vec<BindGroupLayoutEntry> {
         alloc::vec![
@@ -298,6 +376,16 @@ impl MaterialBindingLayout {
                 visibility: ShaderStages::FRAGMENT,
                 ty: BindingType::SamplerArray(SamplerBindingType::Filtering),
                 count: Some(slots),
+            },
+            BindGroupLayoutEntry {
+                binding: 9,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
             },
         ]
     }

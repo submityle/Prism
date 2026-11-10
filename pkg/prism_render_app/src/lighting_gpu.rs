@@ -11,8 +11,8 @@ use prism_render_driver::{
     BindGroupDescriptor, BindGroupEntry, BindGroupId, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindGroupLayoutId, BindingResource, BindingType, BufferBindingType,
     BufferDescriptor, BufferId, BufferUsages, ComputePipelineDescriptor, FrameSync,
-    PipelineLayoutDescriptor, RenderDevice, RenderQueue, ShaderModuleDescriptor, ShaderModuleId,
-    SamplerBindingType, SamplerDescriptor, SamplerId, ShaderSource, ShaderStages,
+    PipelineLayoutDescriptor, RenderDevice, RenderQueue, SamplerBindingType, SamplerDescriptor,
+    SamplerId, ShaderModuleDescriptor, ShaderModuleId, ShaderSource, ShaderStages,
     StorageTextureAccess, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType,
     TextureUsages, TextureViewDescriptor, TextureViewDimension, TextureViewId,
 };
@@ -1455,7 +1455,8 @@ fn surface_identity_layout_descriptor() -> BindGroupLayoutDescriptor {
 /// Group 2 is required by the material resolver and separate from lighting and targets.
 pub(crate) const COMPOSITE_MATERIAL_GROUP: u32 = 2;
 pub(crate) const COMPOSITE_RESPONSE_BYTES_PER_PIXEL: u64 = 16 * 4;
-const MATERIAL_TEXTURE_ROW_BYTES: u64 = core::mem::size_of::<prism_render_material::GpuMaterialTexture>() as u64;
+const MATERIAL_TEXTURE_ROW_BYTES: u64 =
+    core::mem::size_of::<prism_render_material::GpuMaterialTexture>() as u64;
 const MATERIAL_VT_PAGE_TABLE_BYTES: u64 = 16;
 const MATERIAL_VT_CONFIG_BYTES: u64 = 32;
 
@@ -1475,9 +1476,10 @@ pub(crate) struct LightingCompositeMaterialBuffers {
     pub execution_programs_size_bytes: u64,
 }
 
-/// The extra group-2 resources paired with a canonical material snapshot.
-/// Kept separate from `LightingCompositeMaterialBuffers` so old test fixtures
-/// and callers that construct the four-table ABI remain source-compatible.
+/// The texture/VT lease paired with a canonical material snapshot. These
+/// resources remain in the frame lifetime contract for Surface encode and GI,
+/// but are intentionally not part of the composite group-2 ABI: the composite
+/// consumes the already-resolved material planes from group 1.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct LightingCompositeMaterialResourceIds {
     pub texture_rows: BufferId,
@@ -1498,7 +1500,9 @@ pub(crate) enum LightingCompositeMaterialBindingError {
     MissingParameters,
     MissingExecutionPlans,
     MissingExecutionPrograms,
-    InvalidResourceId { binding: u32 },
+    InvalidResourceId {
+        binding: u32,
+    },
     InvalidBindingSize {
         binding: u32,
         size_bytes: u64,
@@ -1863,9 +1867,9 @@ mod composite_contract_tests {
                 .iter()
                 .map(|entry| entry.binding)
                 .collect::<Vec<_>>(),
-            vec![0, 1, 2, 3, 4, 5, 6]
+            vec![0, 1]
         );
-        assert!(layout.entries[..5].iter().all(|entry| {
+        assert!(layout.entries.iter().all(|entry| {
             entry.validate().is_ok()
                 && entry.visibility == ShaderStages::COMPUTE
                 && entry.count.is_none()
@@ -1876,25 +1880,10 @@ mod composite_contract_tests {
                         min_binding_size: Some(match entry.binding {
                             0 => MATERIAL_HEADER_BYTES,
                             1 => MATERIAL_PARAMETER_WORD_BYTES,
-                            2 => MATERIAL_TEXTURE_ROW_BYTES,
-                            3 => 4,
-                            4 => MATERIAL_VT_CONFIG_BYTES,
                             _ => unreachable!("material binding is outside the contract"),
                         }),
                     }
         }));
-        assert_eq!(
-            layout.entries[5].ty,
-            BindingType::Texture {
-                sample_type: TextureSampleType::Float,
-                view_dimension: TextureViewDimension::D2Array,
-                multisampled: false,
-            }
-        );
-        assert_eq!(
-            layout.entries[6].ty,
-            BindingType::Sampler(SamplerBindingType::Filtering)
-        );
 
         let ids =
             [0, 1, 2, 3].map(|index| prism_render_driver::BufferId::from_parts(index + 10, 7));
@@ -1996,7 +1985,7 @@ mod composite_contract_tests {
 
     #[test]
     fn composite_rejects_non_finite_response_before_publication() {
-        let shader = LIGHTING_COMPOSITE_WGSL;
+        let shader = build_composite_shader_source(None);
         let blend = shader
             .find("response = composite_blend_response(")
             .expect("MaskBlend response blend must remain in the composite shader");
@@ -2036,12 +2025,6 @@ mod composite_contract_tests {
         let material = include_str!("shaders/composite_material.wesl");
         for contract in [
             "composite_execution_identity_is_valid",
-            "composite_material_texture_rows_are_valid",
-            "@group(2) @binding(2) var<storage, read> composite_material_texture_rows",
-            "@group(2) @binding(3) var<storage, read> composite_material_vt_page_table",
-            "@group(2) @binding(4) var<storage, read> composite_material_vt_config",
-            "@group(2) @binding(5) var composite_material_vt_atlas",
-            "@group(2) @binding(6) var composite_material_vt_sampler",
             "header.execution_program_index == identity.left_program_index",
             "identity.program_kind != identity.left_program_kind",
             "builtin MaskBlend is the canonical fused Lit/Lit form",
@@ -2053,10 +2036,11 @@ mod composite_contract_tests {
             );
         }
 
-        let shader = LIGHTING_COMPOSITE_WGSL;
+        let shader = build_composite_shader_source(None);
         assert!(shader.contains("raw < 0.0 || raw > 1.0"));
         assert!(shader.contains("return CompositeMaskValue(true, raw);"));
-        assert!(shader.contains("composite_material_texture_rows_are_valid(material_header)"));
+        assert!(!material.contains("composite_material_texture_rows_are_valid"));
+        assert!(!material.contains("composite_material_vt_"));
         assert!(!shader.contains("mix(left.words"));
         assert!(shader.contains("composite_lerp(left.words[3]"));
     }
@@ -2413,7 +2397,9 @@ mod gbuffer_gpu_contract_tests {
         queue.write_buffer(
             execution_plans,
             0,
-            cast_slice(&[0u32, u32::MAX, 2, 0, 0, 0, 0, 0]),
+            // A single registered response is a split-response plan. The
+            // composition family is reserved for a two-arm blend.
+            cast_slice(&[0u32, u32::MAX, 1, 0, 0, 0, 0, 0]),
         );
         let execution_programs = device.create_buffer(&BufferDescriptor::new(
             MATERIAL_PROGRAM_ROW_BYTES,
@@ -4064,6 +4050,11 @@ impl LightingGpuPass {
         buffers: LightingCompositeMaterialBuffers,
         resources: LightingCompositeMaterialResourceIds,
     ) -> Result<BindGroupId, LightingCompositeMaterialBindingError> {
+        // Texture rows and VT state are consumed by Surface encode/GI and
+        // retained in the frame lease, but are not composite bindings. The
+        // composite group deliberately stays at two storage buffers so it is
+        // valid on Metal's eight-storage-buffer compute limit.
+        let _ = resources;
         let [(headers, headers_size), (parameters, parameters_size), _, _] =
             validate_material_buffers(buffers)?;
         // Plans/programs are consumed by the separate identity pass. Keeping
@@ -4104,9 +4095,7 @@ impl LightingGpuPass {
     }
 
     #[must_use]
-    pub(crate) const fn composite_material_resources(
-        self,
-    ) -> LightingCompositeMaterialResourceIds {
+    pub(crate) const fn composite_material_resources(self) -> LightingCompositeMaterialResourceIds {
         self.composite_material_resources
     }
 

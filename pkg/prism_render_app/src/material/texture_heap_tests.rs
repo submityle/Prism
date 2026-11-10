@@ -45,7 +45,7 @@ fn every_fallback_resolves_to_its_own_reserved_slot() {
 #[test]
 fn the_first_acquire_allocates_from_the_dynamic_range() {
     let mut heap = TextureSlotHeap::new(16);
-    let slot = heap.acquire(image(1));
+    let slot = heap.acquire(image(1)).expect("free slot");
     assert_eq!(slot.index, FIRST_DYNAMIC_SLOT);
     assert_eq!(slot.generation, RESERVED_GENERATION);
     let stats = heap.stats();
@@ -57,8 +57,8 @@ fn the_first_acquire_allocates_from_the_dynamic_range() {
 #[test]
 fn repeated_acquires_reuse_the_slot_and_reference_count() {
     let mut heap = TextureSlotHeap::new(16);
-    let first = heap.acquire(image(7));
-    let second = heap.acquire(image(7));
+    let first = heap.acquire(image(7)).expect("free slot");
+    let second = heap.acquire(image(7)).expect("resident image reuses slot");
     assert_eq!(first, second, "the same image keeps its slot");
     assert_eq!(heap.refcount(image(7)), 2);
     assert_eq!(heap.stats().live_images, 1);
@@ -76,7 +76,7 @@ fn repeated_acquires_reuse_the_slot_and_reference_count() {
 #[test]
 fn a_reused_slot_bumps_its_generation_and_invalidates_the_old_row() {
     let mut heap = TextureSlotHeap::new(16);
-    let first = heap.acquire(image(1));
+    let first = heap.acquire(image(1)).expect("free slot");
     assert!(heap.validates(first));
     assert!(heap.release(image(1)));
     assert_eq!(heap.stats().free_slots, 1);
@@ -86,7 +86,7 @@ fn a_reused_slot_bumps_its_generation_and_invalidates_the_old_row() {
     );
     assert_eq!(heap.slot_of(image(1)), None);
 
-    let reused = heap.acquire(image(2));
+    let reused = heap.acquire(image(2)).expect("released slot is reusable");
     assert_eq!(reused.index, first.index, "the freed slot is reused");
     assert_eq!(
         reused.generation,
@@ -100,9 +100,9 @@ fn a_reused_slot_bumps_its_generation_and_invalidates_the_old_row() {
 #[test]
 fn distinct_images_get_distinct_slots() {
     let mut heap = TextureSlotHeap::new(16);
-    let a = heap.acquire(image(10));
-    let b = heap.acquire(image(20));
-    let c = heap.acquire(image(30));
+    let a = heap.acquire(image(10)).expect("free slot");
+    let b = heap.acquire(image(20)).expect("free slot");
+    let c = heap.acquire(image(30)).expect("free slot");
     assert_ne!(a.index, b.index);
     assert_ne!(b.index, c.index);
     assert_ne!(a.index, c.index);
@@ -111,17 +111,21 @@ fn distinct_images_get_distinct_slots() {
     assert_eq!(heap.high_water(), FIRST_DYNAMIC_SLOT + 3);
 }
 
-/// At capacity the heap degrades to the white fallback instead of panicking or
-/// handing out an index the bound array cannot address.
+/// Capacity pressure is explicit; it never turns an authored texture into white.
 #[test]
-fn capacity_exhaustion_falls_back_to_white_and_counts_the_overflow() {
+fn capacity_exhaustion_is_reported_and_counts_the_overflow() {
     // Reserved 0/1/2 plus exactly one dynamic slot.
     let mut heap = TextureSlotHeap::new(FIRST_DYNAMIC_SLOT + 1);
-    let ok = heap.acquire(image(1));
+    let ok = heap
+        .acquire(image(1))
+        .expect("the dynamic slot is available");
     assert_eq!(ok.index, FIRST_DYNAMIC_SLOT);
 
     let overflow = heap.acquire(image(2));
-    assert_eq!(overflow, BindlessSlot::WHITE);
+    assert_eq!(
+        overflow,
+        Err(super::texture_heap::TextureHeapAcquireError::CapacityExhausted)
+    );
     assert_eq!(heap.stats().overflow, 1);
     assert!(
         !heap.release(image(2)),
@@ -130,7 +134,7 @@ fn capacity_exhaustion_falls_back_to_white_and_counts_the_overflow() {
     assert_eq!(heap.refcount(image(2)), 0);
 
     assert!(heap.release(image(1)));
-    let recovered = heap.acquire(image(3));
+    let recovered = heap.acquire(image(3)).expect("released slot is reusable");
     assert_eq!(
         recovered.index, FIRST_DYNAMIC_SLOT,
         "freeing a slot lets the next acquire succeed"
@@ -150,9 +154,9 @@ fn releasing_an_unknown_image_is_a_noop() {
 #[test]
 fn iter_slots_yields_every_resident_image_in_a_deterministic_order() {
     let mut heap = TextureSlotHeap::new(16);
-    heap.acquire(image(30));
-    heap.acquire(image(10));
-    heap.acquire(image(20));
+    heap.acquire(image(30)).expect("free slot");
+    heap.acquire(image(10)).expect("free slot");
+    heap.acquire(image(20)).expect("free slot");
     let slots: Vec<(u32, AssetId<Image>)> = heap.iter_slots().collect();
     assert_eq!(slots.len(), 3);
     assert!(slots.iter().all(|(slot, _)| *slot >= FIRST_DYNAMIC_SLOT));
@@ -178,14 +182,14 @@ fn iter_slots_yields_every_resident_image_in_a_deterministic_order() {
 #[test]
 fn resetting_the_capacity_requires_an_empty_heap() {
     let mut heap = TextureSlotHeap::new(16);
-    heap.acquire(image(1));
+    heap.acquire(image(1)).expect("free slot");
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         heap.reset_with_capacity(8);
     }));
     assert!(result.is_err(), "resizing under live references panics");
 
     let mut heap = TextureSlotHeap::new(16);
-    heap.acquire(image(1));
+    heap.acquire(image(1)).expect("free slot");
     heap.release(image(1));
     heap.reset_with_capacity(FIRST_DYNAMIC_SLOT + 32);
     assert_eq!(heap.capacity(), FIRST_DYNAMIC_SLOT + 32);

@@ -538,7 +538,7 @@ mod tests {
     #[test]
     fn rejects_non_owned_program_and_invalid_plan_endpoint() {
         let (mut headers, mut plans, mut programs) = fixture();
-        programs.push([0, 0, 4, 0, 1]);
+        programs.push([RESPONSE_PROGRAM_KIND_NPR, 0, 4, 0, 1]);
         headers[0].execution_program_index = 1;
         assert!(matches!(
             validate_material_tuple(identity(), &headers, 24, &plans, &programs, 1),
@@ -583,8 +583,15 @@ mod tests {
     #[test]
     fn permits_either_verified_plan_endpoint_without_maskblend_rejection() {
         let (mut headers, mut plans, mut programs) = fixture();
-        programs.push([0, 0, 4, 0, 1]);
+        programs.push([RESPONSE_PROGRAM_KIND_NPR, 0, 4, 0, 1]);
         plans[0][1] = 1;
+        // A two-endpoint plan is a real MaskBlend row, not a single-plan row
+        // with an extra program attached. Keep the fixture inside the same
+        // canonical FullRadiance + DynamicChannel contract as production rows.
+        plans[0][3] = 31;
+        plans[0][4] = EXECUTION_MASK_DYNAMIC_CHANNEL;
+        plans[0][5] = 0;
+        plans[0][6] = 0;
         headers[0].execution_program_index = 1;
         let tuple =
             validate_material_tuple(identity(), &headers, 24, &plans, &programs, 1).unwrap();

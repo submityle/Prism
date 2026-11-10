@@ -1,18 +1,27 @@
 //! Behavioural tests for the material ABI buffers.
 
+use prism_render_driver::{
+    BufferId, CommandBuffer, FrameSync, ImageDataLayout, RenderQueue, TextureWrite,
+};
 use prism_render_driver::{BufferUsages, DeviceDescriptor, Instance, RequestAdapterOptions};
 use prism_render_driver_null::NullInstance;
 use prism_render_material::{
-    fallback_material_record, BuiltinProgram, ClosureKind, MaterialRecord, ShadingPlan,
+    fallback_material_record, BuiltinProgram, ClosureKind, DynamicChannels, GpuMaterialHeader,
+    GpuMaterialTexture, MaterialExecutionBinding, MaterialRecord, MaterialRegistry,
+    MaterialTextureResidencyUpdate, ShadingPlan,
 };
 
-use prism_render_architecture::abi::GenerationalHandle;
+use prism_render_architecture::{abi::GenerationalHandle, gpu_scene::GpuCompletionValue};
+use std::sync::{Arc, Mutex};
 
-use crate::material::MaterialParameterBuffers;
+use crate::material::{
+    MaterialFrameSnapshotBundle, MaterialFrameSnapshotError, MaterialParameterBuffers,
+    NativeExecutionTableBuffers,
+};
 
 fn null_device() -> (
     prism_render_driver_null::NullDevice,
-    impl prism_render_driver::RenderQueue,
+    impl prism_render_driver::RenderQueue + prism_render_driver::FrameSync,
 ) {
     let options = RequestAdapterOptions::default();
     let adapter = NullInstance::new()
@@ -23,6 +32,55 @@ fn null_device() -> (
         .expect("the null device always comes up")
 }
 
+#[derive(Default)]
+struct DeferredCallbacks(Mutex<Vec<Box<dyn FnOnce() + Send + 'static>>>);
+
+impl DeferredCallbacks {
+    fn complete(&self, index: usize) {
+        let callback = self.0.lock().unwrap().remove(index);
+        callback();
+    }
+
+    fn pending(&self) -> usize {
+        self.0.lock().unwrap().len()
+    }
+}
+
+#[derive(Default)]
+struct DeferredQueue(DeferredCallbacks);
+
+impl RenderQueue for DeferredQueue {
+    fn write_buffer(&self, buffer: BufferId, offset: u64, data: &[u8]) {
+        prism_render_driver_null::NullQueue.write_buffer(buffer, offset, data);
+    }
+
+    fn write_texture(&self, destination: TextureWrite, data: &[u8], layout: ImageDataLayout) {
+        prism_render_driver_null::NullQueue.write_texture(destination, data, layout);
+    }
+
+    fn submit(&self, commands: &[CommandBuffer]) {
+        prism_render_driver_null::NullQueue.submit(commands);
+    }
+}
+
+impl FrameSync for DeferredQueue {
+    fn submit_tracked(&self, commands: &[CommandBuffer]) -> prism_render_driver::CompletionToken {
+        prism_render_driver_null::NullQueue.submit_tracked(commands)
+    }
+
+    fn wait_for(&self, token: &(dyn core::any::Any + Send + Sync)) -> bool {
+        prism_render_driver_null::NullQueue.wait_for(token)
+    }
+
+    fn wait_idle(&self) -> bool {
+        prism_render_driver_null::NullQueue.wait_idle()
+    }
+
+    fn on_submitted_work_done(&self, callback: Box<dyn FnOnce() + Send + 'static>) {
+        self.0 .0.lock().unwrap().push(callback);
+    }
+}
+
 /// A texture reference as the ABI carries it: the image's slot identity plus the
 /// semantic it is bound as.
 fn texture_entry(index: u32, semantic: u32) -> prism_render_material::GpuMaterialTexture {
@@ -31,11 +89,439 @@ fn texture_entry(index: u32, semantic: u32) -> prism_render_material::GpuMateria
 
 /// A record whose packed block is wider than a plain dielectric's, so a test can
 /// make a material change block size.
-fn record_with_lobes(index: u32, lobes: u32) -> MaterialRecord {
-    let handle = GenerationalHandle::new(index, 1);
+fn record_with_lobes(handle: GenerationalHandle, lobes: u32) -> MaterialRecord {
     let mut record = fallback_material_record(handle, 1);
     record.closure_mask = lobes;
     record
+}
+
+/// Isolate scene-material placement from the permanent fallback. The frame
+/// tests below exercise uploading slot zero through the production stage.
+fn registry_fixture(capacity: u32) -> MaterialRegistry {
+    let mut registry = MaterialRegistry::new(capacity);
+    assert_eq!(registry.take_dirty(), vec![0]);
+    registry
+}
+
+/// Install a real verified package/table binding and nonzero dynamic channels;
+/// resynchronizing a live row must not reconstruct an inert runtime tail.
+fn install_runtime_tail(
+    registry: &mut MaterialRegistry,
+    handle: GenerationalHandle,
+) -> (DynamicChannels, MaterialExecutionBinding) {
+    use prism_render_architecture::{
+        abi::{AbiHash, AbiVersion},
+        shader_package::{
+            ArtifactDigest, ManifestExpectation, ModuleId, PermutationSpace, ShaderPackageId,
+            ShaderPackageManifest, ShaderPackageRegistry, ShaderPackageVariantManifest,
+        },
+    };
+    use prism_render_material::{
+        ChannelMask, CompiledEntry, ExecutionFamily, MaterialExecutionTables, ProgramRef,
+    };
+
+    let permutations = PermutationSpace::new([2]);
+    let manifest = ShaderPackageManifest {
+        id: ShaderPackageId::new("material-buffer-registry-fixture"),
+        source_revision: "1".into(),
+        entry_point: "main".into(),
+        abi_version: AbiVersion::from_parts(1, 0),
+        abi_hash: AbiHash::from_bytes(
+            prism_render_material::response_source::RESPONSE_FUNCTION_ABI.as_bytes(),
+        ),
+        variants: ShaderPackageVariantManifest::from_digests(
+            &permutations,
+            [ArtifactDigest([1; 32]), ArtifactDigest([2; 32])],
+        )
+        .unwrap(),
+    };
+    let compiled = CompiledEntry::from_response_wgsl(
+        manifest.clone(),
+        vec![
+            "var response: RegisteredResponse; return response;".into(),
+            "var response: RegisteredResponse; return response;".into(),
+        ],
+    )
+    .unwrap();
+    let mut packages = ShaderPackageRegistry::new();
+    packages
+        .register_verified(compiled.artifact().clone())
+        .unwrap();
+    packages
+        .validate(
+            &manifest.id,
+            &ManifestExpectation::new(manifest.abi_version, manifest.abi_hash),
+        )
+        .unwrap();
+    let mut tables = MaterialExecutionTables::new();
+    let package = tables.register_package(&compiled, &packages).unwrap();
+    let mut binding = None;
+    // Include a preceding plan/program so the tested identity is not all zero.
+    for (index, builtin) in [BuiltinProgram::Unlit, BuiltinProgram::Lit]
+        .into_iter()
+        .enumerate()
+    {
+        let execution_family = match builtin {
+            BuiltinProgram::Lit => ExecutionFamily::FusedBuiltin,
+            BuiltinProgram::Unlit => ExecutionFamily::SplitResponse,
+            _ => unreachable!("the fixture only registers Lit and Unlit"),
+        };
+        let program = tables
+            .register_program(
+                ProgramRef::Builtin(builtin),
+                &compiled,
+                package,
+                ModuleId(index as u64),
+                permutations.clone(),
+            )
+            .unwrap();
+        let plan = tables
+            .register_plan(
+                ShadingPlan::single_builtin(builtin),
+                program,
+                None,
+                execution_family,
+                ChannelMask::default(),
+            )
+            .unwrap();
+        binding = Some(
+            tables
+                .bind_raw(plan.get(), program.get(), package.get(), 1)
+                .unwrap(),
+        );
+    }
+    registry.install_execution_tables(&tables).unwrap();
+    let binding = binding.unwrap();
+    let dynamic = DynamicChannels {
+        wetness: 0.25,
+        snow: 0.5,
+        damage: 0.75,
+        dissolve: 1.0,
+    };
+    registry.set_dynamic_channels(handle, dynamic).unwrap();
+    registry.set_execution_binding(handle, binding).unwrap();
+    (dynamic, binding)
+}
+
+fn assert_runtime_tail(
+    row: &GpuMaterialHeader,
+    dynamic: DynamicChannels,
+    binding: MaterialExecutionBinding,
+) {
+    assert_eq!(
+        [
+            row.dynamic_wetness,
+            row.dynamic_snow,
+            row.dynamic_damage,
+            row.dynamic_dissolve,
+        ],
+        dynamic.to_words()
+    );
+    assert_eq!(row.execution_binding_words(), binding.to_words());
+}
+
+#[test]
+fn native_execution_table_mirror_publishes_and_recovers_the_registry_version() {
+    let (device, queue) = null_device();
+    let device = std::sync::Arc::new(device);
+    let mut registry = registry_fixture(2);
+    let handle = registry.allocate().unwrap();
+    registry.publish(record_with_lobes(handle, 1)).unwrap();
+    install_runtime_tail(&mut registry, handle);
+    let expected_version = registry.execution_table_version();
+    let expected_plans = registry.execution_plan_rows().to_vec();
+    let expected_programs = registry.execution_program_rows().to_vec();
+
+    let mut mirror = NativeExecutionTableBuffers::new();
+    assert!(mirror
+        .sync_registry(std::sync::Arc::clone(&device), &queue, &registry)
+        .unwrap());
+    assert_eq!(mirror.execution_table_version(), Some(expected_version));
+    assert_eq!(mirror.plan_rows(), expected_plans);
+    assert_eq!(mirror.program_rows(), expected_programs);
+    assert!(mirror.plan_buffer().is_some());
+    assert!(mirror.program_buffer().is_some());
+
+    mirror
+        .recover(std::sync::Arc::clone(&device), &queue)
+        .unwrap();
+    assert_eq!(mirror.execution_table_version(), Some(expected_version));
+    assert!(mirror.plan_buffer().is_some());
+    assert!(mirror.program_buffer().is_some());
+
+    mirror.release();
+    assert_eq!(mirror.execution_table_version(), None);
+}
+
+#[test]
+fn deferred_execution_table_replacement_keeps_active_snapshot_until_completion() {
+    let (device, _) = null_device();
+    let device = Arc::new(device);
+    let queue = DeferredQueue::default();
+    let mut registry = registry_fixture(2);
+    let handle = registry.allocate().unwrap();
+    registry.publish(record_with_lobes(handle, 1)).unwrap();
+    install_runtime_tail(&mut registry, handle);
+    let mut mirror = NativeExecutionTableBuffers::new();
+
+    assert!(mirror
+        .sync_registry(Arc::clone(&device), &queue, &registry)
+        .unwrap());
+    assert_eq!(
+        mirror.execution_table_version(),
+        None,
+        "first upload is pending"
+    );
+    assert_eq!(queue.0.pending(), 1);
+    queue.0.complete(0);
+    let first = mirror
+        .snapshot()
+        .expect("completion publishes first snapshot");
+    let first_version = first.version();
+    let first_plan_buffer = first.plan_buffer();
+    let first_program_buffer = first.program_buffer();
+    let first_owner = first.external_owner();
+    drop(first);
+
+    // Installing a fresh verified table advances the registry generation.
+    install_runtime_tail(&mut registry, handle);
+    let replacement_version = registry.execution_table_version();
+    assert_ne!(replacement_version, first_version);
+    assert!(mirror
+        .sync_registry(Arc::clone(&device), &queue, &registry)
+        .unwrap());
+    assert_eq!(mirror.execution_table_version(), Some(first_version));
+    assert_eq!(mirror.plan_buffer(), Some(first_plan_buffer));
+    assert_eq!(mirror.program_buffer(), Some(first_program_buffer));
+    assert_eq!(
+        device.live_resource_count(),
+        4,
+        "both generations stay allocated"
+    );
+
+    queue.0.complete(0);
+    assert_eq!(mirror.execution_table_version(), Some(replacement_version));
+    let replacement = mirror.snapshot().expect("callback publishes replacement");
+    assert_ne!(replacement.plan_buffer(), first_plan_buffer);
+    assert_ne!(replacement.program_buffer(), first_program_buffer);
+    assert_eq!(
+        device.live_resource_count(),
+        4,
+        "retained owner pins old buffers"
+    );
+
+    drop(replacement);
+    assert!(!mirror
+        .sync_registry(Arc::clone(&device), &queue, &registry)
+        .unwrap());
+    drop(first_owner);
+    assert_eq!(
+        device.live_resource_count(),
+        2,
+        "old buffers retire after owner release"
+    );
+    mirror.release();
+    assert_eq!(device.live_resource_count(), 0);
+}
+
+#[test]
+fn execution_table_recovery_replays_rows_and_retires_through_the_creator_device() {
+    let (old_device, _) = null_device();
+    let old_device = Arc::new(old_device);
+    let (new_device, _) = null_device();
+    let new_device = Arc::new(new_device);
+    let queue = DeferredQueue::default();
+    let mut registry = registry_fixture(2);
+    let handle = registry.allocate().unwrap();
+    registry.publish(record_with_lobes(handle, 1)).unwrap();
+    install_runtime_tail(&mut registry, handle);
+    let expected_version = registry.execution_table_version();
+    let expected_plans = registry.execution_plan_rows().to_vec();
+    let expected_programs = registry.execution_program_rows().to_vec();
+    let mut mirror = NativeExecutionTableBuffers::new();
+
+    mirror
+        .sync_registry(Arc::clone(&old_device), &queue, &registry)
+        .unwrap();
+    queue.0.complete(0);
+    let old_snapshot = mirror.snapshot().unwrap();
+    let old_owner = old_snapshot.external_owner();
+    drop(old_snapshot);
+    assert_eq!(old_device.live_resource_count(), 2);
+
+    mirror.recover(Arc::clone(&new_device), &queue).unwrap();
+    assert_eq!(
+        mirror.execution_table_version(),
+        None,
+        "replay awaits completion"
+    );
+    assert_eq!(mirror.plan_rows(), expected_plans);
+    assert_eq!(mirror.program_rows(), expected_programs);
+    assert_eq!(
+        old_device.live_resource_count(),
+        2,
+        "recovery never destroys via new device"
+    );
+    assert_eq!(new_device.live_resource_count(), 2);
+
+    queue.0.complete(0);
+    let recovered = mirror.snapshot().expect("replayed snapshot is published");
+    assert_eq!(recovered.version(), expected_version);
+    assert_eq!(recovered.plan_rows(), expected_plans);
+    assert_eq!(recovered.program_rows(), expected_programs);
+    assert_eq!(
+        old_device.live_resource_count(),
+        2,
+        "external graph owner still pins old buffers"
+    );
+
+    drop(recovered);
+    drop(old_owner);
+    assert_eq!(old_device.live_resource_count(), 0);
+    mirror.release();
+    assert_eq!(new_device.live_resource_count(), 0);
+}
+
+#[test]
+fn pinned_texture_row_update_detaches_the_entire_material_allocation() {
+    let (device, queue) = null_device();
+    let device = Arc::new(device);
+    let mut registry = registry_fixture(2);
+    let handle = registry.allocate().unwrap();
+    let mut record = fallback_material_record(handle, 1);
+    record
+        .textures
+        .push(GpuMaterialTexture::non_virtual(3, 1, 0, 3));
+    registry.publish(record).unwrap();
+
+    let mut buffers =
+        MaterialParameterBuffers::new_owned(Arc::clone(&device), 2, 64, 8, BufferUsages::NONE);
+    let dirty = registry.take_dirty();
+    buffers.sync_registry(&*device, &queue, &registry, dirty);
+    let old = buffers.snapshot().expect("initial material allocation");
+    let old_ids = (old.headers(), old.parameters(), old.textures());
+
+    let expected = registry.record_at(handle.index).unwrap().textures[0];
+    let replacement = GpuMaterialTexture::with_virtual_texture(3, 1, 0, 3, 7, 128, 128, 64);
+    assert_eq!(
+        registry
+            .update_texture_residency(&[MaterialTextureResidencyUpdate {
+                handle,
+                expected_revision: 1,
+                texture_index: 0,
+                expected,
+                replacement,
+            }])
+            .unwrap(),
+        1
+    );
+    let dirty = registry.take_dirty();
+    let report = buffers.sync_registry(&*device, &queue, &registry, dirty);
+    assert_eq!(report.textures_written, 1);
+
+    let current = buffers.snapshot().expect("replacement material allocation");
+    assert_ne!(
+        (current.headers(), current.parameters(), current.textures()),
+        old_ids,
+        "a pinned texture-row mutation must not rewrite any member of the old allocation"
+    );
+    assert_eq!(device.live_resource_count(), 6);
+    drop(old);
+    assert_eq!(device.live_resource_count(), 3);
+    drop(current);
+    buffers.release(device.as_ref());
+    assert_eq!(device.live_resource_count(), 0);
+}
+
+#[test]
+fn material_and_execution_replacements_only_admit_after_execution_completion() {
+    let (device, _) = null_device();
+    let device = Arc::new(device);
+    let queue = DeferredQueue::default();
+    let mut registry = registry_fixture(2);
+    let handle = registry.allocate().unwrap();
+    let mut initial_record = fallback_material_record(handle, 1);
+    initial_record
+        .textures
+        .push(GpuMaterialTexture::non_virtual(3, 1, 0, 3));
+    registry.publish(initial_record).unwrap();
+    registry
+        .install_execution_tables(&prism_render_material::MaterialExecutionTables::new())
+        .unwrap();
+
+    let mut materials =
+        MaterialParameterBuffers::new_owned(Arc::clone(&device), 2, 64, 8, BufferUsages::NONE);
+    let mut executions = NativeExecutionTableBuffers::new();
+    assert!(executions
+        .sync_registry(Arc::clone(&device), &queue, &registry)
+        .unwrap());
+    let dirty = registry.take_dirty();
+    materials.sync_registry(&*device, &queue, &registry, dirty);
+    let first_material = materials.snapshot().expect("first material publication");
+    assert!(
+        executions.snapshot().is_none(),
+        "an incomplete execution upload cannot be consumed"
+    );
+    assert_eq!(queue.0.pending(), 1);
+
+    queue.0.complete(0);
+    let first_execution = executions.snapshot().expect("first execution publication");
+    let first_bundle = MaterialFrameSnapshotBundle::new(first_material.clone(), first_execution)
+        .expect("the first material/execution/texture generation is coherent");
+    assert_eq!(
+        first_bundle.material().textures(),
+        first_material.textures(),
+        "the frame bundle must retain the texture buffer from the same allocation generation"
+    );
+
+    registry
+        .install_execution_tables(&prism_render_material::MaterialExecutionTables::new())
+        .unwrap();
+    let expected_texture = registry.record_at(handle.index).unwrap().textures[0];
+    let replacement_texture = GpuMaterialTexture::with_virtual_texture(3, 1, 0, 3, 7, 128, 128, 64);
+    assert_eq!(
+        registry
+            .update_texture_residency(&[MaterialTextureResidencyUpdate {
+                handle,
+                expected_revision: 1,
+                texture_index: 0,
+                expected: expected_texture,
+                replacement: replacement_texture,
+            }])
+            .unwrap(),
+        1
+    );
+    assert!(executions
+        .sync_registry(Arc::clone(&device), &queue, &registry)
+        .unwrap());
+    let dirty = registry.take_dirty();
+    materials.sync_registry(&*device, &queue, &registry, dirty);
+    let replacement_material = materials
+        .snapshot()
+        .expect("replacement material publication");
+    assert_ne!(
+        replacement_material.textures(),
+        first_bundle.material().textures(),
+        "a texture-row replacement must publish a fresh material generation"
+    );
+    let old_execution = executions
+        .snapshot()
+        .expect("old execution remains active while replacement uploads");
+    assert!(matches!(
+        MaterialFrameSnapshotBundle::new(replacement_material.clone(), old_execution),
+        Err(MaterialFrameSnapshotError::VersionMismatch { .. })
+    ));
+
+    queue.0.complete(0);
+    let replacement_execution = executions
+        .snapshot()
+        .expect("replacement execution publication");
+    assert!(MaterialFrameSnapshotBundle::new(replacement_material, replacement_execution).is_ok());
+    assert_eq!(
+        first_bundle.material().textures(),
+        first_material.textures(),
+        "the retained frame bundle must keep its original texture generation immutable"
+    );
 }
 
 #[test]
@@ -46,16 +532,16 @@ fn syncing_materials_places_their_blocks_and_writes_their_rows() {
     let mut buffers = MaterialParameterBuffers::new(&device, 4, 512, 64, BufferUsages::NONE);
     assert_eq!(buffers.header_capacity(), 4);
 
-    let first = record_with_lobes(0, 1);
-    let second = record_with_lobes(1, 1);
+    let mut registry = registry_fixture(2);
+    let first = record_with_lobes(registry.allocate().unwrap(), 1);
+    let second = record_with_lobes(registry.allocate().unwrap(), 1);
     let first_words = first.packed_parameters().pack().len() as u32;
     let second_words = second.packed_parameters().pack().len() as u32;
-    let report = buffers.sync(
-        &device,
-        &queue,
-        [(0, first.clone()), (1, second.clone())],
-        7,
-    );
+    registry.publish(first.clone()).unwrap();
+    registry.publish(second.clone()).unwrap();
+    let epoch = registry.snapshot().epoch;
+    let dirty = registry.take_dirty();
+    let report = buffers.sync_registry(&device, &queue, &registry, dirty);
 
     assert_eq!(report.headers_written, 2, "both rows are new");
     assert_eq!(report.parameters_written, 2, "both blocks are new");
@@ -66,9 +552,13 @@ fn syncing_materials_places_their_blocks_and_writes_their_rows() {
         "the heap covers both blocks"
     );
 
-    let row = buffers.header(0).expect("row 0");
+    let row = buffers.header(first.handle.index).expect("first row");
     assert_eq!(row.is_active, 1);
-    assert_eq!(row.material_epoch_low, 7, "the epoch rides the row");
+    assert_eq!(row.generation, first.handle.generation);
+    assert_eq!(
+        row.material_epoch_low, epoch as u32,
+        "the epoch rides the row"
+    );
     assert_eq!(
         row.parameter_offset, 0,
         "the first block starts at the heap's origin"
@@ -77,20 +567,24 @@ fn syncing_materials_places_their_blocks_and_writes_their_rows() {
         row.parameter_size as usize,
         first.packed_parameters().packed_size_bytes()
     );
-    let words = buffers.parameters_of(0).expect("block 0");
+    let words = buffers
+        .parameters_of(first.handle.index)
+        .expect("first block");
     assert_eq!(
         words,
         first.packed_parameters().pack().as_slice(),
         "the words are the ABI's packed block"
     );
 
-    let row = buffers.header(1).expect("row 1");
+    let row = buffers.header(second.handle.index).expect("second row");
     assert_eq!(
         row.parameter_offset, first_words,
         "the second block follows the first"
     );
     assert_eq!(
-        buffers.parameters_of(1).expect("block 1"),
+        buffers
+            .parameters_of(second.handle.index)
+            .expect("second block"),
         second.packed_parameters().pack().as_slice()
     );
 }
@@ -100,14 +594,40 @@ fn syncing_materials_places_their_blocks_and_writes_their_rows() {
 fn an_unchanged_sync_writes_nothing() {
     let (device, queue) = null_device();
     let mut buffers = MaterialParameterBuffers::new(&device, 2, 32, 16, BufferUsages::NONE);
-    let record = record_with_lobes(0, 1);
-    buffers.sync(&device, &queue, [(0, record.clone())], 7);
+    let mut registry = registry_fixture(1);
+    let record = record_with_lobes(registry.allocate().unwrap(), 1);
+    let handle = record.handle;
+    registry.publish(record.clone()).unwrap();
+    let (dynamic, binding) = install_runtime_tail(&mut registry, handle);
+    let dirty = registry.take_dirty();
+    buffers.sync_registry(&device, &queue, &registry, dirty);
+    let expected = *buffers.header(handle.index).expect("live row");
+    assert_runtime_tail(&expected, dynamic, binding);
 
-    let report = buffers.sync(&device, &queue, [(0, record)], 7);
+    // Force the same live row through the upload path, without republishing:
+    // publication deliberately resets runtime state and is not a quiet frame.
+    let report = buffers.sync_registry(&device, &queue, &registry, [handle.index]);
 
     assert_eq!(report.headers_written, 0);
     assert_eq!(report.parameters_written, 0);
+    assert_eq!(report.textures_written, 0);
     assert_eq!(report.relocated, 0);
+    assert!(!report.grew);
+    assert_eq!(*buffers.header(handle.index).unwrap(), expected);
+    assert_runtime_tail(buffers.header(handle.index).unwrap(), dynamic, binding);
+    assert_eq!(registry.get(handle), Some(&record));
+    assert_eq!(registry.dynamic_channels_at(handle.index), dynamic);
+    assert_eq!(registry.execution_binding_at(handle.index), Some(binding));
+    let dirty = registry.take_dirty();
+    assert!(
+        dirty.is_empty(),
+        "a resync does not republish or dirty the row"
+    );
+    assert_eq!(
+        buffers.sync_registry(&device, &queue, &registry, dirty),
+        crate::material::MaterialSyncReport::default()
+    );
+    assert_runtime_tail(buffers.header(handle.index).unwrap(), dynamic, binding);
 }
 
 /// A material that gains a lobe needs a wider block, so its old run goes back to
@@ -116,24 +636,34 @@ fn an_unchanged_sync_writes_nothing() {
 fn a_wider_block_relocates_and_frees_the_old_run() {
     let (device, queue) = null_device();
     let mut buffers = MaterialParameterBuffers::new(&device, 2, 64, 16, BufferUsages::NONE);
-    buffers.sync(&device, &queue, [(0, record_with_lobes(0, 1))], 1);
+    let mut registry = registry_fixture(1);
+    let narrow = record_with_lobes(registry.allocate().unwrap(), 1);
+    let handle = narrow.handle;
+    registry.publish(narrow.clone()).unwrap();
+    let dirty = registry.take_dirty();
+    buffers.sync_registry(&device, &queue, &registry, dirty);
     let narrow_words = buffers.used_words();
-    assert_eq!(buffers.header(0).expect("row").parameter_offset, 0);
+    assert_eq!(
+        buffers.header(handle.index).expect("row").parameter_offset,
+        0
+    );
 
     // A second closure kind makes the derived lobe set larger, so the packed
     // block grows.
-    let wider = record_with_lobes(0, 1 | (1 << ClosureKind::ClearCoat as u32));
+    let mut wider = record_with_lobes(handle, 1 | (1 << ClosureKind::ClearCoat as u32));
+    wider.revision = narrow.revision + 1;
     assert!(
-        wider.packed_parameters().pack().len()
-            > record_with_lobes(0, 1).packed_parameters().pack().len(),
+        wider.packed_parameters().pack().len() > narrow.packed_parameters().pack().len(),
         "the fixture really changes the block width"
     );
-    let report = buffers.sync(&device, &queue, [(0, wider.clone())], 2);
+    registry.publish(wider.clone()).unwrap();
+    let dirty = registry.take_dirty();
+    let report = buffers.sync_registry(&device, &queue, &registry, dirty);
 
     assert_eq!(report.relocated, 1, "the block moved");
     assert!(buffers.used_words() > narrow_words);
     assert_eq!(
-        buffers.parameters_of(0).expect("block 0"),
+        buffers.parameters_of(handle.index).expect("block"),
         wider.packed_parameters().pack().as_slice()
     );
 }
@@ -144,23 +674,36 @@ fn a_wider_block_relocates_and_frees_the_old_run() {
 fn a_higher_index_grows_and_refills() {
     let (device, queue) = null_device();
     let mut buffers = MaterialParameterBuffers::new(&device, 2, 8, 16, BufferUsages::NONE);
-    buffers.sync(&device, &queue, [(0, record_with_lobes(0, 1))], 1);
+    let mut registry = registry_fixture(9);
+    let first = registry.allocate().unwrap();
+    registry.publish(record_with_lobes(first, 1)).unwrap();
+    let (dynamic, binding) = install_runtime_tail(&mut registry, first);
+    let dirty = registry.take_dirty();
+    buffers.sync_registry(&device, &queue, &registry, dirty);
+    let expected = *buffers.header(first.index).unwrap();
+    assert_runtime_tail(&expected, dynamic, binding);
 
-    let report = buffers.sync(
-        &device,
-        &queue,
-        [(0, record_with_lobes(0, 1)), (9, record_with_lobes(9, 1))],
-        2,
-    );
+    // Allocate intermediate handles without publishing them: only the ninth
+    // scene slot should become active, with the gap left explicitly inactive.
+    let mut higher = first;
+    for _ in 0..8 {
+        higher = registry.allocate().unwrap();
+    }
+    assert_eq!(higher.index, 9);
+    registry.publish(record_with_lobes(higher, 1)).unwrap();
+    let dirty = registry.take_dirty();
+    let report = buffers.sync_registry(&device, &queue, &registry, dirty);
 
     assert!(report.grew, "index 9 does not fit in two rows");
     assert!(buffers.header_capacity() >= 10);
     assert_eq!(
-        buffers.header(0).expect("row 0").is_active,
+        buffers.header(first.index).expect("first row").is_active,
         1,
         "the mirror refilled the existing material"
     );
     assert_eq!(buffers.header(9).expect("row 9").is_active, 1);
+    assert_eq!(*buffers.header(first.index).unwrap(), expected);
+    assert_runtime_tail(buffers.header(first.index).unwrap(), dynamic, binding);
     assert_eq!(
         buffers.header(5).expect("row 5").is_active,
         0,
@@ -174,31 +717,53 @@ fn a_higher_index_grows_and_refills() {
 fn removing_a_material_frees_its_run_and_retires_its_row() {
     let (device, queue) = null_device();
     let mut buffers = MaterialParameterBuffers::new(&device, 2, 64, 16, BufferUsages::NONE);
-    buffers.sync(
-        &device,
-        &queue,
-        [(0, record_with_lobes(0, 1)), (1, record_with_lobes(1, 1))],
-        1,
-    );
+    let mut registry = registry_fixture(3);
+    let first = registry.allocate().unwrap();
+    let second = registry.allocate().unwrap();
+    registry.publish(record_with_lobes(first, 1)).unwrap();
+    registry.publish(record_with_lobes(second, 1)).unwrap();
+    let dirty = registry.take_dirty();
+    buffers.sync_registry(&device, &queue, &registry, dirty);
+    let second_offset = buffers.header(second.index).unwrap().parameter_offset;
 
-    buffers.remove(&queue, 0, 1);
+    registry.retire(first, GpuCompletionValue(0)).unwrap();
+    assert!(buffers.remove(&queue, first.index, first.generation));
 
-    let row = buffers.header(0).expect("row 0");
+    let row = buffers.header(first.index).expect("retired row");
     assert_eq!(row.is_active, 0, "the row is retired");
-    assert_eq!(row.generation, 1, "and tagged with the slot's generation");
-    assert!(buffers.parameters_of(0).is_none(), "its run is gone");
+    assert_eq!(
+        row.generation, first.generation,
+        "and tagged with the slot's generation"
+    );
+    assert!(
+        buffers.parameters_of(first.index).is_none(),
+        "its run is gone"
+    );
 
     // Its words are reusable: the next material placed gets the freed run, which
     // is what "returned to the heap" means for a first-fit free list (the
     // high-water mark only falls when the *tail* is freed).
-    let report = buffers.sync(&device, &queue, [(2, record_with_lobes(2, 1))], 2);
-    assert_eq!(report.relocated, 0, "material 2 is new");
+    let third = registry.allocate().unwrap();
+    registry.publish(record_with_lobes(third, 1)).unwrap();
+    let dirty = registry.take_dirty();
+    let report = buffers.sync_registry(&device, &queue, &registry, dirty);
+    assert_eq!(report.relocated, 0, "the third material is new");
     assert_eq!(
-        buffers.header(2).expect("row 2").parameter_offset,
+        buffers
+            .header(third.index)
+            .expect("third row")
+            .parameter_offset,
         0,
         "the freed run at the origin was reused"
     );
-    assert_eq!(report.relocated, 0, "material 1 keeps its own run");
+    assert_eq!(
+        buffers
+            .header(second.index)
+            .expect("second row")
+            .parameter_offset,
+        second_offset,
+        "the second material keeps its own run"
+    );
 }
 
 /// The buffers are released together, and releasing twice is not an error.
@@ -206,7 +771,11 @@ fn removing_a_material_frees_its_run_and_retires_its_row() {
 fn releasing_frees_both_buffers() {
     let (device, queue) = null_device();
     let mut buffers = MaterialParameterBuffers::new(&device, 2, 32, 16, BufferUsages::NONE);
-    buffers.sync(&device, &queue, [(0, record_with_lobes(0, 1))], 1);
+    let mut registry = registry_fixture(1);
+    let handle = registry.allocate().unwrap();
+    registry.publish(record_with_lobes(handle, 1)).unwrap();
+    let dirty = registry.take_dirty();
+    buffers.sync_registry(&device, &queue, &registry, dirty);
     assert_eq!(
         device.live_resource_count(),
         3,
@@ -227,27 +796,31 @@ fn releasing_frees_both_buffers() {
 fn authoring_illumination_is_preserved_without_polluting_the_gpu_header() {
     let (device, queue) = null_device();
     let mut buffers = MaterialParameterBuffers::new(&device, 1, 32, 16, BufferUsages::NONE);
-    let mut record = fallback_material_record(GenerationalHandle::new(0, 1), 1);
+    let mut registry = registry_fixture(1);
+    let handle = registry.allocate().unwrap();
+    let mut record = fallback_material_record(handle, 1);
     record.response_plan = ShadingPlan::single_builtin(BuiltinProgram::Npr);
 
-    buffers.sync(&device, &queue, [(0, record.clone())], 3);
+    registry.publish(record.clone()).unwrap();
+    let dirty = registry.take_dirty();
+    buffers.sync_registry(&device, &queue, &registry, dirty);
 
-    let row = buffers.header(0).expect("row");
+    let row = buffers.header(handle.index).expect("row");
     assert_eq!(
         row.execution_binding_words(),
         [u32::MAX; 5],
         "an unbound authoring record must use the ABI8 fallback tuple"
     );
     assert_eq!(
-        buffers.parameters_of(0).expect("block"),
+        buffers.parameters_of(handle.index).expect("block"),
         record.packed_parameters().pack().as_slice(),
         "the packed block matches the record"
     );
 }
 
-/// The material binding's layout is the ABI's five bindings, and the two arrays
-/// carry a `count`: an array entry without one would bind a single resource where
-/// the shader indexes dynamically.
+/// The material binding layout declares the ABI buffers and arrays, and the two
+/// arrays carry a `count`: an entry without one would bind a single resource
+/// where the shader indexes dynamically.
 #[test]
 fn the_material_binding_layout_declares_the_abi_and_its_arrays() {
     use crate::material::MaterialBindingLayout;
@@ -256,9 +829,19 @@ fn the_material_binding_layout_declares_the_abi_and_its_arrays() {
     };
 
     let entries = MaterialBindingLayout::entries(64);
-    assert_eq!(entries.len(), 5, "three buffers and two arrays");
-    for (binding, entry) in entries.iter().enumerate() {
-        assert_eq!(entry.binding as usize, binding);
+    assert_eq!(
+        entries.len(),
+        6,
+        "three buffers, two arrays, and generations"
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.binding)
+            .collect::<Vec<_>>(),
+        [0, 1, 2, 3, 4, 9]
+    );
+    for entry in &entries {
         assert!(matches!(
             entry.ty,
             BindingType::Buffer {
@@ -273,9 +856,13 @@ fn the_material_binding_layout_declares_the_abi_and_its_arrays() {
     assert_eq!(entries[4].count, Some(64), "the sampler array is sized");
     assert_eq!(entries[3].count, Some(64), "the texture array is sized");
     assert!(
-        entries[..3].iter().all(|entry| entry.count.is_none()),
+        entries
+            .iter()
+            .filter(|entry| [0, 1, 2, 9].contains(&entry.binding))
+            .all(|entry| entry.count.is_none()),
         "the buffers are not arrays"
     );
+    assert!(matches!(entries[5].ty, BindingType::Buffer { .. }));
 }
 
 /// The binding is accepted by a real device: the layout's array counts and the
@@ -301,7 +888,13 @@ fn the_material_binding_creates_on_a_gpu() {
 
     let Some(layout) = MaterialBindingLayout::new(device, FIRST_DYNAMIC_SLOT + 1) else {
         // A backend without bindless has no business building this group; the
-        // caller takes its non-bindless path instead.
+        // caller takes its non-bindless path instead. A strict run of this
+        // specifically bindless gate must not report a capability skip as GPU
+        // validation success.
+        assert!(
+            !crate::tests::require_gpu(),
+            "PRISM_REQUIRE_GPU is set but the adapter lacks bindless support"
+        );
         return;
     };
     assert_eq!(layout.slots, FIRST_DYNAMIC_SLOT + 1);
@@ -317,15 +910,19 @@ fn the_material_binding_creates_on_a_gpu() {
     let fallbacks = FallbackTextures::new(device, queue);
     let slots = MaterialTextureSlots::build(
         device,
+        queue,
         &crate::RenderAssets::<crate::GpuImage>::new(),
         &fallbacks,
         &crate::TextureSlotHeap::new(FIRST_DYNAMIC_SLOT + 1),
     );
     assert_eq!(slots.len(), (FIRST_DYNAMIC_SLOT + 1) as usize);
 
-    let group = layout.create_group(device, storage(), storage(), Some(storage()), &slots);
-    let _ = group;
+    let group = layout.create_group(device, storage(), storage(), storage(), &slots);
     assert!(runtime.wait_idle());
+    device.destroy_bind_group(group);
+    let mut slots = slots;
+    slots.release(device);
+    fallbacks.release(device);
 }
 
 /// The bindless arrays are *dense* and slot-addressed: a resident image's view
@@ -362,35 +959,40 @@ fn the_bindless_arrays_place_one_view_and_sampler_per_slot() {
     }
 
     let mut materials = RenderMaterials::new(8);
-    materials.resolve_textures(
-        1,
-        [
-            (0, TextureRequest::Image(image_id(10))),
-            (
-                1,
-                TextureRequest::Fallback(crate::TextureFallback::FlatNormal),
-            ),
-            (2, TextureRequest::Image(image_id(20))),
-        ],
-    );
+    materials
+        .resolve_textures(
+            1,
+            [
+                (0, TextureRequest::Image(image_id(10))),
+                (
+                    1,
+                    TextureRequest::Fallback(crate::TextureFallback::FlatNormal),
+                ),
+                (2, TextureRequest::Image(image_id(20))),
+            ],
+        )
+        .expect("texture references fit the default heap");
     // A small capacity so the arrays are cheap to check; re-clamping is allowed
     // here because the heap holds references but the *capacity* clamp is only
     // forbidden while images are resident — release first, then clamp.
     materials.release_textures(1);
     materials.set_texture_capacity(FIRST_DYNAMIC_SLOT + 4);
-    materials.resolve_textures(
-        1,
-        [
-            (0, TextureRequest::Image(image_id(10))),
-            (
-                1,
-                TextureRequest::Fallback(crate::TextureFallback::FlatNormal),
-            ),
-            (2, TextureRequest::Image(image_id(20))),
-        ],
-    );
+    materials
+        .resolve_textures(
+            1,
+            [
+                (0, TextureRequest::Image(image_id(10))),
+                (
+                    1,
+                    TextureRequest::Fallback(crate::TextureFallback::FlatNormal),
+                ),
+                (2, TextureRequest::Image(image_id(20))),
+            ],
+        )
+        .expect("texture references fit the configured heap");
 
-    let slots = MaterialTextureSlots::build(&device, &images, &fallbacks, materials.textures());
+    let slots =
+        MaterialTextureSlots::build(&device, &queue, &images, &fallbacks, materials.textures());
     assert_eq!(slots.len(), materials.textures().capacity() as usize);
     assert_eq!(
         slots.len(),
@@ -428,12 +1030,63 @@ fn the_bindless_arrays_place_one_view_and_sampler_per_slot() {
 
     // A freed slot falls back rather than keeping the stale view.
     materials.release_textures(1);
-    let slots = MaterialTextureSlots::build(&device, &images, &fallbacks, materials.textures());
+    let slots =
+        MaterialTextureSlots::build(&device, &queue, &images, &fallbacks, materials.textures());
     assert_eq!(
         slots.views()[first.index as usize],
         fallbacks.white.view,
         "the freed slot is a fallback again"
     );
+}
+
+/// Binding 9 mirrors the slot heap exactly: permanent fallbacks are generation
+/// one, never-used slots are invalid zero, and recycled slots keep their bumped
+/// generation so stale material rows fail the shader guard.
+#[test]
+fn material_texture_generation_table_tracks_empty_and_recycled_slots() {
+    use crate::material::texture_heap::{FIRST_DYNAMIC_SLOT, RESERVED_GENERATION};
+    use crate::material::{FallbackTextures, MaterialTextureSlots, TextureSlotHeap};
+    use crate::render_asset::RenderAssets;
+    use prism_asset::{AssetId, AssetIndex};
+    use prism_image::Image;
+
+    let (device, queue) = null_device();
+    let fallbacks = FallbackTextures::new(&device, &queue);
+    let images = RenderAssets::<crate::GpuImage>::new();
+    let image = AssetId::<Image>::new(AssetIndex::from_parts(91, 1));
+    let mut heap = TextureSlotHeap::new(FIRST_DYNAMIC_SLOT + 1);
+
+    let resources_before_table = device.live_resource_count();
+    let mut slots = MaterialTextureSlots::build(&device, &queue, &images, &fallbacks, &heap);
+    assert_eq!(device.live_resource_count(), resources_before_table + 1);
+    assert_eq!(slots.generations().len(), heap.capacity() as usize);
+    assert!(slots.generations()[..FIRST_DYNAMIC_SLOT as usize]
+        .iter()
+        .all(|&generation| generation == RESERVED_GENERATION));
+    assert_eq!(slots.generations()[FIRST_DYNAMIC_SLOT as usize], 0);
+    assert!(slots.generation_buffer().is_some());
+    slots.release(&device);
+    assert_eq!(slots.generation_buffer(), None);
+    slots.release(&device);
+    assert_eq!(device.live_resource_count(), resources_before_table);
+
+    let first = heap.acquire(image).expect("dynamic slot is available");
+    assert_eq!(first.index, FIRST_DYNAMIC_SLOT);
+    assert_eq!(first.generation, 1);
+    let mut slots = MaterialTextureSlots::build(&device, &queue, &images, &fallbacks, &heap);
+    assert_eq!(slots.generations()[first.index as usize], first.generation);
+    slots.release(&device);
+
+    assert!(heap.release(image));
+    let recycled_generation = heap.generation_of(first.index).expect("recycled slot");
+    assert_eq!(recycled_generation, first.generation + 1);
+    let mut slots = MaterialTextureSlots::build(&device, &queue, &images, &fallbacks, &heap);
+    assert_eq!(
+        slots.generations()[first.index as usize],
+        recycled_generation
+    );
+    slots.release(&device);
+    fallbacks.release(&device);
 }
 
 /// Resolving a material's texture requests assigns bindless slots: real images
@@ -449,17 +1102,19 @@ fn resolving_textures_assigns_slots_and_counts_references() {
     let image = |tag: u32| AssetId::<Image>::new(AssetIndex::from_parts(tag, 1));
     let mut materials = RenderMaterials::new(8);
 
-    let rows = materials.resolve_textures(
-        1,
-        [
-            (0, TextureRequest::Image(image(10))),
-            (
-                1,
-                TextureRequest::Fallback(crate::TextureFallback::FlatNormal),
-            ),
-            (2, TextureRequest::Image(image(20))),
-        ],
-    );
+    let rows = materials
+        .resolve_textures(
+            1,
+            [
+                (0, TextureRequest::Image(image(10))),
+                (
+                    1,
+                    TextureRequest::Fallback(crate::TextureFallback::FlatNormal),
+                ),
+                (2, TextureRequest::Image(image(20))),
+            ],
+        )
+        .expect("both authored images fit the heap");
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0].index, FIRST_DYNAMIC_SLOT, "the first image");
     assert_eq!(
@@ -480,7 +1135,9 @@ fn resolving_textures_assigns_slots_and_counts_references() {
     assert_eq!(materials.textures().stats().live_images, 2);
 
     // A second material referencing the same image shares its slot.
-    let shared = materials.resolve_textures(2, [(0, TextureRequest::Image(image(10)))]);
+    let shared = materials
+        .resolve_textures(2, [(0, TextureRequest::Image(image(10)))])
+        .expect("resident image can be shared");
     assert_eq!(shared[0].index, rows[0].index, "the slot is shared");
     assert_eq!(materials.textures().refcount(image(10)), 2);
     assert_eq!(materials.textures().stats().live_images, 2);
@@ -497,17 +1154,21 @@ fn republish_and_retire_release_exactly_what_was_held() {
 
     let image = |tag: u32| AssetId::<Image>::new(AssetIndex::from_parts(tag, 1));
     let mut materials = RenderMaterials::new(8);
-    materials.resolve_textures(
-        1,
-        [
-            (0, TextureRequest::Image(image(10))),
-            (1, TextureRequest::Image(image(20))),
-        ],
-    );
+    materials
+        .resolve_textures(
+            1,
+            [
+                (0, TextureRequest::Image(image(10))),
+                (1, TextureRequest::Image(image(20))),
+            ],
+        )
+        .expect("initial images fit the heap");
     let kept_slot = materials.texture_slot(image(20)).expect("resident");
 
     // Republish keeping only the second image.
-    let rows = materials.resolve_textures(1, [(0, TextureRequest::Image(image(20)))]);
+    let rows = materials
+        .resolve_textures(1, [(0, TextureRequest::Image(image(20)))])
+        .expect("retained image remains resolvable");
     assert_eq!(
         rows[0].index, kept_slot.index,
         "the kept image keeps its slot"
@@ -543,13 +1204,15 @@ fn the_slot_capacity_can_be_clamped_before_anything_is_published() {
     let mut materials = RenderMaterials::new(8);
     materials.set_texture_capacity(64);
     assert_eq!(materials.textures().capacity(), 64);
-    materials.resolve_textures(
-        0,
-        [(
+    materials
+        .resolve_textures(
             0,
-            TextureRequest::Image(AssetId::<Image>::new(AssetIndex::from_parts(1, 1))),
-        )],
-    );
+            [(
+                0,
+                TextureRequest::Image(AssetId::<Image>::new(AssetIndex::from_parts(1, 1))),
+            )],
+        )
+        .expect("image fits the configured heap");
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         materials.set_texture_capacity(128);
     }));
@@ -580,7 +1243,7 @@ fn the_frame_packs_published_materials_into_the_buffers() {
             .registry_mut()
             .allocate()
             .expect("the fixture capacity has room");
-        let record = record_with_lobes(handle.index, 1);
+        let record = record_with_lobes(handle, 1);
         materials.publish(record).expect("the record publishes");
         handle
     };
@@ -661,29 +1324,30 @@ fn texture_rows_are_placed_and_named_by_the_header() {
     let (device, queue) = null_device();
     let mut buffers = MaterialParameterBuffers::new(&device, 4, 512, 64, BufferUsages::NONE);
 
-    let mut first = record_with_lobes(0, 1);
+    let mut registry = registry_fixture(3);
+    let mut first = record_with_lobes(registry.allocate().unwrap(), 1);
     first.textures = vec![texture_entry(3, 1), texture_entry(4, 2)];
-    let mut second = record_with_lobes(1, 1);
+    let mut second = record_with_lobes(registry.allocate().unwrap(), 1);
     second.textures = vec![texture_entry(7, 1)];
 
-    let report = buffers.sync(
-        &device,
-        &queue,
-        [(0, first.clone()), (1, second.clone())],
-        1,
-    );
+    registry.publish(first.clone()).unwrap();
+    registry.publish(second.clone()).unwrap();
+    let dirty = registry.take_dirty();
+    let report = buffers.sync_registry(&device, &queue, &registry, dirty);
     assert_eq!(report.textures_written, 2, "both materials' rows");
     assert_eq!(buffers.used_texture_rows(), 3, "2 + 1 rows");
 
-    let first_row = buffers.header(0).expect("row 0");
+    let first_row = buffers.header(first.handle.index).expect("first row");
     assert_eq!(first_row.texture_count, 2);
     let first_texture_offset = first_row.texture_offset;
     let first_texture_count = first_row.texture_count;
     assert_eq!(
-        buffers.textures_of(0).expect("material 0's rows"),
+        buffers
+            .textures_of(first.handle.index)
+            .expect("first material's rows"),
         first.textures.as_slice()
     );
-    let second_row = buffers.header(1).expect("row 1");
+    let second_row = buffers.header(second.handle.index).expect("second row");
     assert_eq!(second_row.texture_count, 1);
     assert_eq!(
         second_row.texture_offset,
@@ -691,7 +1355,9 @@ fn texture_rows_are_placed_and_named_by_the_header() {
         "the second material's rows follow the first's"
     );
     assert_eq!(
-        buffers.textures_of(1).expect("material 1's rows"),
+        buffers
+            .textures_of(second.handle.index)
+            .expect("second material's rows"),
         second.textures.as_slice()
     );
     assert_eq!(
@@ -700,20 +1366,30 @@ fn texture_rows_are_placed_and_named_by_the_header() {
     );
 
     // Retiring the first material frees its rows for the next one.
-    buffers.remove(&queue, 0, 1);
-    assert!(buffers.textures_of(0).is_none());
+    registry
+        .retire(first.handle, GpuCompletionValue(0))
+        .unwrap();
+    assert!(buffers.remove(&queue, first.handle.index, first.handle.generation));
+    assert!(buffers.textures_of(first.handle.index).is_none());
     // Two rows, so they fit the hole the retired material left (a three-row
     // request would not, and would bump the table's high-water mark instead).
-    let mut third = record_with_lobes(2, 1);
+    let mut third = record_with_lobes(registry.allocate().unwrap(), 1);
     third.textures = vec![texture_entry(9, 1), texture_entry(10, 2)];
-    buffers.sync(&device, &queue, [(2, third.clone())], 2);
+    registry.publish(third.clone()).unwrap();
+    let dirty = registry.take_dirty();
+    buffers.sync_registry(&device, &queue, &registry, dirty);
     assert_eq!(
-        buffers.header(2).expect("row 2").texture_offset,
+        buffers
+            .header(third.handle.index)
+            .expect("third row")
+            .texture_offset,
         first_texture_offset,
         "the freed rows were reused"
     );
     assert_eq!(
-        buffers.textures_of(2).expect("material 2's rows"),
+        buffers
+            .textures_of(third.handle.index)
+            .expect("third material's rows"),
         third.textures.as_slice()
     );
     assert_eq!(
@@ -729,12 +1405,16 @@ fn texture_rows_are_placed_and_named_by_the_header() {
 fn a_material_without_textures_gets_an_empty_run() {
     let (device, queue) = null_device();
     let mut buffers = MaterialParameterBuffers::new(&device, 2, 512, 16, BufferUsages::NONE);
-    buffers.sync(&device, &queue, [(0, record_with_lobes(0, 1))], 1);
+    let mut registry = registry_fixture(1);
+    let handle = registry.allocate().unwrap();
+    registry.publish(record_with_lobes(handle, 1)).unwrap();
+    let dirty = registry.take_dirty();
+    buffers.sync_registry(&device, &queue, &registry, dirty);
 
-    let row = buffers.header(0).expect("row");
+    let row = buffers.header(handle.index).expect("row");
     assert_eq!(row.texture_count, 0);
     assert_eq!(
-        buffers.textures_of(0).expect("an empty run"),
+        buffers.textures_of(handle.index).expect("an empty run"),
         &[][..],
         "a zero-length run, not the fallback's rows"
     );
@@ -787,13 +1467,12 @@ fn the_abi_lands_byte_exact_on_a_gpu() {
             .registry_mut()
             .allocate()
             .expect("capacity for two");
-        let mut first_record = record_with_lobes(first.index, 1);
+        let mut first_record = record_with_lobes(first, 1);
         first_record.textures = vec![texture_entry(3, 1), texture_entry(4, 2)];
         materials
             .publish(first_record)
             .expect("the first record publishes");
-        let mut second_record =
-            record_with_lobes(second.index, 1 | (1 << ClosureKind::ClearCoat as u32));
+        let mut second_record = record_with_lobes(second, 1 | (1 << ClosureKind::ClearCoat as u32));
         second_record.textures = vec![texture_entry(7, 1)];
         materials
             .publish(second_record)
@@ -823,7 +1502,38 @@ fn the_abi_lands_byte_exact_on_a_gpu() {
             .mark_all_dirty();
     }
 
-    app.update();
+    // The first native-VT publication is completion-gated. Drive a bounded
+    // number of real frames so the queue callback can publish the empty/default
+    // residency before asserting material ABI uploads.
+    for _ in 0..4 {
+        app.update();
+        let ready = app
+            .get_sub_app(crate::RenderApp)
+            .expect("the render sub-app")
+            .world
+            .resource::<crate::MaterialUploadStats>()
+            .native_vt_ready;
+        if ready {
+            break;
+        }
+    }
+
+    let upload_stats = app
+        .get_sub_app(crate::RenderApp)
+        .expect("the render sub-app")
+        .world
+        .resource::<crate::MaterialUploadStats>();
+    assert!(
+        upload_stats.native_vt_ready,
+        "native material-VT publication must be ready before material upload: missing={}, errors={:?}",
+        upload_stats.native_vt_missing_resources,
+        upload_stats.native_vt_errors
+    );
+    assert!(
+        upload_stats.last.headers_written >= 3,
+        "fallback and both authored rows must be uploaded, got {:?}",
+        upload_stats.last
+    );
 
     let render = app
         .get_sub_app(crate::RenderApp)
@@ -847,10 +1557,12 @@ fn the_abi_lands_byte_exact_on_a_gpu() {
     assert!(runtime.runtime().wait_idle(), "the upload completes");
     let queue = runtime.runtime().queue();
 
-    let header_bytes = queue.read_buffer(
-        headers,
-        crate::material::header_row_bytes() * u64::from(CAPACITY),
-    );
+    let header_bytes = queue
+        .read_buffer(
+            headers,
+            crate::material::header_row_bytes() * u64::from(CAPACITY),
+        )
+        .expect("material header GPU readback must complete");
     let row_bytes = crate::material::header_row_bytes() as usize;
     let row = |index: u32| -> prism_render_material::GpuMaterialHeader {
         let start = index as usize * row_bytes;
@@ -858,7 +1570,9 @@ fn the_abi_lands_byte_exact_on_a_gpu() {
         // one row rather than the rest of the buffer.
         bytemuck::pod_read_unaligned(&header_bytes[start..start + row_bytes])
     };
-    let words = queue.read_buffer(parameters, u64::from(word_len) * 4);
+    let words = queue
+        .read_buffer(parameters, u64::from(word_len) * 4)
+        .expect("material parameter GPU readback must complete");
     let words_at = |offset: u32, len: u32| -> Vec<u32> {
         words[offset as usize * 4..(offset + len) as usize * 4]
             .chunks_exact(4)
@@ -882,10 +1596,12 @@ fn the_abi_lands_byte_exact_on_a_gpu() {
 
     // Each published material: the row names an offset, and the words at that
     // offset *are* its packed block — and the row is what the ABI builds for it.
-    let texture_bytes_read = queue.read_buffer(
-        textures.expect("the texture table"),
-        crate::material::texture_row_bytes() * u64::from(texture_rows),
-    );
+    let texture_bytes_read = queue
+        .read_buffer(
+            textures.expect("the texture table"),
+            crate::material::texture_row_bytes() * u64::from(texture_rows),
+        )
+        .expect("material texture GPU readback must complete");
     let texture_row = |row: u32| -> prism_render_material::GpuMaterialTexture {
         let row_bytes = crate::material::texture_row_bytes() as usize;
         let start = row as usize * row_bytes;
@@ -895,7 +1611,7 @@ fn the_abi_lands_byte_exact_on_a_gpu() {
         (first, 1_u32, 2_u32),
         (second, 1 | (1 << ClosureKind::ClearCoat as u32), 1_u32),
     ] {
-        let mut record = record_with_lobes(handle.index, lobes);
+        let mut record = record_with_lobes(handle, lobes);
         record.textures = match handle.index {
             i if i == first.index => vec![texture_entry(3, 1), texture_entry(4, 2)],
             _ => vec![texture_entry(7, 1)],

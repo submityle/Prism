@@ -20,13 +20,14 @@
 //! * a freed slot's **generation is bumped**, so a lingering row that still names
 //!   the old `(index, generation)` pair is detected as stale rather than silently
 //!   sampling a different texture;
-//! * the heap is **bounded**: at capacity, acquire degrades to [`WHITE_SLOT`] and
-//!   counts the overflow instead of growing without limit or panicking.
+//! * the heap is **bounded**: at capacity, acquire returns a structured error
+//!   and counts the overflow; an authored texture is never rewritten as white.
 //!
 //! Slot generations mirror the generational-handle discipline the scene handles
 //! use, so consumers can apply one staleness rule to both.
 
 use alloc::collections::BTreeMap;
+use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -50,8 +51,8 @@ pub const RESERVED_GENERATION: u32 = 1;
 /// The default capacity (reserved slots included).
 pub const DEFAULT_CAPACITY: u32 = 1 << 16;
 
-/// Which reserved slot a semantic resolves to when its map is missing or the
-/// heap is full.
+/// Which reserved slot a semantic resolves to when its map is intentionally
+/// absent. Capacity exhaustion is an error and never selects a fallback.
 ///
 /// The *mapping* from a texture semantic
 /// ([`prism_render_material::TextureSemantic`], which lives with the material
@@ -117,12 +118,23 @@ pub struct TextureHeapStats {
     pub free_slots: u32,
     /// One past the highest dynamic slot ever allocated.
     pub high_water: u32,
-    /// Acquisitions that hit the capacity ceiling and fell back to white.
+    /// Authored image acquisitions rejected because the capacity ceiling was hit.
     pub overflow: u32,
 }
 
+/// Why an authored image could not acquire a bindless slot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TextureHeapAcquireError {
+    /// All dynamic slots are currently resident.
+    CapacityExhausted,
+}
+
 /// Bounded, reference-counted allocator of bindless texture slots.
+#[derive(Clone)]
 pub struct TextureSlotHeap {
+    /// Allocation incarnation, distinct even when a replacement repeats all
+    /// slot indices and generations. Weak observers never retain heap data.
+    incarnation: Arc<()>,
     capacity: u32,
     entries: BTreeMap<AssetId<Image>, HeapEntry>,
     /// The current generation per slot index, including the reserved slots.
@@ -150,6 +162,7 @@ impl TextureSlotHeap {
             "a bindless texture heap needs the reserved slots plus room for at least one image"
         );
         Self {
+            incarnation: Arc::new(()),
             capacity,
             entries: BTreeMap::new(),
             slot_generations: vec![RESERVED_GENERATION; FIRST_DYNAMIC_SLOT as usize],
@@ -178,6 +191,10 @@ impl TextureSlotHeap {
     #[must_use]
     pub const fn capacity(&self) -> u32 {
         self.capacity
+    }
+
+    pub(crate) fn incarnation(&self) -> Weak<()> {
+        Arc::downgrade(&self.incarnation)
     }
 
     /// One past the highest dynamic slot ever allocated.
@@ -220,20 +237,23 @@ impl TextureSlotHeap {
     /// The slot for `image`, uploading a fresh one on first use and counting
     /// subsequent uses as references.
     ///
-    /// At capacity this returns [`BindlessSlot::WHITE`] and counts an overflow, so
-    /// a caller always gets a sampleable slot rather than a panic or an
-    /// out-of-range index.
-    pub fn acquire(&mut self, image: AssetId<Image>) -> BindlessSlot {
+    /// At capacity this returns an error and counts the overflow. The caller
+    /// must explicitly choose a semantic fallback or reject the material update;
+    /// an authored image is never silently represented by the white slot.
+    pub fn acquire(
+        &mut self,
+        image: AssetId<Image>,
+    ) -> Result<BindlessSlot, TextureHeapAcquireError> {
         if let Some(entry) = self.entries.get_mut(&image) {
             entry.refcount += 1;
-            return BindlessSlot {
+            return Ok(BindlessSlot {
                 index: entry.slot,
                 generation: entry.generation,
-            };
+            });
         }
         let Some(slot) = self.allocate_slot() else {
             self.overflow += 1;
-            return BindlessSlot::WHITE;
+            return Err(TextureHeapAcquireError::CapacityExhausted);
         };
         let generation = self.slot_generations[slot as usize];
         self.entries.insert(
@@ -244,10 +264,10 @@ impl TextureSlotHeap {
                 refcount: 1,
             },
         );
-        BindlessSlot {
+        Ok(BindlessSlot {
             index: slot,
             generation,
-        }
+        })
     }
 
     /// Drops one reference to `image`.
@@ -355,11 +375,11 @@ mod tests {
     fn generation_wraps_to_the_reserved_value_not_zero() {
         let mut heap = TextureSlotHeap::new(8);
         let image = AssetId::<prism_image::Image>::new(AssetIndex::from_parts(1, 1));
-        heap.acquire(image);
+        heap.acquire(image).expect("first slot is available");
         heap.slot_generations[FIRST_DYNAMIC_SLOT as usize] = u32::MAX;
         assert!(heap.release(image));
         let other = AssetId::<prism_image::Image>::new(AssetIndex::from_parts(2, 1));
-        let reused = heap.acquire(other);
+        let reused = heap.acquire(other).expect("released slot is reusable");
         assert_eq!(
             reused.generation, RESERVED_GENERATION,
             "zero is never a live generation"
