@@ -43,6 +43,24 @@
 //! coherent.
 
 #[cfg(feature = "std")]
+use crate::app::App;
+#[cfg(feature = "std")]
+use crate::exit::{AppExit, AppExitRequest};
+
+/// Forward one native process termination request to the ordinary vetoable
+/// app-exit resource. Runners call this between frames, never from an OS
+/// callback, so shutdown systems retain normal World access and ordering.
+#[cfg(feature = "std")]
+pub(crate) fn poll_process_signal(app: &mut App) {
+    let Some(signal) = prism_platform::process::signal::poll() else {
+        return;
+    };
+    if let Some(request) = app.world_mut().get_resource_mut::<AppExitRequest>() {
+        request.send(AppExit::Error(signal.exit_code()));
+    }
+}
+
+#[cfg(feature = "std")]
 mod dedicated_server;
 mod headless;
 mod once;

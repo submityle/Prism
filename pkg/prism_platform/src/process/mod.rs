@@ -9,16 +9,16 @@
 //! - [`env`] — environment-variable read / iterate / set / remove.
 //! - [`child`] — spawning child processes with `argv`/env/cwd, captured
 //!   pipes, waiting, exit status, and kill.
-//!
-//! Signal / graceful-exit hooks (design doc §11 退出/信号) are deferred to the
-//! M6 crash-capture milestone, which owns the signal-handling entry point; this
-//! milestone deliberately stops at process launch/observe/terminate.
+//! - [`signal`] — allocation-free process termination notification. The native
+//!   callback only sets an atomic bit; an app runner polls it on its frame
+//!   thread and performs ordinary vetoable shutdown.
 //!
 //! Requires the `std` feature.
 
 pub mod args;
 pub mod child;
 pub mod env;
+pub mod signal;
 
 pub use child::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Output, Stdio};
 

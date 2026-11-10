@@ -174,7 +174,9 @@
 - **环境变量**：读/写门面，供配置覆盖（如 `PRISM_LOG`、`PRISM_RENDER_BACKEND`）。
 - **子进程**：spawn/wait/pipe，供工具链（asset_bake / shader 编译外部进程）。
 - **标准流**：stdout/stderr 门面（含 Windows 控制台 UTF-8 / 颜色），供 `prism_diagnostic` 日志落地。
-- **退出/信号**：优雅退出钩子、信号/异常捕获入口（接 §16 崩溃捕获）。
+- **退出/信号**：`process::signal` 提供 `SIGINT`/`SIGTERM`/`SIGHUP` 与 Windows
+  控制台事件的原子通知；应用 runner 在主线程轮询并转入可 veto 的优雅退出钩子（接 §16
+  崩溃捕获）。
 
 ---
 
@@ -323,6 +325,10 @@ pkg/prism_platform/
 - **M3 虚拟内存**：reserve/commit/大页/对齐/保护页/内存信息 → 基准（页管理 vs malloc、大页 TLB 收益）。**是 utils 分配器前置**。
 - **M4 mmap + watch + 动态库**：零拷贝映射、文件监视、热重载 → 热重载闭环（接 asset/script）。
 - **M5 进程/环境/标准流 + 墙钟**：argv/env/子进程/stdout → 接 app CLI 与 diagnostic 日志。
+- **M5 进程信号切片**：`process::signal` 已实现；POSIX handler 与 Windows
+  `SetConsoleCtrlHandler` 只写原子队列，`prism_app` 的 headless/dedicated/once/windowed
+  runner 在 frame/tick 线程消费，并沿用 `ExitConfirmation` 与 `Shutdown`。Windows 实机运行仍需
+  Windows CI/主机验证；本机仅验证源码契约与 Windows MSVC 编译。
 - **M6 崩溃捕获 + Web/移动后端 + mock**：minidump（三桌面）+ 移动/Web 后端 + mock 后端 → 崩溃闭环（接 diagnostic）+ 跨平台 CI；挂起/恢复值契约与 capability 已落地，native desktop sleep/power watcher 仍由宿主补齐。
 
 **基准即规格**：高精度时钟取时成本（ns）、单调性验证、锁争用吞吐、绑核缓存命中改善、页/大页分配 vs malloc、mmap 零拷贝加速、CPU 探测正确性、minidump 可符号化。核心价值在 **M0（math/tasks 探测前置）+ M1/M2/M3（asset/tasks/utils 三大地基前置）**。

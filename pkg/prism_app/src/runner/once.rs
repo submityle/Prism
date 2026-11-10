@@ -21,17 +21,23 @@ impl ScheduleRunnerOnce {
 /// Run exactly one [`update`](App::update) frame, then return the app's exit
 /// request (defaulting to [`AppExit::Success`]).
 pub fn run_once(mut app: App) -> AppExit {
+    #[cfg(feature = "std")]
+    let signal_subscription = prism_platform::process::signal::install().ok();
     // Wait for the async-ready plugin gate before the frame (design §6): a
     // plugin still initializing keeps the app in its adding state rather than
     // panicking, though a single-frame runner gives it one chance.
     app.try_finish();
     app.update();
+    #[cfg(feature = "std")]
+    super::poll_process_signal(&mut app);
     // Bring any pipelined render frame home before reading final state
     // (no-op without the `pipelined` feature / unless pipelining was enabled).
     app.sync_sub_apps();
     // Run the exit-veto gate (design §24.5) if a frame requested exit, so a
     // confirmation system can still cancel it; default to a clean exit.
     let exit = app.poll_exit().unwrap_or(AppExit::Success);
+    #[cfg(feature = "std")]
+    drop(signal_subscription);
     // Graceful-shutdown path once, before returning (design §12/§21).
     app.run_shutdown();
     exit

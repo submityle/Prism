@@ -280,6 +280,7 @@ impl DedicatedServerRunner {
             FrameLimit::Off
         };
         let mut pacer = FramePacer::new(limit);
+        let signal_subscription = prism_platform::process::signal::install().ok();
 
         let exit = loop {
             // Async-ready gate (design §6): finish + start up once every plugin
@@ -297,6 +298,10 @@ impl DedicatedServerRunner {
             // Refresh the published copy so systems read this tick's health.
             app.insert_resource(diagnostics);
 
+            // Keep native callbacks outside the App/World and forward them on
+            // the server's ordinary tick thread.
+            super::poll_process_signal(&mut app);
+
             // Confirmed-exit poll (runs the exit-veto gate on a pending request,
             // design §24.5) rather than the raw observer.
             if let Some(exit) = app.poll_exit() {
@@ -310,6 +315,7 @@ impl DedicatedServerRunner {
             pacer.throttle();
         };
 
+        drop(signal_subscription);
         // A dedicated server has no render sub-app, but calling this is a
         // harmless no-op and keeps every runner's exit path uniform.
         app.sync_sub_apps();

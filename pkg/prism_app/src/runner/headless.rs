@@ -155,6 +155,8 @@ impl HeadlessRunner {
         // only; it is stopped before shutdown below.
         #[cfg(feature = "std")]
         let watchdog = self.watchdog.map(WatchdogConfig::start);
+        #[cfg(feature = "std")]
+        let signal_subscription = prism_platform::process::signal::install().ok();
         let mut frame: u64 = 0;
         let exit = loop {
             // Async-ready gate (design §6): finish + start up once every plugin
@@ -172,6 +174,8 @@ impl HeadlessRunner {
             if let Some(dog) = watchdog.as_ref() {
                 dog.beat();
             }
+            #[cfg(feature = "std")]
+            super::poll_process_signal(&mut app);
             // Poll for a *confirmed* exit, running the exit-veto gate when a
             // request is pending (design §24.5); a confirmation system may cancel.
             if let Some(exit) = app.poll_exit() {
@@ -198,6 +202,8 @@ impl HeadlessRunner {
         // path so teardown is never flagged as a stall.
         #[cfg(feature = "std")]
         drop(watchdog);
+        #[cfg(feature = "std")]
+        drop(signal_subscription);
         // Bring any pipelined render frame home before returning so the final
         // frame's render has completed (no-op in the serial / feature-off case).
         app.sync_sub_apps();

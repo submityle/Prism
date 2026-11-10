@@ -116,6 +116,8 @@ struct WindowedHost {
     first_frame_sent: bool,
     exit: Rc<Cell<Option<AppExit>>>,
     suspend_resume: SuspendResumeAdapter,
+    /// Keeps the native process callback alive for the event-loop host.
+    _signal_subscription: Option<prism_platform::process::signal::SignalSubscription>,
 }
 
 impl WindowedHost {
@@ -207,6 +209,10 @@ impl WinitApp for WindowedHost {
         self.app.try_finish();
         let presentation_paced = crate::presentation::run_window_frame(&mut self.app);
 
+        // The callback only records an atomic bit; consume it on the event
+        // loop thread so the normal veto and shutdown ordering remains intact.
+        super::poll_process_signal(&mut self.app);
+
         if let Some(exit) = self.app.poll_exit() {
             // Honor the pipeline contract: bring the final in-flight render home
             // before the loop ends. A no-op when nothing is pipelined
@@ -297,6 +303,7 @@ impl WinitRunner {
             first_frame_sent: false,
             exit: Rc::clone(&exit),
             suspend_resume: SuspendResumeAdapter,
+            _signal_subscription: prism_platform::process::signal::install().ok(),
         };
         match PlatformRunner::new(host).run() {
             Ok(()) => exit.get().unwrap_or(AppExit::Success),
@@ -425,6 +432,7 @@ mod tests {
             first_frame_sent: false,
             exit: Rc::new(Cell::new(None)),
             suspend_resume: SuspendResumeAdapter,
+            _signal_subscription: None,
         };
         (host, trace)
     }
@@ -465,6 +473,7 @@ mod tests {
             first_frame_sent: false,
             exit,
             suspend_resume: SuspendResumeAdapter,
+            _signal_subscription: None,
         };
         let mut backend = WinitBackend::new();
         host.lifecycle(SuspendEvent::suspended(prism_platform::now()), &mut backend);
@@ -487,6 +496,7 @@ mod tests {
             first_frame_sent: false,
             exit,
             suspend_resume: SuspendResumeAdapter,
+            _signal_subscription: None,
         };
         let mut backend = WinitBackend::new();
         host.low_memory(&mut backend);
@@ -513,6 +523,7 @@ mod tests {
             first_frame_sent: false,
             exit,
             suspend_resume: SuspendResumeAdapter,
+            _signal_subscription: None,
         };
         let mut backend = WinitBackend::new();
         // A suspend/resume cycle must leave the app able to run again: each
@@ -596,6 +607,7 @@ mod tests {
             first_frame_sent: false,
             exit: Rc::new(Cell::new(None)),
             suspend_resume: SuspendResumeAdapter,
+            _signal_subscription: None,
         };
         host.app
             .insert_resource(WindowRenderBridge(audit_render_bridge));
