@@ -12,8 +12,9 @@
 //! A production-resolve comparison must expose that difference, not replace
 //! the independent reference evaluation with the realtime BSDF.
 
-use prism_render_architecture::reference_pt::bsdf::Bsdf;
+use prism_render_architecture::reference_pt::bsdf::{Bsdf, BsdfSample};
 use prism_render_architecture::reference_pt::openpbr::OpenPbrMaterial;
+use prism_render_architecture::reference_pt::sampler::SampleSource;
 use prism_render_architecture::reference_pt::Vec3;
 
 use crate::SurfaceSample;
@@ -36,18 +37,18 @@ pub enum ReferencePtAdapterError {
     CoatRoughnessBelowParityFloor,
     /// No shade-time specular-AA variance is represented by this mapping.
     UnsupportedNormalVariance,
-    /// Coverage is owned by the caller's visibility/alpha path, not the BRDF.
-    UnsupportedGeometryOpacity,
-    /// Ambient occlusion is an external visibility factor, not a BRDF term.
-    UnsupportedAmbientOcclusion,
-    /// Emission is radiance, not part of the reference BRDF value.
-    UnsupportedEmission,
 }
 
-/// A validated production-to-reference BSDF mapping.
+/// A validated production-to-reference material mapping.
+///
+/// Non-BRDF outputs stay beside the oracle so emission and coverage are not
+/// silently folded into a BRDF comparison.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ReferencePtMaterialAdapter {
     bsdf: Bsdf,
+    emission: Vec3,
+    geometry_opacity: f32,
+    ambient_occlusion: f32,
 }
 
 impl ReferencePtMaterialAdapter {
@@ -55,8 +56,8 @@ impl ReferencePtMaterialAdapter {
     ///
     /// The supported slice is the isotropic, front-facing OpenPBR response:
     /// base/EON, metallic/specular, transmission, coat, sheen, subsurface,
-    /// iridescence and glint. Emission, normal variance, anisotropic frames,
-    /// coverage and AO remain outside the BRDF oracle and are rejected.
+    /// iridescence and glint. Emission, coverage and AO remain separate
+    /// material outputs rather than being mixed into the BRDF oracle.
     /// Unsupported frame sentinels must be EXACTLY zero: using an epsilon here
     /// silently changes authored energy, especially at grazing.
     ///
@@ -196,12 +197,6 @@ impl ReferencePtMaterialAdapter {
         {
             return Err(ReferencePtAdapterError::ParameterOutOfRange);
         }
-        if surface.geometry_opacity != 1.0 {
-            return Err(ReferencePtAdapterError::UnsupportedGeometryOpacity);
-        }
-        if surface.ambient_occlusion != 1.0 {
-            return Err(ReferencePtAdapterError::UnsupportedAmbientOcclusion);
-        }
         if surface.anisotropy != 0.0 || surface.anisotropy_rotation != 0.0 {
             return Err(ReferencePtAdapterError::UnsupportedAnisotropy);
         }
@@ -217,10 +212,6 @@ impl ReferencePtMaterialAdapter {
         if surface.normal_variance != 0.0 {
             return Err(ReferencePtAdapterError::UnsupportedNormalVariance);
         }
-        if surface.emissive.iter().any(|value| *value != 0.0) {
-            return Err(ReferencePtAdapterError::UnsupportedEmission);
-        }
-
         let uses_openpbr = surface.metallic != 0.0
             || surface.specular_weight != 0.0
             || surface.transmission != 0.0
@@ -286,13 +277,36 @@ impl ReferencePtMaterialAdapter {
                 coat_darkening: surface.coat_darkening,
             }
         };
-        Ok(Self { bsdf })
+        Ok(Self {
+            bsdf,
+            emission: Vec3::from_array(surface.emissive),
+            geometry_opacity: surface.geometry_opacity,
+            ambient_occlusion: surface.ambient_occlusion,
+        })
     }
 
     /// Returns the validated reference BSDF.
     #[must_use]
     pub const fn bsdf(&self) -> Bsdf {
         self.bsdf
+    }
+
+    /// Returns authored emission in linear radiance units.
+    #[must_use]
+    pub const fn emission(&self) -> Vec3 {
+        self.emission
+    }
+
+    /// Returns authored geometric coverage for the visibility/alpha path.
+    #[must_use]
+    pub const fn geometry_opacity(&self) -> f32 {
+        self.geometry_opacity
+    }
+
+    /// Returns authored ambient-occlusion weight for the lighting integrator.
+    #[must_use]
+    pub const fn ambient_occlusion(&self) -> f32 {
+        self.ambient_occlusion
     }
 
     /// Evaluates the independent reference BRDF (no cosine, light or coverage).
@@ -307,6 +321,44 @@ impl ReferencePtMaterialAdapter {
                 Vec3::from_array(normal),
             )
             .to_array()
+    }
+
+    /// Evaluates path transport, including the opposite-hemisphere
+    /// transmission event supported by the OpenPBR reference closure.
+    #[must_use]
+    pub fn evaluate_path(&self, view: [f32; 3], light: [f32; 3], normal: [f32; 3]) -> [f32; 3] {
+        match self.bsdf {
+            Bsdf::OpenPbr { material } => material
+                .evaluate_path(
+                    Vec3::from_array(view),
+                    Vec3::from_array(light),
+                    Vec3::from_array(normal),
+                )
+                .to_array(),
+            _ => self.evaluate(view, light, normal),
+        }
+    }
+
+    /// Returns the solid-angle density used by [`Self::sample`].
+    #[must_use]
+    pub fn pdf(&self, view: [f32; 3], light: [f32; 3], normal: [f32; 3]) -> f32 {
+        self.bsdf.pdf(
+            Vec3::from_array(view),
+            Vec3::from_array(light),
+            Vec3::from_array(normal),
+        )
+    }
+
+    /// Samples the complete reference closure using its matching proposal/PDF.
+    #[must_use]
+    pub fn sample(
+        &self,
+        view: [f32; 3],
+        normal: [f32; 3],
+        rng: &mut impl SampleSource,
+    ) -> Option<BsdfSample> {
+        self.bsdf
+            .sample(Vec3::from_array(view), Vec3::from_array(normal), rng)
     }
 }
 
@@ -638,20 +690,6 @@ mod tests {
             ),
             (
                 SurfaceSample {
-                    geometry_opacity: 0.5,
-                    ..base
-                },
-                E::UnsupportedGeometryOpacity,
-            ),
-            (
-                SurfaceSample {
-                    ambient_occlusion: 0.5,
-                    ..base
-                },
-                E::UnsupportedAmbientOcclusion,
-            ),
-            (
-                SurfaceSample {
                     anisotropy: 0.5,
                     ..base
                 },
@@ -841,31 +879,10 @@ mod tests {
     }
 
     #[test]
-    fn adapter_rejects_all_non_brdf_surface_fields_explicitly() {
+    fn adapter_rejects_unrepresentable_brdf_fields_explicitly() {
         use ReferencePtAdapterError as E;
         let base = openpbr_surface();
         for (surface, error) in [
-            (
-                SurfaceSample {
-                    geometry_opacity: 0.5,
-                    ..base
-                },
-                E::UnsupportedGeometryOpacity,
-            ),
-            (
-                SurfaceSample {
-                    ambient_occlusion: 0.5,
-                    ..base
-                },
-                E::UnsupportedAmbientOcclusion,
-            ),
-            (
-                SurfaceSample {
-                    emissive: [0.01, 0.0, 0.0],
-                    ..base
-                },
-                E::UnsupportedEmission,
-            ),
             (
                 SurfaceSample {
                     anisotropy: 0.2,
@@ -915,6 +932,29 @@ mod tests {
                 "unsupported field was accepted: {surface:?}"
             );
         }
+    }
+
+    #[test]
+    fn adapter_preserves_non_brdf_outputs_and_path_transport() {
+        let surface = SurfaceSample {
+            geometry_opacity: 0.37,
+            ambient_occlusion: 0.61,
+            emissive: [1.0, 0.25, 0.0],
+            transmission: 0.7,
+            ..openpbr_surface()
+        };
+        let adapter = ReferencePtMaterialAdapter::from_surface(surface).unwrap();
+        assert_eq!(adapter.emission().to_array(), surface.emissive);
+        assert_eq!(adapter.geometry_opacity(), surface.geometry_opacity);
+        assert_eq!(adapter.ambient_occlusion(), surface.ambient_occlusion);
+
+        let view = normalize([0.2, 0.95, 0.1]);
+        let transmitted = normalize([0.1, -0.98, 0.05]);
+        let path = adapter.evaluate_path(view, transmitted, NORMAL);
+        assert!(path.iter().all(|value| value.is_finite() && *value >= 0.0));
+
+        let density = adapter.pdf(view, transmitted, NORMAL);
+        assert!(density.is_finite() && density >= 0.0);
     }
 
     #[test]
