@@ -12,8 +12,9 @@ use prism_render_driver::{
     BindGroupLayoutEntry, BindGroupLayoutId, BindingResource, BindingType, BufferBindingType,
     BufferDescriptor, BufferId, BufferUsages, ComputePipelineDescriptor, FrameSync,
     PipelineLayoutDescriptor, RenderDevice, RenderQueue, ShaderModuleDescriptor, ShaderModuleId,
-    ShaderSource, ShaderStages, StorageTextureAccess, TextureFormat, TextureSampleType,
-    TextureViewDimension, TextureViewId,
+    SamplerBindingType, SamplerDescriptor, SamplerId, ShaderSource, ShaderStages,
+    StorageTextureAccess, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType,
+    TextureUsages, TextureViewDescriptor, TextureViewDimension, TextureViewId,
 };
 use prism_render_runtime::{RenderRuntime, ReplayHandle};
 use prism_render_shading::{LobeSampleBudget, LobeSamplingPolicy, ShadingQuality};
@@ -880,7 +881,6 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         textureStore(hdr_target, pixel, vec4<f32>(0.0));
         return;
     }
-
     let world_position = position;
     let normal_input = normal_sample.xyz;
     let sampled_base_color = textureLoad(albedo_gbuffer, pixel, 0).xyz;
@@ -1455,6 +1455,9 @@ fn surface_identity_layout_descriptor() -> BindGroupLayoutDescriptor {
 /// Group 2 is required by the material resolver and separate from lighting and targets.
 pub(crate) const COMPOSITE_MATERIAL_GROUP: u32 = 2;
 pub(crate) const COMPOSITE_RESPONSE_BYTES_PER_PIXEL: u64 = 16 * 4;
+const MATERIAL_TEXTURE_ROW_BYTES: u64 = core::mem::size_of::<prism_render_material::GpuMaterialTexture>() as u64;
+const MATERIAL_VT_PAGE_TABLE_BYTES: u64 = 16;
+const MATERIAL_VT_CONFIG_BYTES: u64 = 32;
 
 /// Required members of one canonical material snapshot. The composite group
 /// consumes only headers and parameters; execution plans/programs are bound by
@@ -1472,12 +1475,30 @@ pub(crate) struct LightingCompositeMaterialBuffers {
     pub execution_programs_size_bytes: u64,
 }
 
+/// The extra group-2 resources paired with a canonical material snapshot.
+/// Kept separate from `LightingCompositeMaterialBuffers` so old test fixtures
+/// and callers that construct the four-table ABI remain source-compatible.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct LightingCompositeMaterialResourceIds {
+    pub texture_rows: BufferId,
+    pub texture_rows_size_bytes: u64,
+    pub vt_page_table: BufferId,
+    pub vt_page_table_size_bytes: u64,
+    pub vt_config: BufferId,
+    pub vt_config_size_bytes: u64,
+    pub vt_atlas_view: TextureViewId,
+    pub vt_sampler: SamplerId,
+    pub device_generation: u64,
+    pub publication_generation: u64,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LightingCompositeMaterialBindingError {
     MissingHeaders,
     MissingParameters,
     MissingExecutionPlans,
     MissingExecutionPrograms,
+    InvalidResourceId { binding: u32 },
     InvalidBindingSize {
         binding: u32,
         size_bytes: u64,
@@ -1495,6 +1516,7 @@ impl core::fmt::Display for LightingCompositeMaterialBindingError {
             Self::MissingExecutionPrograms => {
                 "canonical material execution program buffer is missing"
             }
+            Self::InvalidResourceId { .. } => "canonical material resource id is invalid",
             Self::InvalidBindingSize { .. } => "canonical material storage binding size is invalid",
         })
     }
@@ -1510,6 +1532,59 @@ fn composite_material_layout_descriptor() -> BindGroupLayoutDescriptor {
             storage_layout(1, MATERIAL_PARAMETER_WORD_BYTES, true),
         ],
     }
+}
+
+fn validate_composite_material_resources(
+    resources: LightingCompositeMaterialResourceIds,
+) -> Result<(), LightingCompositeMaterialBindingError> {
+    let invalid_buffer = BufferId::from_parts(0, 0);
+    let invalid_view = TextureViewId::from_parts(0, 0);
+    let invalid_sampler = SamplerId::from_parts(0, 0);
+    for (binding, id) in [
+        (2, resources.texture_rows),
+        (3, resources.vt_page_table),
+        (4, resources.vt_config),
+    ] {
+        if id == invalid_buffer {
+            return Err(LightingCompositeMaterialBindingError::InvalidResourceId { binding });
+        }
+    }
+    if resources.vt_atlas_view == invalid_view {
+        return Err(LightingCompositeMaterialBindingError::InvalidResourceId { binding: 5 });
+    }
+    if resources.vt_sampler == invalid_sampler {
+        return Err(LightingCompositeMaterialBindingError::InvalidResourceId { binding: 6 });
+    }
+    for (binding, size_bytes, minimum_bytes, row_bytes) in [
+        (
+            2,
+            resources.texture_rows_size_bytes,
+            MATERIAL_TEXTURE_ROW_BYTES,
+            MATERIAL_TEXTURE_ROW_BYTES,
+        ),
+        (
+            3,
+            resources.vt_page_table_size_bytes,
+            MATERIAL_VT_PAGE_TABLE_BYTES,
+            4,
+        ),
+        (
+            4,
+            resources.vt_config_size_bytes,
+            MATERIAL_VT_CONFIG_BYTES,
+            4,
+        ),
+    ] {
+        if size_bytes < minimum_bytes || size_bytes % row_bytes != 0 {
+            return Err(LightingCompositeMaterialBindingError::InvalidBindingSize {
+                binding,
+                size_bytes,
+                minimum_bytes,
+                row_bytes,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn validate_material_buffers(
@@ -1788,9 +1863,9 @@ mod composite_contract_tests {
                 .iter()
                 .map(|entry| entry.binding)
                 .collect::<Vec<_>>(),
-            vec![0, 1]
+            vec![0, 1, 2, 3, 4, 5, 6]
         );
-        assert!(layout.entries.iter().all(|entry| {
+        assert!(layout.entries[..5].iter().all(|entry| {
             entry.validate().is_ok()
                 && entry.visibility == ShaderStages::COMPUTE
                 && entry.count.is_none()
@@ -1801,10 +1876,25 @@ mod composite_contract_tests {
                         min_binding_size: Some(match entry.binding {
                             0 => MATERIAL_HEADER_BYTES,
                             1 => MATERIAL_PARAMETER_WORD_BYTES,
+                            2 => MATERIAL_TEXTURE_ROW_BYTES,
+                            3 => 4,
+                            4 => MATERIAL_VT_CONFIG_BYTES,
                             _ => unreachable!("material binding is outside the contract"),
                         }),
                     }
         }));
+        assert_eq!(
+            layout.entries[5].ty,
+            BindingType::Texture {
+                sample_type: TextureSampleType::Float,
+                view_dimension: TextureViewDimension::D2Array,
+                multisampled: false,
+            }
+        );
+        assert_eq!(
+            layout.entries[6].ty,
+            BindingType::Sampler(SamplerBindingType::Filtering)
+        );
 
         let ids =
             [0, 1, 2, 3].map(|index| prism_render_driver::BufferId::from_parts(index + 10, 7));
@@ -1876,6 +1966,35 @@ mod composite_contract_tests {
     }
 
     #[test]
+    fn composite_material_resources_validate_rows_and_vt_boundaries() {
+        let resources = LightingCompositeMaterialResourceIds {
+            texture_rows: BufferId::from_parts(20, 7),
+            texture_rows_size_bytes: MATERIAL_TEXTURE_ROW_BYTES * 4,
+            vt_page_table: BufferId::from_parts(21, 7),
+            vt_page_table_size_bytes: MATERIAL_VT_PAGE_TABLE_BYTES,
+            vt_config: BufferId::from_parts(22, 7),
+            vt_config_size_bytes: MATERIAL_VT_CONFIG_BYTES,
+            vt_atlas_view: TextureViewId::from_parts(23, 7),
+            vt_sampler: SamplerId::from_parts(24, 7),
+            device_generation: 3,
+            publication_generation: 9,
+        };
+        assert_eq!(validate_composite_material_resources(resources), Ok(()));
+        let mut too_small = resources;
+        too_small.texture_rows_size_bytes = MATERIAL_TEXTURE_ROW_BYTES - 1;
+        assert!(matches!(
+            validate_composite_material_resources(too_small),
+            Err(LightingCompositeMaterialBindingError::InvalidBindingSize { binding: 2, .. })
+        ));
+        let mut missing_vt = resources;
+        missing_vt.vt_atlas_view = TextureViewId::from_parts(0, 0);
+        assert_eq!(
+            validate_composite_material_resources(missing_vt),
+            Err(LightingCompositeMaterialBindingError::InvalidResourceId { binding: 5 })
+        );
+    }
+
+    #[test]
     fn composite_rejects_non_finite_response_before_publication() {
         let shader = LIGHTING_COMPOSITE_WGSL;
         let blend = shader
@@ -1917,6 +2036,12 @@ mod composite_contract_tests {
         let material = include_str!("shaders/composite_material.wesl");
         for contract in [
             "composite_execution_identity_is_valid",
+            "composite_material_texture_rows_are_valid",
+            "@group(2) @binding(2) var<storage, read> composite_material_texture_rows",
+            "@group(2) @binding(3) var<storage, read> composite_material_vt_page_table",
+            "@group(2) @binding(4) var<storage, read> composite_material_vt_config",
+            "@group(2) @binding(5) var composite_material_vt_atlas",
+            "@group(2) @binding(6) var composite_material_vt_sampler",
             "header.execution_program_index == identity.left_program_index",
             "identity.program_kind != identity.left_program_kind",
             "builtin MaskBlend is the canonical fused Lit/Lit form",
@@ -1931,6 +2056,7 @@ mod composite_contract_tests {
         let shader = LIGHTING_COMPOSITE_WGSL;
         assert!(shader.contains("raw < 0.0 || raw > 1.0"));
         assert!(shader.contains("return CompositeMaskValue(true, raw);"));
+        assert!(shader.contains("composite_material_texture_rows_are_valid(material_header)"));
         assert!(!shader.contains("mix(left.words"));
         assert!(shader.contains("composite_lerp(left.words[3]"));
     }
@@ -3826,6 +3952,9 @@ pub struct LightingGpuBundle {
     pub lobe_sample_budget: BufferId,
     pub camera_view: BufferId,
     pub composite_bind_group: prism_render_driver::BindGroupId,
+    /// Device-local fallback resources used by legacy fixtures and before a
+    /// published material VT lease is admitted.
+    pub composite_material_resources: LightingCompositeMaterialResourceIds,
 }
 
 /// A graph-ready view of the current lighting GPU bundle.
@@ -3852,6 +3981,7 @@ pub(crate) struct LightingGpuPass {
     pub composite_bind_group: prism_render_driver::BindGroupId,
     pub lobe_sample_budget: BufferId,
     pub camera_view: BufferId,
+    pub composite_material_resources: LightingCompositeMaterialResourceIds,
     /// Target-specific group-1 binding. It is populated only by the
     /// canonical material-aware target pass.
     pub composite_target_bind_group: Option<BindGroupId>,
@@ -3861,8 +3991,7 @@ pub(crate) struct LightingGpuPass {
     /// Target/material binding used to reconstruct the per-pixel identity
     /// tuple before the composite reads it.
     pub surface_identity_bind_group: Option<BindGroupId>,
-    /// Group-2 bind group for the four canonical material buffers from one
-    /// published generation.
+    /// Group-2 bind group for one published material generation.
     pub composite_material_bind_group: Option<BindGroupId>,
     composite_material_buffers: Option<LightingCompositeMaterialBuffers>,
     pub run_direct: bool,
@@ -3920,6 +4049,21 @@ impl LightingGpuPass {
         device: &D,
         buffers: LightingCompositeMaterialBuffers,
     ) -> Result<BindGroupId, LightingCompositeMaterialBindingError> {
+        self.create_composite_material_bind_group_with_resources(
+            device,
+            buffers,
+            self.composite_material_resources,
+        )
+    }
+
+    pub(crate) fn create_composite_material_bind_group_with_resources<
+        D: prism_render_driver::RenderDevice,
+    >(
+        self,
+        device: &D,
+        buffers: LightingCompositeMaterialBuffers,
+        resources: LightingCompositeMaterialResourceIds,
+    ) -> Result<BindGroupId, LightingCompositeMaterialBindingError> {
         let [(headers, headers_size), (parameters, parameters_size), _, _] =
             validate_material_buffers(buffers)?;
         // Plans/programs are consumed by the separate identity pass. Keeping
@@ -3957,6 +4101,13 @@ impl LightingGpuPass {
         self,
     ) -> Option<LightingCompositeMaterialBuffers> {
         self.composite_material_buffers
+    }
+
+    #[must_use]
+    pub(crate) const fn composite_material_resources(
+        self,
+    ) -> LightingCompositeMaterialResourceIds {
+        self.composite_material_resources
     }
 
     /// Creates the real screen-space composite bindings for one target.
@@ -4130,6 +4281,7 @@ where
     radiance_upload: Mutex<RadianceUploadCache>,
     light_upload: Mutex<LightUploadCache>,
     composite_targets: Mutex<CompositeTargetCache>,
+    composite_material_resources: Mutex<Option<LightingCompositeMaterialResourceIds>>,
     marker: core::marker::PhantomData<fn() -> I>,
 }
 
@@ -4182,6 +4334,7 @@ struct CompositeTargetCache {
     camera_groups: BTreeMap<(CompositeTargetKey, [u32; 3]), (BindGroupId, BufferId)>,
     identity_groups: BTreeMap<(CompositeTargetKey, BufferId, BufferId, BufferId), BindGroupId>,
     material_buffers: Option<LightingCompositeMaterialBuffers>,
+    material_resources: Option<LightingCompositeMaterialResourceIds>,
     material_group: Option<BindGroupId>,
     registered_pipeline: Option<RegisteredCompositePipeline>,
 }
@@ -4284,6 +4437,7 @@ impl CompositeTargetCache {
         self.camera_groups.clear();
         self.identity_groups.clear();
         self.material_buffers = None;
+        self.material_resources = None;
         self.bundle = None;
         self.device_generation = None;
         self.device = None;
@@ -4624,6 +4778,19 @@ impl<I> LightingGpuState<I>
 where
     I: prism_render_driver::Instance + 'static,
 {
+    /// Publishes the exact material resource lease selected for the next
+    /// target pass. The lease owner itself is retained by the frame bundle;
+    /// this cache carries only IDs and generation proofs.
+    pub(crate) fn set_composite_material_resources(
+        &self,
+        resources: Option<LightingCompositeMaterialResourceIds>,
+    ) {
+        *self
+            .composite_material_resources
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = resources;
+    }
+
     /// Creates the initial resource bundle and registers its replay recipe.
     pub fn new(
         runtime: &mut RenderRuntime<I>,
@@ -4647,6 +4814,7 @@ where
             radiance_upload: Mutex::new(RadianceUploadCache::default()),
             light_upload: Mutex::new(LightUploadCache::default()),
             composite_targets: Mutex::new(CompositeTargetCache::default()),
+            composite_material_resources: Mutex::new(None),
             marker: core::marker::PhantomData,
         })
     }
@@ -4907,6 +5075,7 @@ where
             composite_bind_group: bundle.composite_bind_group,
             lobe_sample_budget: bundle.lobe_sample_budget,
             camera_view: bundle.camera_view,
+            composite_material_resources: bundle.composite_material_resources,
             composite_target_bind_group: None,
             response_output: BufferId::from_parts(0, 0),
             response_output_size_bytes: 0,
@@ -4969,6 +5138,9 @@ where
                 cache.response_buffers.clear();
                 cache.camera_groups.clear();
                 cache.identity_groups.clear();
+                cache.material_group = None;
+                cache.material_buffers = None;
+                cache.material_resources = None;
                 // The old device owns the registered module/pipeline. Do not
                 // reuse its IDs after recovery; device teardown owns cleanup.
                 cache.registered_pipeline = None;
@@ -5073,6 +5245,17 @@ where
     {
         let mut pass = self.target_pass_core(plan, target, runtime, camera_view_position)?;
         let device = runtime.device_handle();
+        let configured_resources = self
+            .composite_material_resources
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .filter(|resources| {
+                resources.device_generation == 0
+                    || resources.device_generation == runtime.device_generation()
+            });
+        let composite_material_resources =
+            configured_resources.unwrap_or(pass.composite_material_resources);
+        pass.composite_material_resources = composite_material_resources;
         let device_owner: Arc<dyn RenderDevice + Send + Sync> = device.clone();
         let generation = runtime.device_generation();
         let key = CompositeTargetKey::from(target);
@@ -5096,13 +5279,20 @@ where
                 .device
                 .as_ref()
                 .is_some_and(|owner| Arc::ptr_eq(owner, &device_owner));
-        let group = if owner_matches && cache.material_buffers == Some(buffers) {
+        let group = if owner_matches
+            && cache.material_buffers == Some(buffers)
+            && cache.material_resources == Some(composite_material_resources)
+        {
             cache
                 .material_group
                 .expect("cached material buffers always have a bind group")
         } else {
             let group = pass
-                .create_composite_material_bind_group(&*device, buffers)
+                .create_composite_material_bind_group_with_resources(
+                    &*device,
+                    buffers,
+                    composite_material_resources,
+                )
                 .expect("published canonical material buffers satisfy the binding ABI");
             if owner_matches {
                 if let Some(old_group) = cache.material_group.replace(group) {
@@ -5115,6 +5305,7 @@ where
                 cache.material_group = Some(group);
             }
             cache.material_buffers = Some(buffers);
+            cache.material_resources = Some(composite_material_resources);
             group
         };
         pass.composite_material_bind_group = Some(group);
@@ -6796,6 +6987,57 @@ fn build_bundle<D: prism_render_driver::RenderDevice, Q: RenderQueue>(
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
+    let composite_texture_rows = device.create_buffer(&BufferDescriptor {
+        label: Some("lighting-composite-material-texture-rows-fallback".into()),
+        size: MATERIAL_TEXTURE_ROW_BYTES,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let composite_vt_page_table = device.create_buffer(&BufferDescriptor {
+        label: Some("lighting-composite-material-vt-page-table-fallback".into()),
+        size: MATERIAL_VT_PAGE_TABLE_BYTES,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let composite_vt_config = device.create_buffer(&BufferDescriptor {
+        label: Some("lighting-composite-material-vt-config-fallback".into()),
+        size: MATERIAL_VT_CONFIG_BYTES,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let composite_vt_atlas = device.create_texture(&TextureDescriptor {
+        label: Some("lighting-composite-material-vt-atlas-fallback".into()),
+        size: prism_render_driver::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::Rgba8Unorm,
+        usage: TextureUsages::TEXTURE_BINDING,
+    });
+    let composite_vt_atlas_view = device.create_texture_view(
+        composite_vt_atlas,
+        &TextureViewDescriptor {
+            dimension: TextureViewDimension::D2Array,
+            ..TextureViewDescriptor::default()
+        },
+    );
+    let composite_vt_sampler = device.create_sampler(&SamplerDescriptor::default());
+    let composite_material_resources = LightingCompositeMaterialResourceIds {
+        texture_rows: composite_texture_rows,
+        texture_rows_size_bytes: MATERIAL_TEXTURE_ROW_BYTES,
+        vt_page_table: composite_vt_page_table,
+        vt_page_table_size_bytes: MATERIAL_VT_PAGE_TABLE_BYTES,
+        vt_config: composite_vt_config,
+        vt_config_size_bytes: MATERIAL_VT_CONFIG_BYTES,
+        vt_atlas_view: composite_vt_atlas_view,
+        vt_sampler: composite_vt_sampler,
+        device_generation: 0,
+        publication_generation: 0,
+    };
 
     let gi_shader = device.create_shader_module(&ShaderModuleDescriptor::wgsl(GI_SHADER));
     let gi_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
@@ -6912,5 +7154,6 @@ fn build_bundle<D: prism_render_driver::RenderDevice, Q: RenderQueue>(
         lobe_sample_budget,
         camera_view,
         composite_bind_group,
+        composite_material_resources,
     }
 }

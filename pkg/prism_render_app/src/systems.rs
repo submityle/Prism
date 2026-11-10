@@ -18,6 +18,7 @@ use crate::lighting_gpu::{
 use crate::material::{
     MaterialFrameSnapshotBundle, MaterialParameterBuffers, NativeExecutionTableBuffers,
 };
+use crate::material::virtual_texture::NativeMaterialVt;
 use crate::record::RenderRecord;
 use crate::runtime_resource::RenderRuntimeResource;
 use crate::startup::ensure_render_startup;
@@ -113,6 +114,67 @@ fn composite_material_buffers(
         execution_programs_size_bytes: execution_snapshot.program_rows().len() as u64 * 20,
     };
     Some((bindings, std::sync::Arc::new(bundle)))
+}
+
+fn composite_material_buffers_with_vt<I>(
+    materials: &MaterialParameterBuffers,
+    executions: &NativeExecutionTableBuffers,
+    runtime: &prism_render_runtime::RenderRuntime<I>,
+    vt_owner: Option<&NativeMaterialVt<I::Device>>,
+) -> Option<(
+    LightingCompositeMaterialBuffers,
+    std::sync::Arc<MaterialFrameSnapshotBundle>,
+    crate::lighting_gpu::LightingCompositeMaterialResourceIds,
+)>
+where
+    I: prism_render_driver::Instance + 'static,
+    I::Device: Send + Sync + 'static,
+{
+    let material_snapshot = materials.snapshot()?;
+    let execution_snapshot = executions.snapshot()?;
+    let vt_owner = vt_owner?;
+    let publication_generation = vt_owner.publication_generation();
+    if publication_generation == 0 {
+        return None;
+    }
+    let binding = vt_owner.active_binding(runtime).ok()??;
+    let lease = binding.frame_lease(publication_generation);
+    let bundle = MaterialFrameSnapshotBundle::new_with_vt(
+        material_snapshot,
+        execution_snapshot,
+        lease,
+    )
+    .ok()?;
+    let material_snapshot = bundle.material();
+    let execution_snapshot = bundle.execution();
+    let vt = bundle.vt()?;
+    let vt_page_table_size_bytes = u64::from(vt_owner.config().max_entries.max(1)) * 16;
+    let bindings = LightingCompositeMaterialBuffers {
+        headers: Some(material_snapshot.headers()),
+        headers_size_bytes: u64::from(material_snapshot.header_capacity())
+            * core::mem::size_of::<prism_render_material::GpuMaterialHeader>() as u64,
+        parameters: Some(material_snapshot.parameters()),
+        parameters_size_bytes: u64::from(material_snapshot.parameter_capacity_words()) * 4,
+        execution_plans: Some(execution_snapshot.plan_buffer()),
+        execution_plans_size_bytes: execution_snapshot.plan_rows().len() as u64
+            * (prism_render_material::EXECUTION_PLAN_ROW_WORDS * 4) as u64,
+        execution_programs: Some(execution_snapshot.program_buffer()),
+        execution_programs_size_bytes: execution_snapshot.program_rows().len() as u64 * 20,
+    };
+    let resources = crate::lighting_gpu::LightingCompositeMaterialResourceIds {
+        texture_rows: material_snapshot.textures(),
+        texture_rows_size_bytes: u64::from(material_snapshot.texture_capacity_rows())
+            * core::mem::size_of::<prism_render_material::GpuMaterialTexture>() as u64,
+        vt_page_table: vt.page_table(),
+        vt_page_table_size_bytes,
+        vt_config: vt.config(),
+        vt_config_size_bytes: 32,
+        vt_atlas_view: vt.atlas_view(),
+        vt_sampler: vt.sampler(),
+        device_generation: vt.device_generation(),
+        publication_generation: vt.publication_generation(),
+    };
+    Some((bindings, std::sync::Arc::new(bundle), resources))
 }
 
 #[cfg(test)]
@@ -301,7 +363,10 @@ pub(crate) fn execute_frame<I>(
     inputs: Res<crate::ExtractedLightingInputs>,
     lighting_gpu: Res<LightingGpuState<I>>,
     mut offscreen: OffscreenFrameTargets,
-    execution: FrameExecutionResources,
+    (execution, vt_owner): (
+        FrameExecutionResources,
+        Option<Res<'_, NativeMaterialVt<I::Device>>>,
+    ),
     requests: Res<crate::WindowRenderRequests<I>>,
     overrides: Res<crate::WindowRenderQueues>,
     mut windows: ResMut<crate::WindowRenderTargets<I>>,
@@ -322,8 +387,19 @@ pub(crate) fn execute_frame<I>(
     let ember = execution.ember;
     let ember_external = execution.ember_external;
     let ember_status = execution.ember_status;
-    let material_binding =
-        composite_material_buffers(&execution.material_buffers, &execution.execution_buffers);
+    let material_admission = composite_material_buffers_with_vt(
+        &execution.material_buffers,
+        &execution.execution_buffers,
+        runtime.runtime(),
+        vt_owner.as_deref(),
+    );
+    lighting_gpu.set_composite_material_resources(
+        material_admission.as_ref().map(|(_, _, resources)| *resources),
+    );
+    let material_binding = material_admission.map(|(bindings, owner, _)| (bindings, owner));
+    let material_evaluator = material_binding.as_ref().map(|(_, owner)| {
+        crate::lighting_trace_gpu::NativeGiMaterialEvaluatorInput::from_material_bundle(owner)
+    });
     let mut frame_texture_imports = (*execution.frame_texture_imports).clone();
     stats
         .execution_trace
