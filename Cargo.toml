@@ -61,7 +61,6 @@ members = [
   "pkg/prism_material_pcm",
   # Prism GPU hardware-decode oracle validating the CPU block-compressed texture codecs.
   "pkg/prism_render_material_gpu",
-  "pkg/prism_render_scene",
   "pkg/prism_render_shading",
   # Device twin of the CPU direct-lighting golden (WGSL base-lobe mirror + PBR surface pass).
   "pkg/prism_render_visibility",
