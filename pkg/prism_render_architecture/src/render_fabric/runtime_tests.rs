@@ -373,6 +373,53 @@ fn recorders(keys: &[u32]) -> Vec<RuntimePassBinding> {
         .collect()
 }
 
+#[test]
+fn host_consumer_reads_the_fabric_writer_ssa_output() {
+    use std::cell::Cell;
+
+    let mut graph = RenderGraph::new(Extent3d::new_2d(1, 1));
+    let lowering = compiled()
+        .append_to_graph(&mut graph, &[], recorders(&[1]))
+        .unwrap();
+    let output = lowering.output(ResourceId(0)).unwrap();
+    let RuntimeResourceHandle::Buffer {
+        handle: writer_handle,
+        ..
+    } = output
+        .resolve()
+        .expect("Fabric writer publishes its output when appended")
+    else {
+        panic!("the fixture output is a buffer")
+    };
+    assert_eq!(writer_handle.version(), 1);
+
+    let consumer_version = Cell::new(None);
+    graph.add_compute_pass(
+        "host consumer after Fabric writer",
+        PassFlags::NEVER_CULL | PassFlags::ASYNC_COMPUTE,
+        |builder| {
+            let RuntimeResourceHandle::Buffer { handle, .. } = output
+                .resolve()
+                .expect("Fabric writer publishes its output when appended")
+            else {
+                panic!("the fixture output is a buffer")
+            };
+            let read = builder.read_storage_buffer(handle);
+            consumer_version.set(Some(read.version()));
+            |_| panic!("plan validation must not execute recorders")
+        },
+    );
+
+    graph
+        .compile()
+        .expect("Fabric writer and host consumer compile");
+    assert_eq!(consumer_version.get(), Some(1));
+    let RuntimeResourceHandle::Buffer { handle, .. } = output.resolve().unwrap() else {
+        panic!("the fixture output is a buffer")
+    };
+    assert_eq!(handle.version(), 1);
+}
+
 fn prepare(
     declaration: CompiledFeatureGraph,
     imports: &[RuntimeImport],

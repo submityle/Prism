@@ -214,3 +214,5 @@ RenderGraph 全 package 的 unit 122/122、doc 1 passed / 1 ignored 已于 2026-
 本轮默认门禁结果为 **2 passed / 0 failed**，输出 `status=UNVERIFIED`、`graph_passes=31`、`unified_entrypoint=false`；当前最大单一 recorder source coverage 为 **1/31**，没有满足 import→record→submit→completion 且覆盖 31 pass 的生产入口。设置 `PRISM_REQUIRE_SCENEFABRIC_FULL_FRAME=1` 会将该缺口提升为失败，因此当前结论保持 **31-pass SceneFabric 全帧验收未完成**；本轮没有找到可仅靠 recorder 或 schedule ledger 补齐真实缺口的安全增量。
 
 **2026-11-09 Water 生命周期同步**：Water 的旧独立 Core3d recorder/ledger 已删除，历史 reset/publication 与 displacement copy 已进入统一 coordinator submission；Water 定向测试 **230/230** 通过。该变更不改变本节 `31-pass` 审计结果：当前仍为 `unified_entrypoint=false`，全帧 completion、跨 adapter 和性能证据未完成。
+
+**2026-11-11 Native Fabric→composite SSA 接线**：Surface identity 的 Fabric lowering 现在向 host graph 发布 writer 输出 token；后续 composite setup 解析该 token 并读取 writer 的 SSA 版本，而非 version-zero import。新增 runtime 回归 `host_consumer_reads_the_fabric_writer_ssa_output` 实测 producer 后追加的 host consumer 读取版本 **1**，定向测试通过。此项只验证一个原生 identity-buffer producer/consumer 的图依赖；不证明完整 pass inventory、全帧 GPU 输出或 Render Fabric 已完成。
