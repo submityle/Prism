@@ -28,13 +28,15 @@
 
 use core::f32::consts::PI;
 
-use bevy_math::ops;
+use prism_math::ops;
 
+use crate::gi::translucency::diffusion::profile_radial_energy_for_budget;
 use crate::lighting::{
     dielectric_f0, distribution_ggx, fresnel_schlick, visibility_smith_ggx_correlated,
 };
 use crate::vecmath::{add, dot, mix3, mul, mul_scalar, normalize_or, sub};
 use crate::{DirectLightSample, ShadingFrame, SurfaceSample};
+use crate::{LobeSampleBudget, ShadingQuality};
 
 /// Reciprocal of pi, matching the GPU `INV_PI` constant.
 const INV_PI: f32 = 1.0 / PI;
@@ -67,6 +69,17 @@ pub fn evaluate_subsurface_direct(
     frame: ShadingFrame,
     light: DirectLightSample,
 ) -> [f32; 3] {
+    evaluate_subsurface_direct_with_budget(surface, frame, light, &ShadingQuality::High.budget())
+}
+
+/// Evaluates the standalone subsurface closure with the shared production
+/// sample budget. This is the CPU twin of `subsurface.wesl::subsurface_direct`.
+pub fn evaluate_subsurface_direct_with_budget(
+    surface: SurfaceSample,
+    frame: ShadingFrame,
+    light: DirectLightSample,
+    budget: &LobeSampleBudget,
+) -> [f32; 3] {
     let n = normalize_or(frame.normal, [0.0, 1.0, 0.0]);
     let v = normalize_or(frame.view, n);
     let l = normalize_or(light.direction, n);
@@ -92,8 +105,15 @@ pub fn evaluate_subsurface_direct(
     let specular = mul_scalar(mul_scalar(f, d * g), n_dot_l);
 
     let diffuse_weight = mul_scalar(sub([1.0; 3], f), 1.0 - metallic);
-    let (diffuse, transmitted) =
-        subsurface_diffuse_terms(&surface, n, v, l, raw_n_dot_l, diffuse_weight);
+    let (diffuse, transmitted) = subsurface_diffuse_terms_with_budget(
+        &surface,
+        n,
+        v,
+        l,
+        raw_n_dot_l,
+        diffuse_weight,
+        budget,
+    );
     let lit = add(add(diffuse, specular), transmitted);
     let radiance = mul_scalar(
         mul(lit, light.illuminance),
@@ -166,6 +186,73 @@ pub(crate) fn subsurface_diffuse_terms(
     (diffuse, transmitted)
 }
 
+/// Budgeted scattering terms consumed by the production principled kernel.
+///
+/// The wrapped diffuse term remains an analytic, unit-albedo response; the
+/// budget controls the numerical radial integration used by transmission.
+/// Counts are runtime inputs from the shared P1-e ABI, not material
+/// permutations, so changing quality cannot change the diffuse lobe's energy.
+pub(crate) fn subsurface_diffuse_terms_with_budget(
+    surface: &SurfaceSample,
+    n: [f32; 3],
+    v: [f32; 3],
+    l: [f32; 3],
+    raw_n_dot_l: f32,
+    diffuse_weight: [f32; 3],
+    budget: &LobeSampleBudget,
+) -> ([f32; 3], [f32; 3]) {
+    let budget = budget.clamped();
+    let subsurface = surface.subsurface.clamp(0.0, 1.0);
+    if subsurface <= 0.0 {
+        return subsurface_diffuse_terms(surface, n, v, l, raw_n_dot_l, diffuse_weight);
+    }
+    let thickness = surface.thickness.clamp(0.0, 1.0);
+    // Keep the authored radius response as the semantic source of truth. The
+    // wrapped lobe is normalized analytically below; a sample-count quality
+    // factor must not multiply it, because that would turn fewer samples into
+    // absorbed energy. The budget still controls the transmission profile's
+    // radial integration, which is the part whose numerical approximation
+    // actually changes with the requested sample count.
+    let mut diffuse = [0.0f32; 3];
+    for (channel, slot) in diffuse.iter_mut().enumerate() {
+        let wrap =
+            (subsurface * surface.subsurface_radius * surface.subsurface_radius_scale[channel])
+                .clamp(0.0, 1.0);
+        let one_plus_w = 1.0 + wrap;
+        let e_wrap = ((1.0 + 2.0 * wrap) / (one_plus_w * one_plus_w)).max(1.0e-3);
+        let response = fd_wrap(raw_n_dot_l, wrap) / e_wrap;
+        *slot = surface.base_color[channel]
+            * surface.subsurface_color[channel]
+            * INV_PI
+            * response
+            * diffuse_weight[channel];
+    }
+
+    let h_transmission = normalize_or(add(l, mul_scalar(n, SSS_DISTORTION)), n);
+    let sharpness =
+        (SSS_POWER * (1.0 + surface.scatter_anisotropy.clamp(-1.0, 1.0))).max(MIN_N_DOT);
+    let back = ops::powf(
+        dot(v, mul_scalar(h_transmission, -1.0)).clamp(0.0, 1.0),
+        sharpness,
+    );
+    let mut transmitted = mul(
+        mul(surface.base_color, surface.subsurface_color),
+        [subsurface * back * (1.0 - thickness); 3],
+    );
+    for (channel, value) in transmitted.iter_mut().enumerate() {
+        let albedo =
+            (surface.base_color[channel] * surface.subsurface_color[channel]).clamp(0.0, 1.0);
+        if albedo > 1.0e-6 {
+            let d = (surface.subsurface_radius * surface.subsurface_radius_scale[channel])
+                .abs()
+                .max(1.0e-6);
+            let energy = profile_radial_energy_for_budget(d, albedo, &budget);
+            *value *= (energy / albedo).max(0.0);
+        }
+    }
+    (diffuse, transmitted)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,6 +284,48 @@ mod tests {
         }
     }
 
+    fn white_furnace_albedo(surface: SurfaceSample, quality: ShadingQuality) -> [f32; 3] {
+        let view = normalize_or([0.6, 0.8, 0.0], [0.0, 1.0, 0.0]);
+        let frame = ShadingFrame {
+            normal: [0.0, 1.0, 0.0],
+            view,
+            tangent: [1.0, 0.0, 0.0],
+            bitangent: [0.0, 0.0, -1.0],
+        };
+        let n_theta = 96;
+        let n_phi = 96;
+        let d_theta = core::f32::consts::FRAC_PI_2 / n_theta as f32;
+        let d_phi = 2.0 * PI / n_phi as f32;
+        let mut sum = [0.0; 3];
+        for i in 0..n_theta {
+            let theta = (i as f32 + 0.5) * d_theta;
+            let (sin_theta, cos_theta) = (ops::sin(theta), ops::cos(theta));
+            for j in 0..n_phi {
+                let phi = (j as f32 + 0.5) * d_phi;
+                let light = DirectLightSample {
+                    direction: [
+                        sin_theta * ops::cos(phi),
+                        cos_theta,
+                        sin_theta * ops::sin(phi),
+                    ],
+                    illuminance: [1.0; 3],
+                    visibility: 1.0,
+                };
+                let radiance = evaluate_subsurface_direct_with_budget(
+                    surface,
+                    frame,
+                    light,
+                    &quality.budget(),
+                );
+                let weight = sin_theta * d_theta * d_phi;
+                for channel in 0..3 {
+                    sum[channel] += radiance[channel] * weight;
+                }
+            }
+        }
+        sum
+    }
+
     #[test]
     fn subsurface_is_finite_and_non_negative_across_parameters() {
         for roughness in [0.045, 0.2, 0.5, 1.0] {
@@ -217,6 +346,27 @@ mod tests {
                         "roughness={roughness} subsurface={subsurface} thickness={thickness} -> {value:?}"
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn white_furnace_preserves_energy_across_sss_budgets() {
+        let surface = SurfaceSample {
+            base_color: [1.0; 3],
+            subsurface: 1.0,
+            subsurface_color: [1.0; 3],
+            thickness: 1.0,
+            ..Default::default()
+        };
+
+        for quality in ShadingQuality::ALL {
+            let albedo = white_furnace_albedo(surface, quality);
+            for (channel, value) in albedo.into_iter().enumerate() {
+                assert!(
+                    (value - 1.0).abs() <= 0.02,
+                    "white furnace lost energy at {quality:?}, channel {channel}: {albedo:?}"
+                );
             }
         }
     }
