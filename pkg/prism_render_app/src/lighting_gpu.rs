@@ -762,6 +762,62 @@ struct CompositeProgramEvaluation {
     response: CompositeResponseOutput,
 }
 
+// Registered responses must see the same texture-folded values as builtin
+// responses. Preserve fields that are not shade-time sampled, while replacing
+// every response input represented by the resolved SurfaceSample.
+fn composite_parameters_from_sampled_surface(
+    authored: PrismSurfaceParameters,
+    surface: SurfaceSample,
+) -> PrismSurfaceParameters {
+    var sampled = authored;
+    sampled.base_color = vec4<f32>(surface.base_color, authored.base_color.w);
+    sampled.emission_color = vec4<f32>(surface.emissive, 1.0);
+    sampled.emission_luminance = 1.0;
+    sampled.base_metalness = surface.metallic;
+    sampled.specular_roughness = surface.perceptual_roughness;
+    sampled.specular_weight = surface.specular_weight;
+    sampled.ambient_occlusion = surface.ambient_occlusion;
+    sampled.base_weight = surface.base_weight;
+    sampled.base_diffuse_roughness = surface.diffuse_roughness;
+    sampled.specular_color = vec4<f32>(surface.specular_color, authored.specular_color.w);
+    sampled.specular_ior = surface.specular_ior;
+    sampled.transmission_weight = surface.transmission;
+    sampled.thickness = surface.thickness;
+    sampled.transmission_color = vec4<f32>(surface.transmission_color, authored.transmission_color.w);
+    sampled.transmission_scatter = vec4<f32>(surface.transmission_scatter, authored.transmission_scatter.w);
+    sampled.transmission_scatter_anisotropy = surface.transmission_scatter_anisotropy;
+    sampled.transmission_dispersion_scale = surface.dispersion;
+    sampled.transmission_dispersion_abbe_number = surface.transmission_dispersion_abbe_number;
+    sampled.index_of_refraction = surface.index_of_refraction;
+    sampled.coat_weight = surface.clearcoat;
+    sampled.coat_roughness = surface.clearcoat_roughness;
+    sampled.coat_ior = surface.coat_ior;
+    sampled.coat_color = vec4<f32>(surface.coat_color, authored.coat_color.w);
+    sampled.coat_roughness_anisotropy = surface.coat_roughness_anisotropy;
+    sampled.coat_darkening = surface.coat_darkening;
+    sampled.anisotropy = surface.anisotropy;
+    sampled.anisotropy_rotation = surface.anisotropy_rotation;
+    sampled.fuzz_weight = surface.sheen;
+    sampled.fuzz_roughness = surface.fuzz_roughness;
+    sampled.fuzz_color = vec4<f32>(surface.fuzz_color, authored.fuzz_color.w);
+    sampled.subsurface_weight = surface.subsurface;
+    sampled.subsurface_color = vec4<f32>(surface.subsurface_color, authored.subsurface_color.w);
+    sampled.subsurface_radius = surface.subsurface_radius;
+    sampled.subsurface_radius_scale = vec4<f32>(
+        surface.subsurface_radius_scale,
+        authored.subsurface_radius_scale.w,
+    );
+    sampled.subsurface_scatter_anisotropy = surface.scatter_anisotropy;
+    sampled.thin_film_weight = surface.iridescence;
+    sampled.thin_film_thickness = surface.iridescence_thickness_nm * 0.001;
+    sampled.thin_film_ior = surface.iridescence_ior;
+    sampled.glint_weight = surface.glint_weight;
+    sampled.glint_roughness = surface.glint_roughness;
+    sampled.glint_density = surface.glint_density;
+    sampled.glint_bin_half_width = surface.glint_bin_half_width;
+    return sampled;
+}
+
 fn composite_evaluate_program(
     program_kind: u32,
     program_id: u32,
@@ -1070,6 +1126,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let bitangent = composite_basis_bitangent(normal, tangent);
     let view = normalize_or(camera_view.position.xyz - world_position, normal);
     let frame = composite_make_shading_frame(normal, view, tangent, bitangent);
+    let sampled_parameters = composite_parameters_from_sampled_surface(
+        material.surface,
+        surface,
+    );
     // These are canonical shade-time inputs. Keep them in the resolved
     // surface, even when the current BRDF permutation does not use glints;
     // invalid UV/footprint data is rejected above instead of replaced.
@@ -1083,7 +1143,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         world_position,
         identity,
         material.npr_modifiers,
-        material.surface,
+        sampled_parameters,
         surface_data.xy,
         normal_sample.a,
     );
@@ -1112,7 +1172,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             world_position,
             identity,
             material.npr_modifiers,
-            material.surface,
+            sampled_parameters,
             surface_data.xy,
             normal_sample.a,
         );
@@ -2402,6 +2462,19 @@ mod composite_contract_tests {
         );
         assert!(super::NATIVE_REGISTERED_ADAPTER_WGSL.contains("program_id: u32,"));
         assert!(super::NATIVE_REGISTERED_ADAPTER_WGSL.contains("        program_id,\n"));
+    }
+
+    #[test]
+    fn registered_responses_receive_texture_folded_surface_parameters() {
+        let shader = build_composite_shader_source(None, false);
+        assert!(shader.contains("fn composite_parameters_from_sampled_surface("));
+        assert!(shader.contains(
+            "let sampled_parameters = composite_parameters_from_sampled_surface("
+        ));
+        assert!(shader.contains("        sampled_parameters,\n        surface_data.xy,"));
+        assert!(!shader.contains(
+            "        material.surface,\n        surface_data.xy,\n        normal_sample.a,"
+        ));
     }
 
     #[test]
