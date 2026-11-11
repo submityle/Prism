@@ -19,6 +19,9 @@ use prism_render_graph::{
 
 use crate::display_transform_gpu::{DisplayTransformGpuError, OffscreenDisplayTransform};
 use crate::draw::{canonical, DrawFunctions, RenderBindGroupBufferAccess};
+use crate::fabric_frame::{
+    NativeSurfaceIdentityHandle, NativeSurfaceIdentityInput, NativeSurfaceIdentityResource,
+};
 use crate::lighting_gpu::{LightingGpuPass, OUTPUT_BYTES};
 use crate::lighting_trace_gpu::TraceGraphRecorder;
 use crate::particle::{EmberGpuAssetRegistry, ParticleGpuState};
@@ -29,8 +32,9 @@ use prism_camera::ClearMode;
 
 mod surface_views;
 pub(crate) use surface_views::{
-    finalize_surface_view_graph, prepare_surface_view_graph, PreparedSurfaceViewGraph,
-    SurfaceViewGraphError, SurfaceViewGraphInput, SurfaceViewGraphStages,
+    finalize_surface_view_graph, prepare_surface_view_graph,
+    prepare_surface_view_graph_with_fabric, PreparedSurfaceViewGraph, SurfaceViewGraphError,
+    SurfaceViewGraphInput, SurfaceViewGraphStages,
 };
 
 /// The host-visible stages represented by one frame graph.
@@ -405,7 +409,10 @@ fn target_graph_output_with_trace_and_particles_and_external_views(
         particle,
         ClearMode::ColorAndDepth,
         external_views,
-    );
+        None,
+        None,
+    )
+    .expect("legacy target graph identity pass must be admitted");
     graph.blackboard_mut().set(appended.stages);
     (graph, appended.color, textures)
 }
@@ -525,14 +532,6 @@ impl FrameGraphBuffers {
                         .expect("validated material execution programs"),
                     materials.execution_programs_size_bytes,
                 ),
-            ] {
-                self.require(buffer, BufferDesc::new(size, BufferUsages::STORAGE));
-            }
-            let resources = pass.composite_material_resources();
-            for (buffer, size) in [
-                (resources.texture_rows, resources.texture_rows_size_bytes),
-                (resources.vt_page_table, resources.vt_page_table_size_bytes),
-                (resources.vt_config, resources.vt_config_size_bytes),
             ] {
                 self.require(buffer, BufferDesc::new(size, BufferUsages::STORAGE));
             }
@@ -704,7 +703,9 @@ fn append_target_graph(
     particle: Option<&ParticleGpuState>,
     clear: ClearMode,
     external_views: &FrameGraphTextureImports,
-) -> TargetGraphAppend {
+    fabric_frame: Option<&crate::fabric_frame::ExtractedRenderFabricFrame>,
+    fabric_device: Option<&mut crate::fabric_frame::NativeRenderFabricDevice>,
+) -> Result<TargetGraphAppend, crate::fabric_frame::NativeFabricFrameAdmissionError> {
     for owner in &external_views.external_owners {
         graph.retain_external_owner(owner.clone());
     }
@@ -1323,6 +1324,10 @@ fn append_target_graph(
         );
     }
 
+    let mut surface_identity_input = None;
+    let mut surface_identity_output: Option<
+        prism_render_architecture::render_fabric::RuntimeGraphOutput,
+    > = None;
     if let Some(lighting) = lighting {
         let identity_bind_group = lighting
             .surface_identity_bind_group
@@ -1399,30 +1404,159 @@ fn append_target_graph(
                 .div_ceil(crate::lighting_gpu::COMPOSITE_WORKGROUP_Y),
             1,
         ];
-        graph.add_compute_pass(
-            "prism-surface-identity",
-            PassFlags::SIDE_EFFECT,
-            |builder| {
-                let _normal = builder.read_texture(normal);
-                let _surface_id = builder.read_texture(surface_id);
-                let _headers = builder.read_storage_buffer(identity_headers_handle);
-                let _plans = builder.read_storage_buffer(identity_plans_handle);
-                let _programs = builder.read_storage_buffer(identity_programs_handle);
-                let _mapping = builder.read_storage_buffer(identity_mapping_handle);
-                let _params = builder.read_uniform(identity_params_handle);
-                surface_identity = builder.write_storage_buffer(surface_identity);
-                move |context| {
-                    context
-                        .set_compute_pipeline(lighting.surface_identity_pipeline)
-                        .set_compute_bind_group(0, identity_bind_group, Vec::new())
-                        .dispatch(
-                            identity_workgroups[0],
-                            identity_workgroups[1],
-                            identity_workgroups[2],
-                        );
-                }
-            },
-        );
+        let tex_layout =
+            |format| prism_render_architecture::render_fabric::ResourceLayout::Texture {
+                extent: [target.viewport().width, target.viewport().height, 1],
+                dimension: prism_render_driver::TextureDimension::D2,
+                format,
+                mip_levels: 1,
+                samples: 1,
+                usage: TextureUsages::COPY_SRC
+                    .union(TextureUsages::COPY_DST)
+                    .union(TextureUsages::TEXTURE_BINDING),
+            };
+        let buffer_layout = |bytes, usage| {
+            prism_render_architecture::render_fabric::ResourceLayout::Buffer { bytes, usage }
+        };
+        surface_identity_input = Some(NativeSurfaceIdentityInput {
+            resources: vec![
+                NativeSurfaceIdentityResource {
+                    key: prism_render_architecture::render_fabric::SURFACE_NORMAL_RESOURCE,
+                    layout: tex_layout(target.normal_format()),
+                    alignment: 1,
+                    physical: prism_render_architecture::render_fabric::PhysicalResource::Texture(
+                        target.normal_texture(),
+                    ),
+                    handle: NativeSurfaceIdentityHandle::Texture(normal),
+                },
+                NativeSurfaceIdentityResource {
+                    key: prism_render_architecture::render_fabric::SURFACE_ID_RESOURCE,
+                    layout: tex_layout(target.surface_id_format()),
+                    alignment: 1,
+                    physical: prism_render_architecture::render_fabric::PhysicalResource::Texture(
+                        target.surface_id_texture(),
+                    ),
+                    handle: NativeSurfaceIdentityHandle::Texture(surface_id),
+                },
+                NativeSurfaceIdentityResource {
+                    key: prism_render_architecture::render_fabric::SURFACE_MATERIAL_HEADERS_RESOURCE,
+                    layout: buffer_layout(
+                        identity_materials.headers_size_bytes,
+                        BufferUsages::STORAGE,
+                    ),
+                    alignment: 16,
+                    physical: prism_render_architecture::render_fabric::PhysicalResource::Buffer {
+                        id: identity_headers,
+                        offset: 0,
+                    },
+                    handle: NativeSurfaceIdentityHandle::Buffer(identity_headers_handle),
+                },
+                NativeSurfaceIdentityResource {
+                    key: prism_render_architecture::render_fabric::SURFACE_EXECUTION_PLANS_RESOURCE,
+                    layout: buffer_layout(
+                        identity_materials.execution_plans_size_bytes,
+                        BufferUsages::STORAGE,
+                    ),
+                    alignment: 16,
+                    physical: prism_render_architecture::render_fabric::PhysicalResource::Buffer {
+                        id: identity_plans,
+                        offset: 0,
+                    },
+                    handle: NativeSurfaceIdentityHandle::Buffer(identity_plans_handle),
+                },
+                NativeSurfaceIdentityResource {
+                    key: prism_render_architecture::render_fabric::SURFACE_EXECUTION_PROGRAMS_RESOURCE,
+                    layout: buffer_layout(
+                        identity_materials.execution_programs_size_bytes,
+                        BufferUsages::STORAGE,
+                    ),
+                    alignment: 16,
+                    physical: prism_render_architecture::render_fabric::PhysicalResource::Buffer {
+                        id: identity_programs,
+                        offset: 0,
+                    },
+                    handle: NativeSurfaceIdentityHandle::Buffer(identity_programs_handle),
+                },
+                NativeSurfaceIdentityResource {
+                    key: prism_render_architecture::render_fabric::SURFACE_LIGHTING_MAP_RESOURCE,
+                    layout: buffer_layout(
+                        crate::lighting_gpu::MATERIAL_LIGHTING_SURFACE_BYTES,
+                        BufferUsages::STORAGE,
+                    ),
+                    alignment: 16,
+                    physical: prism_render_architecture::render_fabric::PhysicalResource::Buffer {
+                        id: lighting.material_lighting_surfaces,
+                        offset: 0,
+                    },
+                    handle: NativeSurfaceIdentityHandle::Buffer(identity_mapping_handle),
+                },
+                NativeSurfaceIdentityResource {
+                    key: prism_render_architecture::render_fabric::SURFACE_PARAMS_RESOURCE,
+                    layout: buffer_layout(
+                        crate::lighting_gpu::LIGHTING_PARAMS_BYTES,
+                        BufferUsages::UNIFORM,
+                    ),
+                    alignment: 16,
+                    physical: prism_render_architecture::render_fabric::PhysicalResource::Buffer {
+                        id: lighting.params,
+                        offset: 0,
+                    },
+                    handle: NativeSurfaceIdentityHandle::Buffer(identity_params_handle),
+                },
+                NativeSurfaceIdentityResource {
+                    key: prism_render_architecture::render_fabric::SURFACE_IDENTITY_RESOURCE,
+                    layout: buffer_layout(
+                        target.surface_identity_size_bytes(),
+                        BufferUsages::STORAGE,
+                    ),
+                    alignment: 16,
+                    physical: prism_render_architecture::render_fabric::PhysicalResource::Buffer {
+                        id: target.surface_identity_buffer(),
+                        offset: 0,
+                    },
+                    handle: NativeSurfaceIdentityHandle::Buffer(surface_identity),
+                },
+            ],
+            pipeline: lighting.surface_identity_pipeline,
+            bind_group: identity_bind_group,
+            workgroups: identity_workgroups,
+        });
+        let identity_input = surface_identity_input
+            .take()
+            .expect("Surface identity input was just constructed");
+        if let (Some(frame), Some(device)) = (fabric_frame, fabric_device) {
+            surface_identity_output = Some(frame.append_native_surface_identity(
+                frame.frame().frame(),
+                device,
+                graph,
+                identity_input,
+            )?);
+        } else {
+            graph.add_compute_pass(
+                "prism-surface-identity-fallback",
+                PassFlags::SIDE_EFFECT,
+                |builder| {
+                    let _ = builder.read_texture(normal);
+                    let _ = builder.read_texture(surface_id);
+                    let _ = builder.read_storage_buffer(identity_headers_handle);
+                    let _ = builder.read_storage_buffer(identity_plans_handle);
+                    let _ = builder.read_storage_buffer(identity_programs_handle);
+                    let _ = builder.read_storage_buffer(identity_mapping_handle);
+                    let _ = builder.read_uniform(identity_params_handle);
+                    surface_identity = builder.write_storage_buffer(surface_identity);
+                    move |context| {
+                        context
+                            .set_compute_pipeline(lighting.surface_identity_pipeline)
+                            .set_compute_bind_group(0, identity_bind_group, Vec::new())
+                            .dispatch(
+                                identity_workgroups[0],
+                                identity_workgroups[1],
+                                identity_workgroups[2],
+                            );
+                    }
+                },
+            );
+        }
     }
 
     let mut trace_hits = None;
@@ -1706,13 +1840,13 @@ fn append_target_graph(
         external_texture_handles.insert(target.taa_motion_view(), motion);
         external_texture_handles.insert(target.taa_reactive_view(), reactive);
         external_texture_handles.insert(target.depth_view(), depth);
-        return TargetGraphAppend {
+        return Ok(TargetGraphAppend {
             color,
             depth,
             taa_motion: motion,
             taa_reactive: reactive,
             stages,
-        };
+        });
     };
 
     let mut gi_output = buffers.import(
@@ -1721,15 +1855,11 @@ fn append_target_graph(
         BufferDesc::new(OUTPUT_BYTES, BufferUsages::STORAGE),
         lighting.gi_output,
     );
-    let mut response_output = buffers.import(
-        graph,
-        "prism-lighting-response-output",
-        BufferDesc::new(
-            lighting.response_output_size_bytes,
-            BufferUsages::STORAGE | BufferUsages::COPY_SRC,
-        ),
-        lighting.response_output,
-    );
+    // Surface identity is a one-pass handoff buffer: the identity dispatch
+    // writes 16 words per pixel and composite overwrites those words with the
+    // canonical 16-word response. Reusing it removes a storage-buffer binding
+    // and an extra target allocation on Metal-class devices.
+    let mut response_output = surface_identity;
     let camera_view = buffers.import(
         graph,
         "prism-lighting-camera-view",
@@ -1787,6 +1917,11 @@ fn append_target_graph(
     let materials = lighting
         .composite_material_buffers()
         .expect("lighting composite requires canonical material buffers");
+    // The composite bind group contains only the payload it actually consumes.
+    // Execution plans/programs are read by surface identity; VT rows, page
+    // tables, config, and atlas are read by the material evaluator when that
+    // pass is admitted. Keeping those resources out of this pass prevents
+    // stale graph imports from extending their lifetime or dependency chain.
     let material_bindings = [
         (
             "prism-material-headers",
@@ -1798,20 +1933,6 @@ fn append_target_graph(
             materials.parameters.expect("validated material parameters"),
             materials.parameters_size_bytes,
         ),
-        (
-            "prism-material-execution-plans",
-            materials
-                .execution_plans
-                .expect("validated material execution plans"),
-            materials.execution_plans_size_bytes,
-        ),
-        (
-            "prism-material-execution-programs",
-            materials
-                .execution_programs
-                .expect("validated material execution programs"),
-            materials.execution_programs_size_bytes,
-        ),
     ];
     let material_reads = material_bindings.map(|(name, buffer, size)| {
         buffers.import(
@@ -1821,45 +1942,7 @@ fn append_target_graph(
             buffer,
         )
     });
-    let [material_headers, material_parameters, _material_plans, _material_programs] =
-        material_reads;
-    let material_resources = lighting.composite_material_resources();
-    let material_texture_rows = buffers.import(
-        graph,
-        "prism-material-texture-rows",
-        BufferDesc::new(
-            material_resources.texture_rows_size_bytes,
-            BufferUsages::STORAGE,
-        ),
-        material_resources.texture_rows,
-    );
-    let vt_page_table = buffers.import(
-        graph,
-        "prism-material-vt-page-table",
-        BufferDesc::new(
-            material_resources.vt_page_table_size_bytes,
-            BufferUsages::STORAGE,
-        ),
-        material_resources.vt_page_table,
-    );
-    let vt_config = buffers.import(
-        graph,
-        "prism-material-vt-config",
-        BufferDesc::new(
-            material_resources.vt_config_size_bytes,
-            BufferUsages::STORAGE,
-        ),
-        material_resources.vt_config,
-    );
-    let vt_atlas = external_texture_handles
-        .get(&material_resources.vt_atlas_view)
-        .copied();
-    if material_resources.device_generation != 0 {
-        assert!(
-            vt_atlas.is_some(),
-            "published material VT atlas must be imported before composite"
-        );
-    }
+    let [material_headers, material_parameters] = material_reads;
     if let (Some(trace), Some(hits), Some((trace_triangles, trace_attributes, trace_rays)), true) =
         (trace, trace_hits, trace_inputs, lighting.run_gi)
         && let (
@@ -1958,6 +2041,20 @@ fn append_target_graph(
             surface_material_a = builder.sample(surface_material_a);
             surface_material_b = builder.sample(surface_material_b);
             surface_material_c = builder.sample(surface_material_c);
+            let surface_identity = surface_identity_output
+                .as_ref()
+                .and_then(prism_render_architecture::render_fabric::RuntimeGraphOutput::resolve)
+                .and_then(|handle| match handle {
+                    prism_render_architecture::render_fabric::RuntimeResourceHandle::Buffer {
+                        handle,
+                        ..
+                    } => Some(handle),
+                    prism_render_architecture::render_fabric::RuntimeResourceHandle::Texture(_) => {
+                        None
+                    }
+                })
+                .unwrap_or(surface_identity);
+            response_output = surface_identity;
             let _surface_identity = builder.read_storage_buffer(surface_identity);
             let _gi = builder.read_storage_buffer(gi_output);
             let _params = builder.read_uniform(params);
@@ -1967,12 +2064,6 @@ fn append_target_graph(
             let _areas = builder.read_storage_buffer(areas);
             let _headers = builder.read_storage_buffer(material_headers);
             let _parameters = builder.read_storage_buffer(material_parameters);
-            let _texture_rows = builder.read_storage_buffer(material_texture_rows);
-            let _vt_page_table = builder.read_storage_buffer(vt_page_table);
-            let _vt_config = builder.read_storage_buffer(vt_config);
-            if let Some(vt_atlas) = vt_atlas {
-                let _vt_atlas = builder.read_texture(vt_atlas);
-            }
             response_output = builder.write_storage_buffer(response_output);
             color = builder.write_storage_texture(color);
             move |context| {
@@ -2114,13 +2205,13 @@ fn append_target_graph(
     external_texture_handles.insert(target.taa_motion_view(), motion);
     external_texture_handles.insert(target.taa_reactive_view(), reactive);
     external_texture_handles.insert(target.depth_view(), depth);
-    TargetGraphAppend {
+    Ok(TargetGraphAppend {
         color,
         depth,
         taa_motion: motion,
         taa_reactive: reactive,
         stages,
-    }
+    })
 }
 
 /// Builds the headless host frame and appends its display transform to the same

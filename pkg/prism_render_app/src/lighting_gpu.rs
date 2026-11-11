@@ -458,6 +458,72 @@ alias PrincipledPre = _2prism_render_app_shaders_brdf_PrincipledPre;
 alias PrismSurfaceParameters = _2prism_render_material_shaders_material_PrismSurfaceParameters;
 alias PrismMaterialHeader = _2prism_render_material_shaders_material_PrismMaterialHeader;
 
+// The identity pass owns execution-table validation. The composite consumes
+// only the admitted tuple and the material payload, which keeps the hot pass
+// within the storage-buffer limits of Metal-class devices.
+fn composite_vec4_is_finite(value: vec4<f32>) -> bool {
+    return finite(value.x) && finite(value.y) && finite(value.z) && finite(value.w);
+}
+
+// Material packing is lossless at the word level, so malformed float payloads
+// must be rejected before any BRDF branch can observe them. This is the
+// composite-side defense-in-depth check for the published surface snapshot.
+fn composite_surface_is_finite(parameters: PrismSurfaceParameters) -> bool {
+    return composite_vec4_is_finite(parameters.base_color)
+        && composite_vec4_is_finite(parameters.emission_color)
+        && finite(parameters.emission_luminance)
+        && finite(parameters.base_metalness)
+        && finite(parameters.specular_roughness)
+        && finite(parameters.specular_weight)
+        && finite(parameters.ambient_occlusion)
+        && finite(parameters.normal_scale)
+        && finite(parameters.alpha_cutoff)
+        && finite(parameters.base_weight)
+        && finite(parameters.base_diffuse_roughness)
+        && composite_vec4_is_finite(parameters.specular_color)
+        && finite(parameters.specular_ior)
+        && finite(parameters.thin_walled)
+        && finite(parameters.geometry_opacity)
+        && finite(parameters.transmission_weight)
+        && finite(parameters.thickness)
+        && finite(parameters.coat_weight)
+        && finite(parameters.coat_roughness)
+        && finite(parameters.coat_ior)
+        && composite_vec4_is_finite(parameters.coat_color)
+        && finite(parameters.coat_roughness_anisotropy)
+        && finite(parameters.coat_darkening)
+        && finite(parameters.anisotropy)
+        && finite(parameters.anisotropy_rotation)
+        && finite(parameters.fuzz_weight)
+        && finite(parameters.fuzz_roughness)
+        && composite_vec4_is_finite(parameters.fuzz_color)
+        && finite(parameters.subsurface_weight)
+        && composite_vec4_is_finite(parameters.subsurface_color)
+        && finite(parameters.subsurface_radius)
+        && composite_vec4_is_finite(parameters.subsurface_radius_scale)
+        && finite(parameters.subsurface_scatter_anisotropy)
+        && finite(parameters.index_of_refraction)
+        && finite(parameters.transmission_dispersion_scale)
+        && composite_vec4_is_finite(parameters.transmission_color)
+        && composite_vec4_is_finite(parameters.transmission_scatter)
+        && finite(parameters.thin_film_weight)
+        && finite(parameters.thin_film_thickness)
+        && finite(parameters.thin_film_ior)
+        && finite(parameters.transmission_scatter_anisotropy)
+        && finite(parameters.transmission_dispersion_abbe_number)
+        && finite(parameters.npr_face_softness)
+        && finite(parameters.npr_stylized_ramp_softness)
+        && finite(parameters.npr_stylized_specular_scale)
+        && finite(parameters.npr_stylized_rim_scale)
+        && finite(parameters.glint_weight)
+        && finite(parameters.glint_roughness)
+        && finite(parameters.glint_density)
+        && finite(parameters.glint_bin_half_width)
+        && finite(parameters.measured_weight)
+        && finite(parameters.measured_phi_d)
+        && finite(parameters.measured_scale);
+}
+
 struct CameraView {
     position: vec4<f32>,
 };
@@ -481,11 +547,9 @@ var albedo_gbuffer: texture_2d<f32>;
 @group(1) @binding(5)
 var surface_id_gbuffer: texture_2d<u32>;
 @group(1) @binding(6)
-var<storage, read> surface_identity: array<SurfaceIdentity>;
+var<storage, read_write> surface_identity_response: array<u32>;
 @group(1) @binding(7)
 var hdr_target: texture_storage_2d<rgba16float, write>;
-@group(1) @binding(8)
-var<storage, read_write> response_outputs: array<CompositeResponseOutput>;
 @group(1) @binding(9)
 var surface_data_gbuffer: texture_2d<f32>;
 @group(1) @binding(10)
@@ -494,6 +558,35 @@ var sampled_material_a_gbuffer: texture_2d<f32>;
 var sampled_material_b_gbuffer: texture_2d<f32>;
 @group(1) @binding(12)
 var sampled_material_c_gbuffer: texture_2d<u32>;
+
+fn composite_load_surface_identity(index: u32) -> SurfaceIdentity {
+    let base = index * 16u;
+    return SurfaceIdentity(
+        surface_identity_response[base],
+        surface_identity_response[base + 1u],
+        surface_identity_response[base + 2u],
+        surface_identity_response[base + 3u],
+        surface_identity_response[base + 4u],
+        surface_identity_response[base + 5u],
+        surface_identity_response[base + 6u],
+        surface_identity_response[base + 7u],
+        surface_identity_response[base + 8u],
+        surface_identity_response[base + 9u],
+        surface_identity_response[base + 10u],
+        surface_identity_response[base + 11u],
+        surface_identity_response[base + 12u],
+        surface_identity_response[base + 13u],
+        surface_identity_response[base + 14u],
+        surface_identity_response[base + 15u],
+    );
+}
+
+fn composite_store_response(index: u32, response: CompositeResponseOutput) {
+    let base = index * 16u;
+    for (var word = 0u; word < 16u; word += 1u) {
+        surface_identity_response[base + word] = bitcast<u32>(response.words[word]);
+    }
+}
 
 fn composite_unpack_material_c(encoded: u32) -> vec4<f32> {
     return vec4<f32>(
@@ -592,6 +685,33 @@ fn composite_lerp3(left: vec3<f32>, right: vec3<f32>, mask: f32) -> vec3<f32> {
     if (mask == 0.0) { return left; }
     if (mask == 1.0) { return right; }
     return left + (right - left) * mask;
+}
+
+fn composite_blend_contract_is_valid(identity: SurfaceIdentity) -> bool {
+    if (identity.right_program_index == 0xffffffffu
+        || identity.right_program_id == 0xffffffffu
+        || identity.left_program_kind > 3u
+        || identity.right_program_kind > 3u
+        || identity.blended_channels == 0u
+        || (identity.blended_channels & ~31u) != 0u
+        || identity.blend_domain > 2u
+        || identity.mask_kind != 5u
+        || identity.mask_index > 3u) {
+        return false;
+    }
+    if (identity.blend_domain == 0u && identity.blended_channels != 31u) {
+        return false;
+    }
+    if (identity.blend_domain == 1u && identity.blended_channels != 1u) {
+        return false;
+    }
+    let builtin_pair = identity.left_program_kind < 3u
+        && identity.right_program_kind < 3u;
+    if (!builtin_pair && identity.left_program_kind != 3u
+        && identity.right_program_kind != 3u) {
+        return false;
+    }
+    return true;
 }
 
 fn composite_blend_response(
@@ -730,11 +850,11 @@ fn composite_evaluate_program(
         let channels = composite_evaluate_builtin_unlit(surface);
         if (!channels.valid) { return result; }
         result.response = composite_response_from_channels(
+            channels.direct,
             vec3<f32>(0.0),
             vec3<f32>(0.0),
             vec3<f32>(0.0),
-            vec3<f32>(0.0),
-            channels.radiance,
+            surface.emissive,
             alpha,
         );
         result.valid = true;
@@ -829,10 +949,14 @@ fn composite_evaluate_program(
         identity.lighting_surface_index != 0xffffffffu &&
         identity.lighting_surface_index < params.counts.x &&
         identity.lighting_surface_index < arrayLength(&gi)) {
-        // The GI producer already evaluates its diffuse transport term; keep
-        // it in the indirect channel so composition never applies the base
-        // weight/metalness scale twice.
-        indirect_diffuse = gi[identity.lighting_surface_index].xyz;
+        // The GI producer supplies an uncomposed diffuse transport estimate.
+        // Apply the material's sampled AO and diffuse mixture here, exactly
+        // once, so texture-folded surface data reaches the indirect channel
+        // without re-running the base BRDF or double-scaling the estimate.
+        let occlusion = clamp(surface.ambient_occlusion, 0.0, 1.0);
+        let diffuse_weight = 1.0 - clamp(surface.metallic, 0.0, 1.0);
+        indirect_diffuse = gi[identity.lighting_surface_index].xyz
+            * (occlusion * diffuse_weight);
     }
     result.response = composite_response_from_channels(
         direct,
@@ -861,23 +985,29 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     );
     let surface_id = textureLoad(surface_id_gbuffer, pixel, 0).x;
     let identity_index = id.y * extent.x + id.x;
-    response_outputs[identity_index] = composite_response_zero();
+    composite_store_response(identity_index, composite_response_zero());
     let normal_sample = textureLoad(normal_gbuffer, pixel, 0);
     // Material slot zero is valid, so reject the explicitly cleared coverage
     // plane before consulting the slot.
     if (normal_sample.a <= 0.0 || surface_id == 0xffffffffu ||
-        identity_index >= arrayLength(&surface_identity)) {
+        identity_index * 16u + 16u > arrayLength(&surface_identity_response)) {
         textureStore(hdr_target, pixel, vec4<f32>(0.0));
         return;
     }
-    let identity_words = surface_identity[identity_index];
-    let identity = identity_words;
+    let identity = composite_load_surface_identity(identity_index);
     if (identity.material_index != surface_id || identity.material_index == 0xffffffffu) {
         textureStore(hdr_target, pixel, vec4<f32>(0.0));
         return;
     }
     let material = prism_composite_material_surface(identity);
     if (!material.valid) {
+        textureStore(hdr_target, pixel, vec4<f32>(0.0));
+        return;
+    }
+    if (!composite_surface_is_finite(material.surface)
+        || !finite(material.npr_modifiers.x)
+        || !finite(material.npr_modifiers.y)
+        || !finite(material.npr_modifiers.z)) {
         textureStore(hdr_target, pixel, vec4<f32>(0.0));
         return;
     }
@@ -964,6 +1094,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     var response = left_evaluation.response;
     if (identity.right_program_index != 0xffffffffu) {
+        if (!composite_blend_contract_is_valid(identity)) {
+            textureStore(hdr_target, pixel, vec4<f32>(0.0));
+            return;
+        }
         let header = composite_material_headers[identity.material_index];
         let mask = composite_mask_value(identity);
         if (!mask.valid) {
@@ -1004,7 +1138,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         textureStore(hdr_target, pixel, vec4<f32>(0.0));
         return;
     }
-    response_outputs[identity_index] = response;
+    composite_store_response(identity_index, response);
     textureStore(hdr_target, pixel, vec4<f32>(value, response.words[15]));
 }
 "#;
@@ -1415,9 +1549,8 @@ fn composite_target_layout_descriptor() -> BindGroupLayoutDescriptor {
             texture_layout(3, COMPOSITE_NORMAL_FORMAT.sample_type()),
             texture_layout(4, COMPOSITE_ALBEDO_FORMAT.sample_type()),
             texture_layout(5, COMPOSITE_SURFACE_ID_FORMAT.sample_type()),
-            storage_layout(6, crate::target::SURFACE_IDENTITY_BYTES_PER_PIXEL, true),
+            storage_layout(6, crate::target::SURFACE_IDENTITY_BYTES_PER_PIXEL, false),
             storage_texture_layout(7, COMPOSITE_HDR_FORMAT),
-            storage_layout(8, COMPOSITE_RESPONSE_BYTES_PER_PIXEL, false),
             texture_layout(9, COMPOSITE_SURFACE_DATA_FORMAT.sample_type()),
             texture_layout(
                 10,
@@ -1460,28 +1593,39 @@ const MATERIAL_TEXTURE_ROW_BYTES: u64 =
 const MATERIAL_VT_PAGE_TABLE_BYTES: u64 = 16;
 const MATERIAL_VT_CONFIG_BYTES: u64 = 32;
 
-/// Required members of one canonical material snapshot. The composite group
-/// consumes only headers and parameters; execution plans/programs are bound by
-/// the post-raster identity prepass so the composite stays within the adapter
-/// storage-buffer binding limit.
+/// Required members of one canonical material snapshot. The default composite
+/// consumes the same headers, parameter heap, execution tables, and texture
+/// metadata that admitted the raster surface and identity tuple.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct LightingCompositeMaterialBuffers {
     pub headers: Option<prism_render_driver::BufferId>,
     pub headers_size_bytes: u64,
     pub parameters: Option<prism_render_driver::BufferId>,
     pub parameters_size_bytes: u64,
+    pub texture_rows: Option<prism_render_driver::BufferId>,
+    pub texture_rows_size_bytes: u64,
     pub execution_plans: Option<prism_render_driver::BufferId>,
     pub execution_plans_size_bytes: u64,
     pub execution_programs: Option<prism_render_driver::BufferId>,
     pub execution_programs_size_bytes: u64,
+    pub material_version: u32,
+    pub execution_version: u32,
+    pub material_epoch: u64,
+    pub vt_publication_generation: u64,
+    pub texture_binding_version: u64,
+    pub texture_image_version: u64,
 }
 
-/// The texture/VT lease paired with a canonical material snapshot. These
-/// resources remain in the frame lifetime contract for Surface encode and GI,
-/// but are intentionally not part of the composite group-2 ABI: the composite
-/// consumes the already-resolved material planes from group 1.
+/// The texture/VT lease paired with a canonical material snapshot. Texture rows
+/// participate in frame-side range/semantic/generation validation, but are not
+/// bound by composite group 2; SurfaceData's sampled planes already contain
+/// the resolved texels. The VT page table and atlas remain producer resources.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct LightingCompositeMaterialResourceIds {
+    pub headers: BufferId,
+    pub parameters: BufferId,
+    pub execution_plans: BufferId,
+    pub execution_programs: BufferId,
     pub texture_rows: BufferId,
     pub texture_rows_size_bytes: u64,
     pub vt_page_table: BufferId,
@@ -1492,12 +1636,19 @@ pub(crate) struct LightingCompositeMaterialResourceIds {
     pub vt_sampler: SamplerId,
     pub device_generation: u64,
     pub publication_generation: u64,
+    pub material_version: u32,
+    pub execution_version: u32,
+    pub material_epoch: u64,
+    pub vt_publication_generation: u64,
+    pub texture_binding_version: u64,
+    pub texture_image_version: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LightingCompositeMaterialBindingError {
     MissingHeaders,
     MissingParameters,
+    MissingTextureRows,
     MissingExecutionPlans,
     MissingExecutionPrograms,
     InvalidResourceId {
@@ -1509,6 +1660,10 @@ pub(crate) enum LightingCompositeMaterialBindingError {
         minimum_bytes: u64,
         row_bytes: u64,
     },
+    MissingGenerationProof,
+    GenerationMismatch {
+        field: &'static str,
+    },
 }
 
 impl core::fmt::Display for LightingCompositeMaterialBindingError {
@@ -1516,12 +1671,15 @@ impl core::fmt::Display for LightingCompositeMaterialBindingError {
         formatter.write_str(match self {
             Self::MissingHeaders => "canonical material header buffer is missing",
             Self::MissingParameters => "canonical material parameter heap is missing",
+            Self::MissingTextureRows => "canonical material texture rows are missing",
             Self::MissingExecutionPlans => "canonical material execution plan buffer is missing",
             Self::MissingExecutionPrograms => {
                 "canonical material execution program buffer is missing"
             }
             Self::InvalidResourceId { .. } => "canonical material resource id is invalid",
             Self::InvalidBindingSize { .. } => "canonical material storage binding size is invalid",
+            Self::MissingGenerationProof => "canonical material generation proof is missing",
+            Self::GenerationMismatch { .. } => "canonical material generations do not match",
         })
     }
 }
@@ -1542,43 +1700,32 @@ fn validate_composite_material_resources(
     resources: LightingCompositeMaterialResourceIds,
 ) -> Result<(), LightingCompositeMaterialBindingError> {
     let invalid_buffer = BufferId::from_parts(0, 0);
-    let invalid_view = TextureViewId::from_parts(0, 0);
-    let invalid_sampler = SamplerId::from_parts(0, 0);
     for (binding, id) in [
+        (0, resources.headers),
+        (1, resources.parameters),
         (2, resources.texture_rows),
-        (3, resources.vt_page_table),
-        (4, resources.vt_config),
+        (7, resources.execution_plans),
+        (8, resources.execution_programs),
     ] {
         if id == invalid_buffer {
             return Err(LightingCompositeMaterialBindingError::InvalidResourceId { binding });
         }
     }
-    if resources.vt_atlas_view == invalid_view {
-        return Err(LightingCompositeMaterialBindingError::InvalidResourceId { binding: 5 });
+    if resources.device_generation == 0
+        || resources.publication_generation == 0
+        || resources.material_version == 0
+        || resources.execution_version == 0
+        || resources.material_epoch == 0
+        || resources.vt_publication_generation == 0
+    {
+        return Err(LightingCompositeMaterialBindingError::MissingGenerationProof);
     }
-    if resources.vt_sampler == invalid_sampler {
-        return Err(LightingCompositeMaterialBindingError::InvalidResourceId { binding: 6 });
-    }
-    for (binding, size_bytes, minimum_bytes, row_bytes) in [
-        (
-            2,
-            resources.texture_rows_size_bytes,
-            MATERIAL_TEXTURE_ROW_BYTES,
-            MATERIAL_TEXTURE_ROW_BYTES,
-        ),
-        (
-            3,
-            resources.vt_page_table_size_bytes,
-            MATERIAL_VT_PAGE_TABLE_BYTES,
-            4,
-        ),
-        (
-            4,
-            resources.vt_config_size_bytes,
-            MATERIAL_VT_CONFIG_BYTES,
-            4,
-        ),
-    ] {
+    for (binding, size_bytes, minimum_bytes, row_bytes) in [(
+        2,
+        resources.texture_rows_size_bytes,
+        MATERIAL_TEXTURE_ROW_BYTES,
+        MATERIAL_TEXTURE_ROW_BYTES,
+    )] {
         if size_bytes < minimum_bytes || size_bytes % row_bytes != 0 {
             return Err(LightingCompositeMaterialBindingError::InvalidBindingSize {
                 binding,
@@ -1591,9 +1738,106 @@ fn validate_composite_material_resources(
     Ok(())
 }
 
+fn validate_composite_material_generation(
+    buffers: LightingCompositeMaterialBuffers,
+    resources: LightingCompositeMaterialResourceIds,
+) -> Result<(), LightingCompositeMaterialBindingError> {
+    let texture_rows = buffers
+        .texture_rows
+        .ok_or(LightingCompositeMaterialBindingError::MissingTextureRows)?;
+    if texture_rows != resources.texture_rows
+        || buffers.texture_rows_size_bytes != resources.texture_rows_size_bytes
+        || buffers.headers != Some(resources.headers)
+        || buffers.parameters != Some(resources.parameters)
+        || buffers.execution_plans != Some(resources.execution_plans)
+        || buffers.execution_programs != Some(resources.execution_programs)
+    {
+        return Err(LightingCompositeMaterialBindingError::GenerationMismatch {
+            field: "texture_rows",
+        });
+    }
+    for (field, left, right) in [
+        (
+            "material_version",
+            buffers.material_version as u64,
+            resources.material_version as u64,
+        ),
+        (
+            "execution_version",
+            buffers.execution_version as u64,
+            resources.execution_version as u64,
+        ),
+        (
+            "material_epoch",
+            buffers.material_epoch,
+            resources.material_epoch,
+        ),
+        (
+            "vt_publication_generation",
+            buffers.vt_publication_generation,
+            resources.vt_publication_generation,
+        ),
+        (
+            "texture_binding_version",
+            buffers.texture_binding_version,
+            resources.texture_binding_version,
+        ),
+        (
+            "texture_image_version",
+            buffers.texture_image_version,
+            resources.texture_image_version,
+        ),
+    ] {
+        if left != right || (left == 0 && !field.starts_with("texture_")) {
+            return Err(LightingCompositeMaterialBindingError::GenerationMismatch { field });
+        }
+    }
+    if buffers.material_version != buffers.execution_version {
+        return Err(LightingCompositeMaterialBindingError::GenerationMismatch {
+            field: "execution_version",
+        });
+    }
+    Ok(())
+}
+
+fn validate_composite_material_buffers(
+    buffers: LightingCompositeMaterialBuffers,
+) -> Result<[(prism_render_driver::BufferId, u64); 2], LightingCompositeMaterialBindingError> {
+    let bindings = [
+        (
+            buffers
+                .headers
+                .ok_or(LightingCompositeMaterialBindingError::MissingHeaders)?,
+            buffers.headers_size_bytes,
+            MATERIAL_HEADER_BYTES,
+            MATERIAL_HEADER_BYTES,
+        ),
+        (
+            buffers
+                .parameters
+                .ok_or(LightingCompositeMaterialBindingError::MissingParameters)?,
+            buffers.parameters_size_bytes,
+            MATERIAL_PARAMETER_WORD_BYTES,
+            MATERIAL_PARAMETER_WORD_BYTES,
+        ),
+    ];
+    for (binding, (_, size_bytes, minimum_bytes, row_bytes)) in bindings.iter().copied().enumerate()
+    {
+        if size_bytes < minimum_bytes || size_bytes % row_bytes != 0 {
+            return Err(LightingCompositeMaterialBindingError::InvalidBindingSize {
+                binding: binding as u32,
+                size_bytes,
+                minimum_bytes,
+                row_bytes,
+            });
+        }
+    }
+    Ok(bindings.map(|(buffer, size_bytes, _, _)| (buffer, size_bytes)))
+}
+
 fn validate_material_buffers(
     buffers: LightingCompositeMaterialBuffers,
-) -> Result<[(prism_render_driver::BufferId, u64); 4], LightingCompositeMaterialBindingError> {
+) -> Result<[(prism_render_driver::BufferId, u64); 5], LightingCompositeMaterialBindingError> {
     let bindings = [
         (
             buffers
@@ -1627,6 +1871,14 @@ fn validate_material_buffers(
             MATERIAL_PROGRAM_ROW_BYTES,
             MATERIAL_PROGRAM_ROW_BYTES,
         ),
+        (
+            buffers
+                .texture_rows
+                .ok_or(LightingCompositeMaterialBindingError::MissingTextureRows)?,
+            buffers.texture_rows_size_bytes,
+            MATERIAL_TEXTURE_ROW_BYTES,
+            MATERIAL_TEXTURE_ROW_BYTES,
+        ),
     ];
     for (binding, (_, size_bytes, minimum_bytes, row_bytes)) in bindings.iter().copied().enumerate()
     {
@@ -1640,6 +1892,67 @@ fn validate_material_buffers(
         }
     }
     Ok(bindings.map(|(buffer, size_bytes, _, _)| (buffer, size_bytes)))
+}
+
+/// Validates the immutable execution rows with the same family, channel,
+/// domain, and mask rules used by the SurfaceIdentity producer. Keeping this
+/// check on the CPU admission path prevents a malformed published table from
+/// reaching a frame only to be cleared per pixel by the GPU consumer.
+pub(crate) fn native_execution_tables_are_valid(
+    plan_rows: &[[u32; prism_render_material::EXECUTION_PLAN_ROW_WORDS]],
+    program_rows: &[[u32; 5]],
+) -> bool {
+    let empty_plan = [u32::MAX; prism_render_material::EXECUTION_PLAN_ROW_WORDS];
+    let empty_program = [0; 5];
+    if plan_rows.len() == 1 && plan_rows[0] == empty_plan {
+        return program_rows.len() == 1 && program_rows[0] == empty_program;
+    }
+    if plan_rows.is_empty()
+        || program_rows.is_empty()
+        || !program_rows
+            .iter()
+            .all(|program| native_execution_program_row_is_valid(program))
+    {
+        return false;
+    }
+
+    plan_rows.iter().all(|plan| {
+        if plan[7] != 0 || plan[0] == u32::MAX || plan[0] as usize >= program_rows.len() {
+            return false;
+        }
+        let left = program_rows[plan[0] as usize];
+        if plan[1] == u32::MAX {
+            return plan[2] == u32::from(left[0] != 0)
+                && plan[3] == 0
+                && plan[4] == 0
+                && plan[5] == 0
+                && plan[6] == 0;
+        }
+        let Some(right) = program_rows.get(plan[1] as usize).copied() else {
+            return false;
+        };
+        if plan[3] == 0
+            || plan[3] & !31 != 0
+            || !(1..=5).contains(&plan[4])
+            || plan[6] > 2
+            || ((2..=4).contains(&plan[4]) && plan[5] != 0)
+            || (plan[4] == 5 && plan[5] > 3)
+            || (plan[6] == 0 && plan[3] != 31)
+            || (plan[6] == 1 && plan[3] != 1)
+        {
+            return false;
+        }
+        let expected_family = if left[0] == 0 && right[0] == 0 { 0 } else { 2 };
+        plan[2] == expected_family
+    })
+}
+
+fn native_execution_program_row_is_valid(program: &[u32; 5]) -> bool {
+    match program[0] {
+        0..=2 => program[4] == program[0],
+        3 => true,
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -1804,7 +2117,7 @@ mod composite_contract_tests {
                 .iter()
                 .map(|entry| entry.binding)
                 .collect::<Vec<_>>(),
-            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+            vec![0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12]
         );
         assert!(target_layout
             .entries
@@ -1834,7 +2147,7 @@ mod composite_contract_tests {
         assert_eq!(
             target_layout.entries[6].ty,
             BindingType::Buffer {
-                ty: BufferBindingType::Storage { read_only: true },
+                ty: BufferBindingType::Storage { read_only: false },
                 has_dynamic_offset: false,
                 min_binding_size: Some(SURFACE_IDENTITY_BYTES_PER_PIXEL),
             }
@@ -1902,61 +2215,54 @@ mod composite_contract_tests {
             execution_plans_size_bytes: sizes[2],
             execution_programs: Some(ids[3]),
             execution_programs_size_bytes: sizes[3],
+            texture_rows: Some(ids[0]),
+            texture_rows_size_bytes: MATERIAL_TEXTURE_ROW_BYTES,
+            ..Default::default()
         };
         assert_eq!(
-            validate_material_buffers(valid),
-            Ok(core::array::from_fn(|i| (ids[i], sizes[i])))
+            validate_composite_material_buffers(valid),
+            Ok([(ids[0], sizes[0]), (ids[1], sizes[1]),])
         );
         for (missing, expected) in [
             (0, LightingCompositeMaterialBindingError::MissingHeaders),
             (1, LightingCompositeMaterialBindingError::MissingParameters),
-            (
-                2,
-                LightingCompositeMaterialBindingError::MissingExecutionPlans,
-            ),
-            (
-                3,
-                LightingCompositeMaterialBindingError::MissingExecutionPrograms,
-            ),
         ] {
             let mut incomplete = valid;
             match missing {
                 0 => incomplete.headers = None,
                 1 => incomplete.parameters = None,
-                2 => incomplete.execution_plans = None,
-                3 => incomplete.execution_programs = None,
                 _ => unreachable!(),
             }
-            assert_eq!(validate_material_buffers(incomplete), Err(expected));
+            assert_eq!(
+                validate_composite_material_buffers(incomplete),
+                Err(expected)
+            );
         }
-        for (binding, invalid_size) in [
-            (0, MATERIAL_HEADER_BYTES - 1),
-            (1, 3),
-            (2, MATERIAL_PLAN_ROW_BYTES + 1),
-            (3, MATERIAL_PROGRAM_ROW_BYTES + 1),
-        ] {
+        for (binding, invalid_size) in [(0, MATERIAL_HEADER_BYTES - 1), (1, 3)] {
             let mut invalid = valid;
             match binding {
                 0 => invalid.headers_size_bytes = invalid_size,
                 1 => invalid.parameters_size_bytes = invalid_size,
-                2 => invalid.execution_plans_size_bytes = invalid_size,
-                3 => invalid.execution_programs_size_bytes = invalid_size,
                 _ => unreachable!(),
             }
             assert!(matches!(
-                validate_material_buffers(invalid),
+                validate_composite_material_buffers(invalid),
                 Err(LightingCompositeMaterialBindingError::InvalidBindingSize { binding: actual, .. }) if actual == binding
             ));
         }
         assert_eq!(
-            validate_material_buffers(LightingCompositeMaterialBuffers::default()),
+            validate_composite_material_buffers(LightingCompositeMaterialBuffers::default()),
             Err(LightingCompositeMaterialBindingError::MissingHeaders)
         );
     }
 
     #[test]
-    fn composite_material_resources_validate_rows_and_vt_boundaries() {
+    fn composite_material_resources_validate_rows_and_snapshot_boundaries() {
         let resources = LightingCompositeMaterialResourceIds {
+            headers: BufferId::from_parts(10, 7),
+            parameters: BufferId::from_parts(11, 7),
+            execution_plans: BufferId::from_parts(12, 7),
+            execution_programs: BufferId::from_parts(13, 7),
             texture_rows: BufferId::from_parts(20, 7),
             texture_rows_size_bytes: MATERIAL_TEXTURE_ROW_BYTES * 4,
             vt_page_table: BufferId::from_parts(21, 7),
@@ -1967,6 +2273,12 @@ mod composite_contract_tests {
             vt_sampler: SamplerId::from_parts(24, 7),
             device_generation: 3,
             publication_generation: 9,
+            material_version: 1,
+            execution_version: 1,
+            material_epoch: 1,
+            vt_publication_generation: 9,
+            texture_binding_version: 1,
+            texture_image_version: 1,
         };
         assert_eq!(validate_composite_material_resources(resources), Ok(()));
         let mut too_small = resources;
@@ -1975,12 +2287,84 @@ mod composite_contract_tests {
             validate_composite_material_resources(too_small),
             Err(LightingCompositeMaterialBindingError::InvalidBindingSize { binding: 2, .. })
         ));
-        let mut missing_vt = resources;
-        missing_vt.vt_atlas_view = TextureViewId::from_parts(0, 0);
+        // VT is resolved by the producer/SurfaceData path before composite;
+        // changing its producer handle does not change the two-buffer
+        // composite binding contract.
+        let mut producer_vt = resources;
+        producer_vt.vt_atlas_view = TextureViewId::from_parts(0, 0);
+        assert_eq!(validate_composite_material_resources(producer_vt), Ok(()));
+
+        let mut missing_rows = resources;
+        missing_rows.texture_rows = BufferId::from_parts(0, 0);
         assert_eq!(
-            validate_composite_material_resources(missing_vt),
-            Err(LightingCompositeMaterialBindingError::InvalidResourceId { binding: 5 })
+            validate_composite_material_resources(missing_rows),
+            Err(LightingCompositeMaterialBindingError::InvalidResourceId { binding: 2 })
         );
+    }
+
+    #[test]
+    fn composite_material_generation_rejects_cross_publication_rows_and_programs() {
+        let resources = LightingCompositeMaterialResourceIds {
+            headers: BufferId::from_parts(30, 7),
+            parameters: BufferId::from_parts(31, 7),
+            execution_plans: BufferId::from_parts(32, 7),
+            execution_programs: BufferId::from_parts(33, 7),
+            texture_rows: BufferId::from_parts(20, 7),
+            texture_rows_size_bytes: MATERIAL_TEXTURE_ROW_BYTES,
+            vt_page_table: BufferId::from_parts(21, 7),
+            vt_page_table_size_bytes: MATERIAL_VT_PAGE_TABLE_BYTES,
+            vt_config: BufferId::from_parts(22, 7),
+            vt_config_size_bytes: MATERIAL_VT_CONFIG_BYTES,
+            vt_atlas_view: TextureViewId::from_parts(23, 7),
+            vt_sampler: SamplerId::from_parts(24, 7),
+            device_generation: 3,
+            publication_generation: 9,
+            material_version: 4,
+            execution_version: 4,
+            material_epoch: 12,
+            vt_publication_generation: 9,
+            texture_binding_version: 1,
+            texture_image_version: 1,
+        };
+        let buffers = LightingCompositeMaterialBuffers {
+            headers: Some(BufferId::from_parts(30, 7)),
+            headers_size_bytes: MATERIAL_HEADER_BYTES,
+            parameters: Some(BufferId::from_parts(31, 7)),
+            parameters_size_bytes: MATERIAL_PARAMETER_WORD_BYTES,
+            texture_rows: Some(resources.texture_rows),
+            texture_rows_size_bytes: resources.texture_rows_size_bytes,
+            execution_plans: Some(BufferId::from_parts(32, 7)),
+            execution_plans_size_bytes: MATERIAL_PLAN_ROW_BYTES,
+            execution_programs: Some(BufferId::from_parts(33, 7)),
+            execution_programs_size_bytes: MATERIAL_PROGRAM_ROW_BYTES,
+            material_version: 4,
+            execution_version: 4,
+            material_epoch: 12,
+            vt_publication_generation: 9,
+            texture_binding_version: 1,
+            texture_image_version: 1,
+        };
+        assert_eq!(
+            validate_composite_material_generation(buffers, resources),
+            Ok(())
+        );
+
+        let mut stale = resources;
+        stale.texture_rows = BufferId::from_parts(99, 7);
+        assert!(matches!(
+            validate_composite_material_generation(buffers, stale),
+            Err(LightingCompositeMaterialBindingError::GenerationMismatch {
+                field: "texture_rows"
+            })
+        ));
+        let mut wrong_execution = buffers;
+        wrong_execution.execution_version = 5;
+        assert!(matches!(
+            validate_composite_material_generation(wrong_execution, resources),
+            Err(LightingCompositeMaterialBindingError::GenerationMismatch {
+                field: "execution_version"
+            })
+        ));
     }
 
     #[test]
@@ -1993,7 +2377,7 @@ mod composite_contract_tests {
             .find("if (!composite_response_is_finite(response))")
             .expect("composite response must be finite-validated");
         let publish = shader
-            .find("response_outputs[identity_index] = response;")
+            .find("composite_store_response(identity_index, response);")
             .expect("response publication must remain explicit");
         assert!(
             blend < finite,
@@ -2027,7 +2411,8 @@ mod composite_contract_tests {
             "composite_execution_identity_is_valid",
             "header.execution_program_index == identity.left_program_index",
             "identity.program_kind != identity.left_program_kind",
-            "builtin MaskBlend is the canonical fused Lit/Lit form",
+            "any pair of builtin arms is a fused builtin blend",
+            "let builtin_pair = identity.left_program_kind < 3u",
             "identity.mask_kind != 5u || identity.mask_index > 3u",
         ] {
             assert!(
@@ -2043,6 +2428,71 @@ mod composite_contract_tests {
         assert!(!material.contains("composite_material_vt_"));
         assert!(!shader.contains("mix(left.words"));
         assert!(shader.contains("composite_lerp(left.words[3]"));
+    }
+
+    #[test]
+    fn composite_builtin_pair_admission_matches_execution_family_contract() {
+        let programs = [
+            [0, 0, 1, 0, 0],
+            [1, 0, 1, 0, 1],
+            [2, 0, 1, 0, 2],
+            [3, 0, 1, 0, 77],
+        ];
+        let single_lit = [0, u32::MAX, 0, 0, 0, 0, 0, 0];
+        let single_npr = [1, u32::MAX, 1, 0, 0, 0, 0, 0];
+        let lit_lit = [0, 0, 0, 31, 5, 0, 0, 0];
+        let lit_npr = [0, 1, 2, 31, 5, 0, 0, 0];
+        let registered_lit = [3, 0, 2, 1, 5, 2, 1, 0];
+
+        assert!(native_execution_tables_are_valid(
+            &[single_lit, single_npr, lit_lit, lit_npr, registered_lit],
+            &programs,
+        ));
+
+        for (index, wrong_family) in [(2, 1), (3, 0), (4, 1)] {
+            let mut invalid = [single_lit, single_npr, lit_lit, lit_npr, registered_lit];
+            invalid[index][2] = wrong_family;
+            assert!(
+                !native_execution_tables_are_valid(&invalid, &programs),
+                "plan {index} must reject family {wrong_family}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_execution_table_contract_rejects_invalid_channel_domain_and_mask_rows() {
+        let programs = [[0, 0, 1, 0, 0], [3, 0, 1, 0, 77]];
+        let valid = [0, 1, 2, 1, 5, 3, 1, 0];
+        assert!(native_execution_tables_are_valid(&[valid], &programs));
+
+        for invalid in [
+            [0, 1, 2, 0, 5, 0, 1, 0],
+            [0, 1, 2, 2, 5, 0, 1, 0],
+            [0, 1, 2, 31, 5, 0, 1, 0],
+            [0, 1, 2, 1, 5, 4, 1, 0],
+            [0, 1, 2, 1, 5, 3, 0, 0],
+            [0, 1, 2, 1, 6, 0, 1, 0],
+            [0, 1, 2, 1, 2, 1, 1, 0],
+        ] {
+            assert!(!native_execution_tables_are_valid(&[invalid], &programs));
+        }
+    }
+
+    #[test]
+    fn surface_identity_admission_matches_composite_execution_families() {
+        let identity = include_str!("shaders/surface_identity.wesl");
+        for contract in [
+            "let expected_family = select(1u, 0u, left.kind == 0u);",
+            "if (plan.family == 1u",
+            "(both_lit && plan.family != 0u)",
+            "(!both_lit && plan.family != 2u)",
+            "plan.mask_kind == 5u && plan.mask_index > 3u",
+        ] {
+            assert!(
+                identity.contains(contract),
+                "missing surface identity execution-family contract: {contract}"
+            );
+        }
     }
 
     #[test]
@@ -2068,6 +2518,36 @@ mod composite_contract_tests {
                 "missing Native sampled channel consumer: {declaration}"
             );
         }
+    }
+
+    #[test]
+    fn composite_does_not_rebind_texture_metadata() {
+        let shader = LIGHTING_COMPOSITE_WGSL;
+        assert!(!shader.contains("composite_material_texture_rows"));
+        assert!(!shader.contains("composite_texture_semantic_is_valid"));
+    }
+
+    #[test]
+    fn identity_pass_validates_execution_tables_before_composite() {
+        let shader = build_composite_shader_source(None);
+        for declaration in [
+            "@group(2) @binding(0)",
+            "@group(2) @binding(1)",
+            "composite_load_surface_identity",
+            "composite_store_response",
+        ] {
+            assert!(
+                shader.contains(declaration),
+                "missing composite canonical-table consumer: {declaration}"
+            );
+        }
+        let surface_decode = shader
+            .find("let material = prism_composite_material_surface(identity);")
+            .expect("surface decode must remain explicit");
+        let identity = include_str!("shaders/surface_identity.wesl");
+        assert!(identity.contains("execution_tuple_is_supported(material_index, header)"));
+        assert!(identity.contains("execution_plan_semantics_are_valid"));
+        assert!(surface_decode > 0);
     }
 
     #[test]
@@ -2171,6 +2651,97 @@ mod gbuffer_gpu_contract_tests {
         geometry_opacity: f32,
     ) -> (GpuMaterialHeader, Vec<u32>) {
         canonical_surface_for_program(albedo, geometry_opacity, 1)
+    }
+
+    fn response_oracle(
+        direct: [f32; 3],
+        indirect_diffuse: [f32; 3],
+        reflection: [f32; 3],
+        transmission: [f32; 3],
+        emission: [f32; 3],
+        alpha: f32,
+    ) -> [f32; 16] {
+        [
+            direct[0],
+            direct[1],
+            direct[2],
+            indirect_diffuse[0],
+            indirect_diffuse[1],
+            indirect_diffuse[2],
+            reflection[0],
+            reflection[1],
+            reflection[2],
+            transmission[0],
+            transmission[1],
+            transmission[2],
+            emission[0],
+            emission[1],
+            emission[2],
+            alpha,
+        ]
+    }
+
+    fn response_radiance(response: [f32; 16]) -> [f32; 3] {
+        [
+            response[0] + response[3] + response[6] + response[9] + response[12],
+            response[1] + response[4] + response[7] + response[10] + response[13],
+            response[2] + response[5] + response[8] + response[11] + response[14],
+        ]
+    }
+
+    fn blend_response_oracle(
+        left: [f32; 16],
+        right: [f32; 16],
+        blended_channels: u32,
+        mask: f32,
+        alpha: f32,
+    ) -> [f32; 16] {
+        let mut result = left;
+        for (bit, start) in [(1_u32, 0_usize), (2, 3), (4, 6), (8, 9), (16, 12)] {
+            if blended_channels & bit != 0 {
+                for index in start..start + 3 {
+                    result[index] = left[index] + (right[index] - left[index]) * mask;
+                }
+            }
+        }
+        result[15] = alpha;
+        result
+    }
+
+    fn assert_response_matches_oracle(actual: &[f32], expected: [f32; 16], label: &str) {
+        assert!(actual.len() >= 16, "{label} response readback is truncated");
+        for (index, expected) in expected.into_iter().enumerate() {
+            assert!(
+                (actual[index] - expected).abs() <= 0.003,
+                "{label} response lane {index}: GPU {} != CPU {expected}",
+                actual[index]
+            );
+        }
+    }
+
+    #[test]
+    fn cpu_response_oracle_covers_lit_npr_registered_and_maskblend_lanes() {
+        let lit = response_oracle(
+            [1.0, 2.0, 3.0],
+            [4.0, 5.0, 6.0],
+            [7.0, 8.0, 9.0],
+            [10.0, 11.0, 12.0],
+            [13.0, 14.0, 15.0],
+            1.0,
+        );
+        assert_eq!(response_radiance(lit), [35.0, 40.0, 45.0]);
+
+        let npr = response_oracle([2.0, 4.0, 6.0], [0.0; 3], [0.0; 3], [0.0; 3], [0.5; 3], 1.0);
+        let registered =
+            response_oracle([8.0, 6.0, 4.0], [0.0; 3], [0.0; 3], [0.0; 3], [0.0; 3], 1.0);
+        let blended = blend_response_oracle(lit, registered, 31, 0.25, 1.0);
+
+        assert_eq!(&npr[0..3], &[2.0, 4.0, 6.0]);
+        assert_eq!(&npr[3..12], &[0.0; 9]);
+        assert_eq!(&npr[12..15], &[0.5; 3]);
+        assert_eq!(blended[15], 1.0);
+        assert_eq!(blended[0], 2.75);
+        assert_eq!(blended[12], 9.75);
     }
 
     struct Fixture {
@@ -2316,8 +2887,8 @@ mod gbuffer_gpu_contract_tests {
                 0,
                 0,
                 0,
-                0,
                 2,
+                0,
                 0,
                 1,
                 5,
@@ -2335,6 +2906,60 @@ mod gbuffer_gpu_contract_tests {
             0,
             cast_slice(&[0u32, 0, 1, 0, 0, 1, 0, 1, 0, 1, 0, 0, 1, 0, 0]),
         );
+        let texture_rows = runtime.device().create_buffer(&BufferDescriptor::new(
+            MATERIAL_TEXTURE_ROW_BYTES,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        ));
+        let vt_page_table = runtime.device().create_buffer(&BufferDescriptor::new(
+            MATERIAL_VT_PAGE_TABLE_BYTES,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        ));
+        let vt_config = runtime.device().create_buffer(&BufferDescriptor::new(
+            MATERIAL_VT_CONFIG_BYTES,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        ));
+        let vt_atlas = runtime.device().create_texture(&TextureDescriptor {
+            label: Some("lighting-test-vt-atlas".into()),
+            size: prism_render_driver::Extent3d::new_2d(1, 1),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba8Unorm,
+            usage: TextureUsages::TEXTURE_BINDING,
+        });
+        let vt_atlas_view = runtime.device().create_texture_view(
+            vt_atlas,
+            &TextureViewDescriptor {
+                dimension: TextureViewDimension::D2Array,
+                ..TextureViewDescriptor::default()
+            },
+        );
+        let vt_sampler = runtime
+            .device()
+            .create_sampler(&SamplerDescriptor::default());
+        let material_resources = LightingCompositeMaterialResourceIds {
+            headers,
+            parameters,
+            execution_plans,
+            execution_programs,
+            texture_rows,
+            texture_rows_size_bytes: MATERIAL_TEXTURE_ROW_BYTES,
+            vt_page_table,
+            vt_page_table_size_bytes: MATERIAL_VT_PAGE_TABLE_BYTES,
+            vt_config,
+            vt_config_size_bytes: MATERIAL_VT_CONFIG_BYTES,
+            vt_atlas_view,
+            vt_sampler,
+            device_generation: runtime.device_generation(),
+            publication_generation: 1,
+            material_version: 1,
+            execution_version: 1,
+            material_epoch: 1,
+            vt_publication_generation: 1,
+            texture_binding_version: 1,
+            texture_image_version: 1,
+        };
+        lighting.set_composite_material_resources(Some(material_resources));
         let mut pass = lighting
             .target_pass(
                 &plan,
@@ -2348,10 +2973,18 @@ mod gbuffer_gpu_contract_tests {
                     parameters_size_bytes: (core::mem::size_of::<u32>()
                         * initial_heap.len().max(npr_heap.len()))
                         as u64,
+                    texture_rows: Some(texture_rows),
+                    texture_rows_size_bytes: MATERIAL_TEXTURE_ROW_BYTES,
                     execution_plans: Some(execution_plans),
                     execution_plans_size_bytes: MATERIAL_PLAN_ROW_BYTES * 3,
                     execution_programs: Some(execution_programs),
                     execution_programs_size_bytes: MATERIAL_PROGRAM_ROW_BYTES * 3,
+                    material_version: 1,
+                    execution_version: 1,
+                    material_epoch: 1,
+                    vt_publication_generation: 1,
+                    texture_binding_version: 1,
+                    texture_image_version: 1,
                 },
                 None,
             )
@@ -2402,10 +3035,14 @@ mod gbuffer_gpu_contract_tests {
             cast_slice(&[0u32, u32::MAX, 1, 0, 0, 0, 0, 0]),
         );
         let execution_programs = device.create_buffer(&BufferDescriptor::new(
-            MATERIAL_PROGRAM_ROW_BYTES,
+            MATERIAL_PROGRAM_ROW_BYTES * 2,
             BufferUsages::STORAGE | BufferUsages::COPY_DST,
         ));
-        queue.write_buffer(execution_programs, 0, cast_slice(&[3u32, 0, 1, 0, 7]));
+        queue.write_buffer(
+            execution_programs,
+            0,
+            cast_slice(&[3u32, 0, 1, 0, 7, 3, 0, 1, 0, 8]),
+        );
 
         // The body deliberately consumes all three ABI inputs. Its expected
         // output is simple enough to calculate independently on the CPU.
@@ -2417,8 +3054,17 @@ return RegisteredResponse(
     surface.sample.base_color * scale,
     vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), 1.0);
 "#;
-        let response_link =
-            linked_registered_response_wgsl(&[RegisteredResponseSource::new(7, vec![body.into()])]);
+        let body_right = r#"
+let light = registered_light(lighting, 0u);
+let scale = 0.25 + light.visibility + light.illuminance.x * 0.125 + 1.25;
+return RegisteredResponse(
+    surface.sample.base_color * scale,
+    vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), 1.0);
+"#;
+        let response_link = linked_registered_response_wgsl(&[
+            RegisteredResponseSource::new(7, vec![body.into()]),
+            RegisteredResponseSource::new(8, vec![body_right.into()]),
+        ]);
         let plan = LightingPlan {
             tier: prism_render_architecture::lighting::contract::Tier::Balanced,
             recipes: vec![RecipeId::SpecializedDeterministic],
@@ -2435,7 +3081,8 @@ return RegisteredResponse(
             execution_plans: Some(execution_plans),
             execution_plans_size_bytes: MATERIAL_PLAN_ROW_BYTES,
             execution_programs: Some(execution_programs),
-            execution_programs_size_bytes: MATERIAL_PROGRAM_ROW_BYTES,
+            execution_programs_size_bytes: MATERIAL_PROGRAM_ROW_BYTES * 2,
+            ..Default::default()
         };
         let mut pass = f
             ._lighting
@@ -2521,6 +3168,13 @@ return RegisteredResponse(
         let hdr = queue
             .read_texture_rgba16f(target.texture(), WIDTH, HEIGHT)
             .expect("registered response HDR readback must complete");
+        let direct_response = queue
+            .read_buffer(pass.response_output, pass.response_output_size_bytes)
+            .expect("registered direct ResponseOutput readback must complete");
+        let direct_response_words = direct_response
+            .chunks_exact(core::mem::size_of::<f32>())
+            .map(|bytes| f32::from_le_bytes(bytes.try_into().expect("f32 response word")))
+            .collect::<Vec<_>>();
         let identity = queue
             .read_buffer(target.surface_identity_buffer(), 16 * 4)
             .expect("registered surface identity readback must complete");
@@ -2528,12 +3182,83 @@ return RegisteredResponse(
             .chunks_exact(4)
             .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
             .collect::<Vec<_>>();
-        assert_eq!(
-            hdr[0],
-            [1.75, 1.75, 1.75, 1.0],
-            "identity={identity_words:?}"
+        let registered_direct =
+            response_oracle([1.75; 3], [0.0; 3], [0.0; 3], [0.0; 3], [0.0; 3], 1.0);
+        // The registered body scales the canonical white GBuffer base color by
+        // 0.25 + visibility + illuminance.x * 0.125 + package_slot.
+        assert_response_matches_oracle(
+            &direct_response_words,
+            registered_direct,
+            "registered direct",
+        );
+        let registered_radiance = response_radiance(registered_direct);
+        assert!(
+            hdr[0]
+                .into_iter()
+                .zip([
+                    registered_radiance[0],
+                    registered_radiance[1],
+                    registered_radiance[2],
+                    1.0
+                ])
+                .all(|(actual, expected)| (actual - expected).abs() <= 0.003),
+            "registered direct HDR={:?}, identity={identity_words:?}",
+            hdr[0]
         );
         assert!(hdr[1..].iter().all(|pixel| *pixel == [0.0; 4]));
+        assert!(direct_response_words[16..].iter().all(|word| *word == 0.0));
+
+        // Reuse the same native response link for a two-arm composition. Both
+        // arms are registered programs, so this must use the composition
+        // family rather than the builtin fused family.
+        queue.write_buffer(
+            execution_plans,
+            0,
+            cast_slice(&[0u32, 1, 2, 31, 5, 0, 0, 0]),
+        );
+        let mut blend_header = header;
+        blend_header.dynamic_wetness = 0.5_f32.to_bits();
+        queue.write_buffer(headers, 0, cast_slice(&[blend_header; 4]));
+
+        let mut blend_encoder = CommandEncoder::new();
+        blend_encoder.push_compute_pass(None, composite_commands(pass));
+        queue.submit(&[blend_encoder.finish()]);
+        assert!(queue.wait_idle(), "registered MaskBlend dispatch completes");
+        let blend_hdr = queue
+            .read_texture_rgba16f(target.texture(), WIDTH, HEIGHT)
+            .expect("registered MaskBlend HDR readback must complete");
+        let blend_response = queue
+            .read_buffer(pass.response_output, pass.response_output_size_bytes)
+            .expect("registered MaskBlend ResponseOutput readback must complete");
+        let blend_response_words = blend_response
+            .chunks_exact(core::mem::size_of::<f32>())
+            .map(|bytes| f32::from_le_bytes(bytes.try_into().expect("f32 response word")))
+            .collect::<Vec<_>>();
+        let registered_right =
+            response_oracle([3.0; 3], [0.0; 3], [0.0; 3], [0.0; 3], [0.0; 3], 1.0);
+        let expected_blend =
+            blend_response_oracle(registered_direct, registered_right, 31, 0.5, 1.0);
+        assert_response_matches_oracle(
+            &blend_response_words,
+            expected_blend,
+            "registered MaskBlend",
+        );
+        let expected_blend_radiance = response_radiance(expected_blend);
+        assert!(
+            blend_hdr[0]
+                .into_iter()
+                .zip([
+                    expected_blend_radiance[0],
+                    expected_blend_radiance[1],
+                    expected_blend_radiance[2],
+                    1.0,
+                ])
+                .all(|(actual, expected)| (actual - expected).abs() <= 0.003),
+            "registered MaskBlend HDR={:?}",
+            blend_hdr[0]
+        );
+        assert!(blend_hdr[1..].iter().all(|pixel| *pixel == [0.0; 4]));
+        assert!(blend_response_words[16..].iter().all(|word| *word == 0.0));
     }
 
     fn half_rgba_bytes(values: [f32; 4]) -> Vec<u8> {
@@ -3938,9 +4663,8 @@ pub struct LightingGpuBundle {
     pub lobe_sample_budget: BufferId,
     pub camera_view: BufferId,
     pub composite_bind_group: prism_render_driver::BindGroupId,
-    /// Device-local fallback resources used by legacy fixtures and before a
-    /// published material VT lease is admitted.
-    pub composite_material_resources: LightingCompositeMaterialResourceIds,
+    /// Published material resources are supplied per frame after admission.
+    pub composite_material_resources: Option<LightingCompositeMaterialResourceIds>,
 }
 
 /// A graph-ready view of the current lighting GPU bundle.
@@ -3967,7 +4691,7 @@ pub(crate) struct LightingGpuPass {
     pub composite_bind_group: prism_render_driver::BindGroupId,
     pub lobe_sample_budget: BufferId,
     pub camera_view: BufferId,
-    pub composite_material_resources: LightingCompositeMaterialResourceIds,
+    pub composite_material_resources: Option<LightingCompositeMaterialResourceIds>,
     /// Target-specific group-1 binding. It is populated only by the
     /// canonical material-aware target pass.
     pub composite_target_bind_group: Option<BindGroupId>,
@@ -4028,20 +4752,6 @@ impl LightingGpuPass {
         self.composite_material_layout
     }
 
-    /// Creates the group-2 binding for one coherent canonical material
-    /// snapshot. A partially supplied set is rejected before backend calls.
-    pub(crate) fn create_composite_material_bind_group<D: prism_render_driver::RenderDevice>(
-        self,
-        device: &D,
-        buffers: LightingCompositeMaterialBuffers,
-    ) -> Result<BindGroupId, LightingCompositeMaterialBindingError> {
-        self.create_composite_material_bind_group_with_resources(
-            device,
-            buffers,
-            self.composite_material_resources,
-        )
-    }
-
     pub(crate) fn create_composite_material_bind_group_with_resources<
         D: prism_render_driver::RenderDevice,
     >(
@@ -4050,16 +4760,10 @@ impl LightingGpuPass {
         buffers: LightingCompositeMaterialBuffers,
         resources: LightingCompositeMaterialResourceIds,
     ) -> Result<BindGroupId, LightingCompositeMaterialBindingError> {
-        // Texture rows and VT state are consumed by Surface encode/GI and
-        // retained in the frame lease, but are not composite bindings. The
-        // composite group deliberately stays at two storage buffers so it is
-        // valid on Metal's eight-storage-buffer compute limit.
-        let _ = resources;
-        let [(headers, headers_size), (parameters, parameters_size), _, _] =
-            validate_material_buffers(buffers)?;
-        // Plans/programs are consumed by the separate identity pass. Keeping
-        // them out of group 2 is required for devices exposing only eight
-        // storage-buffer bindings across the composite pipeline.
+        validate_composite_material_resources(resources)?;
+        validate_composite_material_generation(buffers, resources)?;
+        let [(headers, headers_size), (parameters, parameters_size)] =
+            validate_composite_material_buffers(buffers)?;
         Ok(device.create_bind_group(&BindGroupDescriptor {
             label: Some("lighting-composite-material-bind-group".into()),
             layout: Some(self.composite_material_layout),
@@ -4077,10 +4781,13 @@ impl LightingGpuPass {
         mut self,
         device: &D,
         buffers: LightingCompositeMaterialBuffers,
+        resources: LightingCompositeMaterialResourceIds,
     ) -> Result<Self, LightingCompositeMaterialBindingError> {
-        self.composite_material_bind_group =
-            Some(self.create_composite_material_bind_group(device, buffers)?);
+        self.composite_material_bind_group = Some(
+            self.create_composite_material_bind_group_with_resources(device, buffers, resources)?,
+        );
         self.composite_material_buffers = Some(buffers);
+        self.composite_material_resources = Some(resources);
         Ok(self)
     }
 
@@ -4095,7 +4802,9 @@ impl LightingGpuPass {
     }
 
     #[must_use]
-    pub(crate) const fn composite_material_resources(self) -> LightingCompositeMaterialResourceIds {
+    pub(crate) const fn composite_material_resources(
+        self,
+    ) -> Option<LightingCompositeMaterialResourceIds> {
         self.composite_material_resources
     }
 
@@ -4166,14 +4875,6 @@ impl LightingGpuPass {
                 BindGroupEntry {
                     binding: 7,
                     resource: BindingResource::TextureView(target.hdr_target_view),
-                },
-                BindGroupEntry {
-                    binding: 8,
-                    resource: BindingResource::Buffer {
-                        buffer: target.response_output_buffer,
-                        offset: 0,
-                        size: Some(target.response_output_size_bytes),
-                    },
                 },
             ],
         }))
@@ -4319,7 +5020,6 @@ struct CompositeTargetCache {
     device_generation: Option<u64>,
     device: Option<Arc<dyn RenderDevice + Send + Sync>>,
     groups: BTreeMap<CompositeTargetKey, BindGroupId>,
-    response_buffers: BTreeMap<CompositeTargetKey, (BufferId, u64)>,
     camera_groups: BTreeMap<(CompositeTargetKey, [u32; 3]), (BindGroupId, BufferId)>,
     identity_groups: BTreeMap<(CompositeTargetKey, BufferId, BufferId, BufferId), BindGroupId>,
     material_buffers: Option<LightingCompositeMaterialBuffers>,
@@ -4367,9 +5067,6 @@ impl CompositeTargetCache {
         if let Some(group) = self.groups.remove(&key) {
             device.destroy_bind_group(group);
         }
-        if let Some((buffer, _)) = self.response_buffers.remove(&key) {
-            device.destroy_buffer(buffer);
-        }
         let camera_keys = self
             .camera_groups
             .keys()
@@ -4404,9 +5101,6 @@ impl CompositeTargetCache {
                 device.destroy_bind_group(group);
                 device.destroy_buffer(buffer);
             }
-            for (buffer, _) in self.response_buffers.values().copied() {
-                device.destroy_buffer(buffer);
-            }
             for group in self.identity_groups.values().copied() {
                 device.destroy_bind_group(group);
             }
@@ -4422,7 +5116,6 @@ impl CompositeTargetCache {
             self.registered_pipeline = None;
         }
         self.groups.clear();
-        self.response_buffers.clear();
         self.camera_groups.clear();
         self.identity_groups.clear();
         self.material_buffers = None;
@@ -5101,12 +5794,33 @@ where
         if !camera_view_position.iter().all(|value| value.is_finite()) {
             return None;
         }
+        let key = CompositeTargetKey::from(target);
+        let response_output_size_bytes = target.surface_identity_size_bytes();
+        validate_composite_target(LightingCompositeTarget {
+            position_x_view: key.position_x_view,
+            position_y_view: key.position_y_view,
+            position_z_view: key.position_z_view,
+            normal_view: key.normal_view,
+            albedo_view: key.albedo_view,
+            surface_id_view: key.surface_id_view,
+            surface_data_view: key.surface_data_view,
+            sampled_material_a_view: key.sampled_material_a_view,
+            sampled_material_b_view: key.sampled_material_b_view,
+            sampled_material_c_view: key.sampled_material_c_view,
+            surface_identity_buffer: key.surface_identity_buffer,
+            surface_identity_size_bytes: target.surface_identity_size_bytes(),
+            hdr_target_view: key.hdr_target_view,
+            response_output_buffer: key.surface_identity_buffer,
+            response_output_size_bytes,
+            width: key.width,
+            height: key.height,
+        })
+        .ok()?;
         let mut pass = self.pass(plan)?;
         let bundle = self.bundle.current();
         let device = runtime.device_handle();
         let device_dyn: Arc<dyn RenderDevice + Send + Sync> = device.clone();
         let generation = runtime.device_generation();
-        let key = CompositeTargetKey::from(target);
         let camera_key = (key, camera_view_position.map(f32::to_bits));
         let mut cache = self
             .composite_targets
@@ -5124,7 +5838,6 @@ where
         if bundle_changed || generation_changed {
             if generation_changed {
                 cache.groups.clear();
-                cache.response_buffers.clear();
                 cache.camera_groups.clear();
                 cache.identity_groups.clear();
                 cache.material_group = None;
@@ -5164,22 +5877,7 @@ where
             };
         pass.composite_bind_group = camera_group;
         pass.camera_view = camera_buffer;
-        let response_output_size_bytes = u64::from(key.width)
-            .checked_mul(u64::from(key.height))
-            .and_then(|pixels| pixels.checked_mul(COMPOSITE_RESPONSE_BYTES_PER_PIXEL))?;
-        let (response_output, response_output_size_bytes) =
-            if let Some(binding) = cache.response_buffers.get(&key).copied() {
-                binding
-            } else {
-                let response_output = device.create_buffer(&BufferDescriptor::new(
-                    response_output_size_bytes,
-                    BufferUsages::STORAGE | BufferUsages::COPY_SRC,
-                ));
-                cache
-                    .response_buffers
-                    .insert(key, (response_output, response_output_size_bytes));
-                (response_output, response_output_size_bytes)
-            };
+        let response_output = key.surface_identity_buffer;
         let group = if let Some(group) = cache.groups.get(&key).copied() {
             group
         } else {
@@ -5206,7 +5904,7 @@ where
                         height: key.height,
                     },
                 )
-                .expect("validated render target must satisfy the composite contract");
+                .ok()?;
             cache.groups.insert(key, group);
             group
         };
@@ -5232,19 +5930,20 @@ where
         I::Device: Send + Sync + 'static,
         I::Queue: FrameSync,
     {
-        let mut pass = self.target_pass_core(plan, target, runtime, camera_view_position)?;
-        let device = runtime.device_handle();
         let configured_resources = self
             .composite_material_resources
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .filter(|resources| {
-                resources.device_generation == 0
-                    || resources.device_generation == runtime.device_generation()
-            });
-        let composite_material_resources =
-            configured_resources.unwrap_or(pass.composite_material_resources);
-        pass.composite_material_resources = composite_material_resources;
+            .as_ref()
+            .copied()
+            .filter(|resources| resources.device_generation == runtime.device_generation());
+        let composite_material_resources = configured_resources
+            .filter(|resources| validate_composite_material_resources(*resources).is_ok())?;
+        validate_composite_material_generation(buffers, composite_material_resources).ok()?;
+        validate_material_buffers(buffers).ok()?;
+        let mut pass = self.target_pass_core(plan, target, runtime, camera_view_position)?;
+        let device = runtime.device_handle();
+        pass.composite_material_resources = Some(composite_material_resources);
         let device_owner: Arc<dyn RenderDevice + Send + Sync> = device.clone();
         let generation = runtime.device_generation();
         let key = CompositeTargetKey::from(target);
@@ -5272,9 +5971,7 @@ where
             && cache.material_buffers == Some(buffers)
             && cache.material_resources == Some(composite_material_resources)
         {
-            cache
-                .material_group
-                .expect("cached material buffers always have a bind group")
+            cache.material_group?
         } else {
             let group = pass
                 .create_composite_material_bind_group_with_resources(
@@ -5282,10 +5979,12 @@ where
                     buffers,
                     composite_material_resources,
                 )
-                .expect("published canonical material buffers satisfy the binding ABI");
+                .ok()?;
             if owner_matches {
                 if let Some(old_group) = cache.material_group.replace(group) {
-                    let old_device = Arc::clone(cache.device.as_ref().expect("owner matches"));
+                    let Some(old_device) = cache.device.as_ref().map(Arc::clone) else {
+                        return None;
+                    };
                     runtime.queue().on_submitted_work_done(Box::new(move || {
                         old_device.destroy_bind_group(old_group);
                     }));
@@ -5300,15 +5999,9 @@ where
         pass.composite_material_bind_group = Some(group);
         pass.composite_material_buffers = Some(buffers);
 
-        let headers = buffers
-            .headers
-            .expect("validated canonical material headers");
-        let execution_plans = buffers
-            .execution_plans
-            .expect("validated canonical material execution plans");
-        let execution_programs = buffers
-            .execution_programs
-            .expect("validated canonical material execution programs");
+        let headers = buffers.headers?;
+        let execution_plans = buffers.execution_plans?;
+        let execution_programs = buffers.execution_programs?;
         let identity_key = (key, headers, execution_plans, execution_programs);
         let identity_group = if let Some(group) = cache.identity_groups.get(&identity_key).copied()
         {
@@ -6382,6 +7075,100 @@ mod prepare_tests {
             )
             .is_none());
     }
+
+    #[test]
+    fn native_response_bindings_are_target_sized_on_null_backend() {
+        let (runtime, state) = setup();
+        let plan = plan(GiCandidateSource::Disabled);
+        state
+            .prepare(&plan, &surfaces(1), 1, &runtime)
+            .expect("native lighting preparation on Null");
+        let target = RenderTarget::new(runtime.device(), rhi::Extent3d::new_2d(4, 4));
+        let device = runtime.device();
+        let headers = device.create_buffer(&rhi::BufferDescriptor::new(
+            MATERIAL_HEADER_BYTES,
+            rhi::BufferUsages::STORAGE | rhi::BufferUsages::COPY_DST,
+        ));
+        let parameters = device.create_buffer(&rhi::BufferDescriptor::new(
+            MATERIAL_PARAMETER_WORD_BYTES,
+            rhi::BufferUsages::STORAGE | rhi::BufferUsages::COPY_DST,
+        ));
+        let execution_plans = device.create_buffer(&rhi::BufferDescriptor::new(
+            MATERIAL_PLAN_ROW_BYTES,
+            rhi::BufferUsages::STORAGE | rhi::BufferUsages::COPY_DST,
+        ));
+        let execution_programs = device.create_buffer(&rhi::BufferDescriptor::new(
+            MATERIAL_PROGRAM_ROW_BYTES,
+            rhi::BufferUsages::STORAGE | rhi::BufferUsages::COPY_DST,
+        ));
+        state.set_composite_material_resources(Some(LightingCompositeMaterialResourceIds {
+            headers,
+            parameters,
+            execution_plans,
+            execution_programs,
+            texture_rows: headers,
+            texture_rows_size_bytes: MATERIAL_TEXTURE_ROW_BYTES,
+            vt_page_table: parameters,
+            vt_page_table_size_bytes: MATERIAL_VT_PAGE_TABLE_BYTES,
+            vt_config: execution_plans,
+            vt_config_size_bytes: MATERIAL_VT_CONFIG_BYTES,
+            vt_atlas_view: target.view(),
+            vt_sampler: device.create_sampler(&rhi::SamplerDescriptor::default()),
+            device_generation: runtime.device_generation(),
+            publication_generation: 1,
+            material_version: 1,
+            execution_version: 1,
+            material_epoch: 1,
+            vt_publication_generation: 1,
+            texture_binding_version: 1,
+            texture_image_version: 1,
+        }));
+        let pass = state
+            .target_pass(
+                &plan,
+                &target,
+                &runtime,
+                [0.0; 3],
+                LightingCompositeMaterialBuffers {
+                    headers: Some(headers),
+                    headers_size_bytes: MATERIAL_HEADER_BYTES,
+                    parameters: Some(parameters),
+                    parameters_size_bytes: MATERIAL_PARAMETER_WORD_BYTES,
+                    texture_rows: Some(headers),
+                    texture_rows_size_bytes: MATERIAL_TEXTURE_ROW_BYTES,
+                    execution_plans: Some(execution_plans),
+                    execution_plans_size_bytes: MATERIAL_PLAN_ROW_BYTES,
+                    execution_programs: Some(execution_programs),
+                    execution_programs_size_bytes: MATERIAL_PROGRAM_ROW_BYTES,
+                    material_version: 1,
+                    execution_version: 1,
+                    material_epoch: 1,
+                    vt_publication_generation: 1,
+                    texture_binding_version: 1,
+                    texture_image_version: 1,
+                },
+                None,
+            )
+            .expect("native response bindings are admitted on Null");
+
+        assert!(pass.composite_target_bind_group.is_some());
+        assert!(pass.surface_identity_bind_group.is_some());
+        assert!(pass.composite_material_bind_group.is_some());
+        assert_ne!(pass.response_output, BufferId::from_parts(0, 0));
+        assert_eq!(
+            pass.response_output,
+            target.surface_identity_buffer(),
+            "SurfaceIdentity and canonical response must share one physical target buffer"
+        );
+        assert_eq!(
+            pass.response_output_size_bytes,
+            16 * COMPOSITE_RESPONSE_BYTES_PER_PIXEL
+        );
+        assert!(
+            !pass.run_gi,
+            "disabled GI must not add a second response producer"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -6976,58 +7763,6 @@ fn build_bundle<D: prism_render_driver::RenderDevice, Q: RenderQueue>(
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    let composite_texture_rows = device.create_buffer(&BufferDescriptor {
-        label: Some("lighting-composite-material-texture-rows-fallback".into()),
-        size: MATERIAL_TEXTURE_ROW_BYTES,
-        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let composite_vt_page_table = device.create_buffer(&BufferDescriptor {
-        label: Some("lighting-composite-material-vt-page-table-fallback".into()),
-        size: MATERIAL_VT_PAGE_TABLE_BYTES,
-        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let composite_vt_config = device.create_buffer(&BufferDescriptor {
-        label: Some("lighting-composite-material-vt-config-fallback".into()),
-        size: MATERIAL_VT_CONFIG_BYTES,
-        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let composite_vt_atlas = device.create_texture(&TextureDescriptor {
-        label: Some("lighting-composite-material-vt-atlas-fallback".into()),
-        size: prism_render_driver::Extent3d {
-            width: 1,
-            height: 1,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: TextureDimension::D2,
-        format: TextureFormat::Rgba8Unorm,
-        usage: TextureUsages::TEXTURE_BINDING,
-    });
-    let composite_vt_atlas_view = device.create_texture_view(
-        composite_vt_atlas,
-        &TextureViewDescriptor {
-            dimension: TextureViewDimension::D2Array,
-            ..TextureViewDescriptor::default()
-        },
-    );
-    let composite_vt_sampler = device.create_sampler(&SamplerDescriptor::default());
-    let composite_material_resources = LightingCompositeMaterialResourceIds {
-        texture_rows: composite_texture_rows,
-        texture_rows_size_bytes: MATERIAL_TEXTURE_ROW_BYTES,
-        vt_page_table: composite_vt_page_table,
-        vt_page_table_size_bytes: MATERIAL_VT_PAGE_TABLE_BYTES,
-        vt_config: composite_vt_config,
-        vt_config_size_bytes: MATERIAL_VT_CONFIG_BYTES,
-        vt_atlas_view: composite_vt_atlas_view,
-        vt_sampler: composite_vt_sampler,
-        device_generation: 0,
-        publication_generation: 0,
-    };
-
     let gi_shader = device.create_shader_module(&ShaderModuleDescriptor::wgsl(GI_SHADER));
     let gi_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
         label: Some("lighting-gi-layout".into()),
@@ -7143,6 +7878,6 @@ fn build_bundle<D: prism_render_driver::RenderDevice, Q: RenderQueue>(
         lobe_sample_budget,
         camera_view,
         composite_bind_group,
-        composite_material_resources,
+        composite_material_resources: None,
     }
 }

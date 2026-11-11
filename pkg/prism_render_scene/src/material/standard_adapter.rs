@@ -16,8 +16,8 @@ use prism_render_architecture::abi::GenerationalHandle;
 use prism_render_architecture::render_fabric::RenderDomain;
 
 use prism_render_material::{
-    GpuMaterialTexture, GpuSurfaceParameters, MaterialDomain, MaterialFeatureFlags, MaterialRecord,
-    MaterialRenderClass, ShadingPlan,
+    fallback_material_record, GpuMaterialTexture, GpuSurfaceParameters, MaterialDomain,
+    MaterialFeatureFlags, MaterialRecord, MaterialRenderClass, ShadingPlan,
 };
 
 #[repr(u32)]
@@ -46,6 +46,56 @@ pub enum TextureSemantic {
     IlluminationMask,
 }
 
+impl TextureSemantic {
+    /// Whether the semantic is folded into the sampled OpenPBR surface by the
+    /// shared CPU/WESL texture consumer.
+    pub const fn is_surface_folded(self) -> bool {
+        matches!(
+            self,
+            Self::BaseColor
+                | Self::Emissive
+                | Self::MetallicRoughness
+                | Self::Normal
+                | Self::Occlusion
+                | Self::ClearCoat
+                | Self::ClearCoatRoughness
+                | Self::ClearCoatNormal
+        )
+    }
+
+    /// Whether the semantic is intentionally consumed by a dedicated pass
+    /// rather than by the generic surface-factor fold.
+    pub const fn has_dedicated_consumer(self) -> bool {
+        matches!(
+            self,
+            Self::FaceShadowSdf | Self::MeasuredBrdf | Self::IlluminationMask
+        )
+    }
+
+    /// Whether the current Bevy `StandardMaterial` exposes a source image for
+    /// this semantic in this adapter. Feature-gated Bevy extensions are not
+    /// listed here because this crate does not enable those dependency
+    /// features; they must not be represented by guessed rows.
+    pub const fn has_standard_material_source(self) -> bool {
+        matches!(
+            self,
+            Self::BaseColor
+                | Self::Emissive
+                | Self::MetallicRoughness
+                | Self::Normal
+                | Self::Occlusion
+        )
+    }
+}
+
+const STANDARD_MATERIAL_TEXTURE_SEMANTICS: [TextureSemantic; 5] = [
+    TextureSemantic::BaseColor,
+    TextureSemantic::Emissive,
+    TextureSemantic::MetallicRoughness,
+    TextureSemantic::Normal,
+    TextureSemantic::Occlusion,
+];
+
 // The enum discriminants are the ABI semantic bytes; keep `FaceShadowSdf`
 // pinned to the crate-wide constant its non-bevy producer and every shader
 // consumer share.
@@ -57,6 +107,8 @@ const _: () =
 const _: () = assert!(
     TextureSemantic::IlluminationMask as u32 == prism_render_material::ILLUMINATION_MASK_SEMANTIC
 );
+const _: () = assert!(TextureSemantic::BaseColor.is_surface_folded());
+const _: () = assert!(TextureSemantic::FaceShadowSdf.has_dedicated_consumer());
 
 /// Resolves authored image handles into material texture rows.
 ///
@@ -70,9 +122,10 @@ pub trait StandardMaterialTextureResolver {
 
 /// Immutable material-side UV state shared by resolve and VT feedback.
 ///
-/// Geometry currently exposes one canonical UV stream. UV0 transforms are
-/// fully supported here; a texture authored against UV1 is marked in the mask
-/// and consumers fail closed until a second geometry stream exists.
+/// UV0 transforms are fully supported here. A texture authored against UV1 is
+/// marked in the mask; the render-scene admission path either supplies the
+/// real UV1 stream or explicitly aliases UV0 when that stream is absent, so
+/// resolve and VT feedback use the same channel decision.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct MaterialSurfaceContext {
     pub(crate) uv_channel_mask: u32,
@@ -208,6 +261,14 @@ pub fn import_standard_material(
     material: &StandardMaterial,
     textures: &mut impl StandardMaterialTextureResolver,
 ) -> MaterialRecord {
+    // The canonical texture row ABI has no independent normal-map Y sign. A
+    // flipped DirectX normal cannot be represented by `normal_scale` (which
+    // scales both tangent axes), so publishing the row would be a wrong-image
+    // silent downgrade. Use the explicit inactive/fallback record instead.
+    if material.flip_normal_map_y && material.normal_map_texture.is_some() {
+        return fallback_material_record(handle, revision as u64);
+    }
+
     let mut features = MaterialFeatureFlags::default();
     if material.double_sided {
         features |= MaterialFeatureFlags::DOUBLE_SIDED;
@@ -256,36 +317,11 @@ pub fn import_standard_material(
         render_class
     };
     let mut texture_rows = Vec::new();
-    push_texture(
-        &mut texture_rows,
-        &material.base_color_texture,
-        TextureSemantic::BaseColor,
-        textures,
-    );
-    push_texture(
-        &mut texture_rows,
-        &material.emissive_texture,
-        TextureSemantic::Emissive,
-        textures,
-    );
-    push_texture(
-        &mut texture_rows,
-        &material.metallic_roughness_texture,
-        TextureSemantic::MetallicRoughness,
-        textures,
-    );
-    push_texture(
-        &mut texture_rows,
-        &material.normal_map_texture,
-        TextureSemantic::Normal,
-        textures,
-    );
-    push_texture(
-        &mut texture_rows,
-        &material.occlusion_texture,
-        TextureSemantic::Occlusion,
-        textures,
-    );
+    for semantic in STANDARD_MATERIAL_TEXTURE_SEMANTICS {
+        if let Some(image) = standard_material_texture(material, semantic) {
+            push_texture(&mut texture_rows, image, semantic, textures);
+        }
+    }
     MaterialRecord {
         handle,
         revision,
@@ -333,19 +369,57 @@ fn closure_mask(material: &StandardMaterial) -> u32 {
 }
 fn push_texture(
     rows: &mut Vec<GpuMaterialTexture>,
-    image: &Option<Handle<Image>>,
+    image: &Handle<Image>,
     semantic: TextureSemantic,
     resolver: &mut impl StandardMaterialTextureResolver,
 ) {
-    if let Some(image) = image {
-        rows.push(resolver.resolve(image.id(), semantic));
+    assert!(
+        semantic.is_surface_folded() && semantic.has_standard_material_source(),
+        "StandardMaterial emitted a semantic without a CPU/WESL surface fold"
+    );
+    rows.push(resolver.resolve(image.id(), semantic));
+}
+
+fn standard_material_texture(
+    material: &StandardMaterial,
+    semantic: TextureSemantic,
+) -> Option<&Handle<Image>> {
+    match semantic {
+        TextureSemantic::BaseColor => material.base_color_texture.as_ref(),
+        TextureSemantic::Emissive => material.emissive_texture.as_ref(),
+        TextureSemantic::MetallicRoughness => material.metallic_roughness_texture.as_ref(),
+        TextureSemantic::Normal => material.normal_map_texture.as_ref(),
+        TextureSemantic::Occlusion => material.occlusion_texture.as_ref(),
+        TextureSemantic::ClearCoat
+        | TextureSemantic::ClearCoatRoughness
+        | TextureSemantic::ClearCoatNormal
+        | TextureSemantic::FaceShadowSdf
+        | TextureSemantic::MeasuredBrdf
+        | TextureSemantic::IlluminationMask => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy_asset::uuid::Uuid;
     use bevy_math::{Affine2, Mat2, Vec2};
+
+    struct RecordingResolver {
+        calls: Vec<(AssetId<Image>, TextureSemantic)>,
+    }
+
+    impl StandardMaterialTextureResolver for RecordingResolver {
+        fn resolve(
+            &mut self,
+            image: AssetId<Image>,
+            semantic: TextureSemantic,
+        ) -> GpuMaterialTexture {
+            let index = self.calls.len() as u32 + 1;
+            self.calls.push((image, semantic));
+            GpuMaterialTexture::non_virtual(index, 1, semantic as u32, index)
+        }
+    }
 
     #[test]
     fn surface_context_preserves_uv_transform_and_marks_unavailable_uv1() {
@@ -361,5 +435,63 @@ mod tests {
         assert_eq!(context.transform_gradient([0.5, 0.25]), [2.25, 3.25]);
         assert!(context.uses_uv1(TextureSemantic::Normal));
         assert!(!context.uses_uv1(TextureSemantic::BaseColor));
+    }
+
+    #[test]
+    fn standard_material_emits_exactly_the_supported_folded_texture_semantics() {
+        let handles = [
+            Handle::<Image>::from(Uuid::from_u128(1)),
+            Handle::<Image>::from(Uuid::from_u128(2)),
+            Handle::<Image>::from(Uuid::from_u128(3)),
+            Handle::<Image>::from(Uuid::from_u128(4)),
+            Handle::<Image>::from(Uuid::from_u128(5)),
+        ];
+        let material = StandardMaterial {
+            base_color_texture: Some(handles[0].clone()),
+            emissive_texture: Some(handles[1].clone()),
+            metallic_roughness_texture: Some(handles[2].clone()),
+            normal_map_texture: Some(handles[3].clone()),
+            occlusion_texture: Some(handles[4].clone()),
+            ..Default::default()
+        };
+        let mut resolver = RecordingResolver { calls: Vec::new() };
+        let record =
+            import_standard_material(GenerationalHandle::new(7, 1), 3, &material, &mut resolver);
+
+        let semantics: Vec<_> = record.textures.iter().map(|row| row.semantic).collect();
+        assert_eq!(
+            semantics,
+            STANDARD_MATERIAL_TEXTURE_SEMANTICS
+                .iter()
+                .map(|semantic| *semantic as u32)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            resolver.calls.len(),
+            STANDARD_MATERIAL_TEXTURE_SEMANTICS.len()
+        );
+        assert!(STANDARD_MATERIAL_TEXTURE_SEMANTICS
+            .iter()
+            .all(
+                |semantic| semantic.is_surface_folded() && semantic.has_standard_material_source()
+            ));
+        assert!(!TextureSemantic::ClearCoat.has_standard_material_source());
+        assert!(!TextureSemantic::FaceShadowSdf.is_surface_folded());
+    }
+
+    #[test]
+    fn flipped_normal_map_fails_closed_instead_of_publishing_wrong_tangent_axes() {
+        let material = StandardMaterial {
+            normal_map_texture: Some(Handle::from(Uuid::from_u128(6))),
+            flip_normal_map_y: true,
+            ..Default::default()
+        };
+        let mut resolver = RecordingResolver { calls: Vec::new() };
+        let record =
+            import_standard_material(GenerationalHandle::new(8, 2), 4, &material, &mut resolver);
+
+        assert!(record.textures.is_empty());
+        assert_eq!(record.surface, GpuSurfaceParameters::default());
+        assert!(resolver.calls.is_empty());
     }
 }

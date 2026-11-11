@@ -30,9 +30,11 @@ import prism_render_material::shaders::material_virtual_texture::{
     MaterialVirtualTextureConfig,
     material_vt_atlas_uv,
     material_vt_empty_resolution,
+    material_vt_geometry_is_valid,
     material_vt_page_request,
     material_vt_resolve,
     material_vt_sample_resolved,
+    material_vt_slot_is_valid,
 };
 
 @if(MATERIAL_BINDLESS) enable wgpu_binding_array;
@@ -53,6 +55,8 @@ const SEMANTIC_CLEAR_COAT: u32 = 5u;
 const SEMANTIC_CLEAR_COAT_ROUGHNESS: u32 = 6u;
 const SEMANTIC_CLEAR_COAT_NORMAL: u32 = 7u;
 const SEMANTIC_FACE_SDF: u32 = 8u;
+const SEMANTIC_MEASURED_BRDF: u32 = 9u;
+const SEMANTIC_ILLUMINATION_MASK: u32 = 10u;
 
 // Squared-length floor for a decoded normal before it collapses to +Z. Mirrors
 // `NORMAL_EPSILON` on the CPU golden and `normalize_or` across the reference.
@@ -89,6 +93,7 @@ struct SampledMaterial {
     occlusion: f32,
     normal_tangent: vec3<f32>,
     has_normal_map: bool,
+    texture_contract_valid: bool,
     offline_normal_variance: f32,
     clearcoat: f32,
     clearcoat_roughness: f32,
@@ -140,6 +145,7 @@ fn sampled_material_defaults(parameters: PrismSurfaceParameters) -> SampledMater
     out.occlusion = parameters.ambient_occlusion;
     out.normal_tangent = vec3<f32>(0.0, 0.0, 1.0);
     out.has_normal_map = false;
+    out.texture_contract_valid = true;
     out.offline_normal_variance = 0.0;
     out.clearcoat = parameters.coat_weight;
     out.clearcoat_roughness = parameters.coat_roughness;
@@ -251,8 +257,22 @@ fn sample_texture_slot(
     @if(!MATERIAL_BINDLESS) {
         if record.virtual_texture_id == 0xfffffffeu
             && material_vt_config.enabled != 0u
-            && record.index < material_vt_config.atlas_layers * material_vt_config.tiles_per_row * material_vt_config.tiles_per_row
+            && material_vt_geometry_is_valid(material_vt_config)
+            && material_vt_slot_is_valid(record.index, material_vt_config)
+            && record.virtual_texture_width > 0u
+            && record.virtual_texture_height > 0u
+            && record.virtual_texture_width <= record.virtual_texture_page_size
+            && record.virtual_texture_height <= record.virtual_texture_page_size
             && record.virtual_texture_page_size == material_vt_config.page_size {
+            let atlas_dimensions = textureDimensions(material_vt_atlas);
+            let atlas_layers = textureNumLayers(material_vt_atlas);
+            let configured_extent = material_vt_config.tile_extent_px
+                * material_vt_config.tiles_per_row;
+            if atlas_dimensions.x != configured_extent
+                || atlas_dimensions.y != configured_extent
+                || atlas_layers < material_vt_config.atlas_layers {
+                return material_default_texture_texel(record.semantic);
+            }
             let source_uv = clamp(
                 uv * vec2<f32>(
                     f32(record.virtual_texture_width) / f32(record.virtual_texture_page_size),
@@ -446,12 +466,34 @@ fn material_offline_normal_variance(semantic: u32, texel: vec4<f32>) -> f32 {
     return 0.0;
 }
 
+fn fail_closed_sampled_material(sampled: SampledMaterial) -> SampledMaterial {
+    var out = sampled;
+    out.base_color = vec3<f32>(0.0);
+    out.base_alpha = 0.0;
+    out.emissive = vec3<f32>(0.0);
+    out.metallic = 0.0;
+    out.perceptual_roughness = 1.0;
+    out.occlusion = 0.0;
+    out.normal_tangent = vec3<f32>(0.0, 0.0, 1.0);
+    out.has_normal_map = false;
+    out.offline_normal_variance = 0.0;
+    out.clearcoat = 0.0;
+    out.clearcoat_roughness = 1.0;
+    out.clearcoat_normal_tangent = vec3<f32>(0.0, 0.0, 1.0);
+    out.has_clearcoat_normal = false;
+    out.texture_contract_valid = false;
+    return out;
+}
+
 fn fold_material_texel(
     record: PrismMaterialTexture,
     texel: vec4<f32>,
     normal_scale: f32,
     sampled: SampledMaterial,
 ) -> SampledMaterial {
+    if !sampled.texture_contract_valid {
+        return sampled;
+    }
     var out = sampled;
     let rgb = texel.xyz;
     switch record.semantic {
@@ -486,7 +528,10 @@ fn fold_material_texel(
             out.clearcoat_normal_tangent = decode_tangent_normal(rgb, normal_scale);
             out.has_clearcoat_normal = true;
         }
-        default: {}
+        case SEMANTIC_FACE_SDF, SEMANTIC_MEASURED_BRDF, SEMANTIC_ILLUMINATION_MASK: {}
+        default: {
+            return fail_closed_sampled_material(out);
+        }
     }
     return out;
 }

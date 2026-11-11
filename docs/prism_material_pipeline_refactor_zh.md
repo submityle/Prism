@@ -9,7 +9,7 @@
 > 核心命题：**没有全局硬顶，不做运行时塌缩，也不做 per-pixel 预算裁剪。模型开放可扩展，每材质按声明静态特化成它确切需要的瓣集与特征——"界"是每材质编译期事实，不是全局天花板。分层在烘焙期解析成同参数化纹理空间混合（层数天然不限）；距离/性能靠纹理预过滤 + 高光抗锯齿 + 静态置换 + 采样缩放，全程无损、确定、跨平台。**
 > 规范参数化：**运行时 über 以 OpenPBR Surface（ASWF/Adobe/Autodesk 2024）为规范核心，Prism über 是 OpenPBR 的真超集**——`Prism über = OpenPBR Surface（全字段） ∪ { NPR_FACE 私有瓣 } ∪ { 开放词汇表后续瓣 }`。现有 7 瓣只是今天未补齐的实现子集；补齐缺口（thin_film 虹彩、coat/fuzz/subsurface 全字段等）是对开放词汇表的**加法扩充**，不是改架构。超集成立的三条硬约束见 §4.5（纯 OpenPBR 子集合规对拍 / 扩展位段隔离 / 向下投影）。NPR_FACE 作为 OpenPBR 之外的 Prism 私有瓣服务 NPR。
 > 四线正交：**PBR / NPR / 混合 / 自定义不是四条管线，而是同一条 OpenPBR über 上的正交响应模式**，由 `axis.rs` 的 `illumination` 轴 + `render_class` + 可选 `custom_program` 钩子选择；共享同一套参数解包、per-tile 分类与降级。
-> 最后更新：2026-11-11（Native composite 当前状态以本文末尾当前 code-truth 和核验文档 §0.0/§7.23 为准；P2-h 原理化分层 BSDF 核心公式已完成，`reference_pt/openpbr.rs` 已有多瓣响应、混合采样和固定多 bounce CPU golden，adapter 的受限多瓣 CPU parity 切片已通过；剩余是实时 GPU ↔ reference 图像 parity、GPU/backend、真实纹理/材质提取及生产 integrator 组合验收。Surface encode 与 GI evaluator 已有 texture rows/VT 资源接线和 VT sampling 代码，但 GI evaluator 响应仍限 builtin Unlit 子集，不能写成完整材质响应。作者层新增受限 `nodedef` → `author_node` 语义闭环：`plus`/`mult`/`blend` 只作为 `add`/`multiply`/`mix` 的作者语法别名，不产生新的 runtime identity；完整 MaterialX 图、编辑器与 MaterialArtifact 接入仍未完成。）
+> 最后更新：2026-11-11（Native composite 当前状态以本文末尾当前 code-truth 和核验文档 §0.0.3/§7.23/§7.25.2 为准；P2-h 原理化分层 BSDF 核心公式已完成，`reference_pt/openpbr.rs` 已有多瓣响应、路径传输、混合采样和固定多 bounce CPU golden，adapter 的受限多瓣 CPU parity 切片已通过；剩余是实时 GPU ↔ reference 图像 parity、GPU/backend、真实纹理/材质提取及生产 integrator 组合验收。Surface Identity pass 与 composite 已复用同一 physical identity/response buffer；Surface encode 与 GI evaluator 分别持有/消费 texture rows/VT 资源，GI evaluator 另有 bindless direct heap 路径和 registered-response link seam，不能写成完整材质响应。作者层新增受限 `nodedef` → `author_node` 语义闭环：`plus`/`mult`/`blend` 只作为 `add`/`multiply`/`mix` 的作者语法别名，不产生新的 runtime identity；完整 MaterialX 图、编辑器与 MaterialArtifact 接入仍未完成。）
 
 ---
 
@@ -698,7 +698,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 | P3-d | 光谱提升（hero-wavelength，仅 RT twin / 离线参考，不进实时主线，§17.3） | 无（RT-only 分支） | P3 |
 | P3-e | 随机单瓣采样（blue-noise，贵瓣按预算随机选瓣 + TAA，§17.4） | 无（pass uniform） | P3 |
 | 开放瓣 | glint / 测量 BRDF·BTF 瓣作为开放词汇表成员落地（§17.6）。**两者均已全链落地**：glint（槽 17，计数式估计量接进 über 高光）与测量 BRDF（槽 18，纹理行 provider + 图集三线性查表，逐光源进 principled 积分器），见 §13.a | 内部 enum 开放化 | P2+ |
-| P1-h ✅ | **PCM 地基**：ABI v5 加 4 word 扩展摘要 `extensions_{used,required}_{low,high}`；OpenPBR 核心瓣自举为 `KHR` 命名空间项（§5）。**已全部落地**（见 §13.a）：九类 kind 统一进注册表 —— `lobe`(8)/`channel`(4)/`response_mode`(3)/`cache_aux`(1) 为 **header 常驻**（占 64 槽摘要），`provider`(2)/`transfer`(1)/`downgrade`(1)/`composite`(1) 为 **identity-only**（烘焙/pass 期解析，零摘要槽，§5.2）；`author_node` 因 §4 前端尚未落地而无实例（不造假条目，kind 与 hook ABI 已就位）。每类带类型化 hook ABI（`hooks.rs`：stage + 对拍义务）与 §17.2 能量策略；能力协商 + 单源平价门禁 + response-mode↔`Illumination` 平价门禁 | **ABI v5 header 增量**（header 加摘要；v6 仅增加纹理行字段） | P1 |
+| P1-h ✅ | **PCM 地基**：ABI v5 加 4 word 扩展摘要 `extensions_{used,required}_{low,high}`；OpenPBR 核心瓣自举为 `KHR` 命名空间项（§5）。**已全部落地**（见 §13.a）：九类 kind 统一进注册表 —— `lobe`(8)/`channel`(4)/`response_mode`(3)/`cache_aux`(1) 为 **header 常驻**（占 64 槽摘要），`provider`(2)/`transfer`(1)/`downgrade`(1)/`composite`(1) 为 **identity-only**（烘焙/pass 期解析，零摘要槽，§5.2）；`author_node` 已有受限纯数值实例，完整节点词汇和编辑器前端仍未闭合。每类带类型化 hook ABI（`hooks.rs`：stage + 对拍义务）与 §17.2 能量策略；能力协商 + 单源平价门禁 + response-mode↔`Illumination` 平价门禁 | **ABI v5 header 增量**（header 加摘要；v6 仅增加纹理行字段） | P1 |
 | P2-i | 全 kind manifest 格式（§17.5 schema 升级）+ codegen（解包/分类/对拍从 manifest 生成）+ MaterialX nodedef 往返 | 工具链+内部布局 | P2 |
 | P2-j | **response-mode 分类注册化**（步骤 2 类数从定值改为注册驱动固定表，§5.2；唯一动热路径项，单独立项） | 分类 shader/运行时 | P2 |
 | P2+ 扩展点 | transfer / cache-aux / provider / downgrade / composite 五类逐类接入 PCM；glint/测量/水彩描边作各 kind 首样例；thin_film 走完 `EXT_→KHR_` 晋升路径（§5） | 内部（烘焙期单态化） | P2+ |
@@ -719,7 +719,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 
 - **P2-i 第六类 kind 组：identity-only extensions 声明化（provider / transfer / downgrade / composite + author_node 词表）**（§5.2 / §17.5）
   - **动机**：`PRISM_IDENTITY_ONLY` 里的 provider / transfer / downgrade / composite 仍完全是 `builtin.rs` 手写表；它们没有 header slot，但身份、namespace/vendor/stability、caps、view-dependence 与 promotion 语义和其他 kind 完全相同，不能因为“不占槽”就留在 schema 之外。
-  - **做法**：新增 `IdentityKind`（provider / transfer / downgrade / author_node / composite）与统一的 `[[identity_extension]]` record；`validate()` 让这些行与 lobe/channel/response_mode/cache_aux 共用同一个全局 uid 空间；codegen 产出 `IdentityExtensionLayout` + `SURFACE_IDENTITY_EXTENSIONS`（按 kind、id 排序）。`author_node` 的 kind 词汇与 hook ABI 已定义，但实例及语义映射尚未实现，归入 §4 作者链未完成项。
+  - **做法**：新增 `IdentityKind`（provider / transfer / downgrade / author_node / composite）与统一的 `[[identity_extension]]` record；`validate()` 让这些行与 lobe/channel/response_mode/cache_aux 共用同一个全局 uid 空间；codegen 产出 `IdentityExtensionLayout` + `SURFACE_IDENTITY_EXTENSIONS`（按 kind、id 排序）。当前 `author_node` 已有受限纯数值实例及 canonical alias 语义映射；完整节点词汇、任意 shade-time 语义和编辑器接入仍归入 §4 作者链未完成项。
   - **平价门禁**：`pcm_parity` 双向校验 5 条已注册 identity-only 行（2 provider + transfer + downgrade + composite）的 uid、kind、namespace、vendor、stability、requires_caps、view_dependent，并断言它们全部保持 `registry_slot() == None`（identity-only 不得偷占 header 摘要）。
   - **门禁**：`prism_material_schema` **19**；`prism_render_material` 851+2+1+**7**+6；`prism_material_pcm` 28；`prism_render_shading --lib` 3377；`prism_render_scene --lib` 1602；真机 GPU 全包 **72 passed / 2 ignored**。
 
@@ -820,7 +820,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   - **摘要槽的"读写分离"（§5.2 深化）**：64 槽摘要（4 命名空间 × 16）是**唯一**能让 per-material 事实零分发抵达运行时的地址空间，因此稀缺。本轮把"每个 manifest 都必须钉 `registry_slot`"深化为**只给运行时真会读的 kind 发地址**：`Kind::header_resident()` ⇒ `lobe`/`channel`/`response_mode`/`cache_aux` 常驻（前两者进 `closure_mask`/动态段，response-mode 是 §5.2 分类输入，cache-aux 是 §14.3 每材质不同的缓存 aux 集）；`transfer`/`provider`/`downgrade`/`author_node`/`composite` 为 **identity-only**（`ExtensionManifest::new_identity_only`，`registry_slot() == None`）——它们按 §5.2 折进烘焙期置换 key 或 pass 图，per-material 位**没有读者**，给它们发地址正是该红线禁止的"无人读的状态"。identity-only 行仍进同一张表、同样参与晋升与能力协商（协商按 `uid`：`ExtensionRegistry::required_caps_of_uids`），只是不占摘要槽。两个方向都被 `validate()` 机检：常驻 kind 缺槽 ⇒ `MissingSlotForHeaderResidentKind`，非常驻 kind 有槽 ⇒ `SlotForIdentityOnlyKind`。
   - **为什么必须这么做（实测动机）**：内置目录如今 22 行（7 KHR 瓣 + 15 PRISM 行）。若九类一律占槽，Prism 区（16..32，16 槽）会在**加满第一版目录时就剩 0 余量**，下一个本体扩展直接 `PoolExhausted`；identity-only 之后只占 10 槽，留有余量。另修一处分配器隐患：`register()` 现在把区域的 first-fit 游标推过**被钉死的**槽（`cursors` 单调），否则"高槽被 schema 钉死 + 低槽留空"时 first-fit 会把低槽发给新扩展，挤出 schema 已声明的地址。
   - **能量策略（§17.2 落地为 manifest 字段）**：`EnergyPolicy { Coupled, Independent, None }` 进 manifest（§5.4 字段表里的 `energy_policy`），并把 §17.5.2 的**字段级**列轮转为瓣级：`EnergyPolicy::roll_up` = `coupled > independent > none` 的取最大（与字段声明顺序无关，可测）。内置值直接取自 schema 的字段列：`emission` = independent，`npr_face` = none（风格化终结项不带能量参数），其余 7 个物理瓣 = coupled。非 `lobe` 的 kind 声明能量策略会被 `validate()` 拒绝（`EnergyPolicyOutsideLobe`）——预算只是瓣的事。
-  - **目录（余下八类的实际迁入）**：`response_mode` 3 行（`stylized` 22 / `unlit` 23 / `custom` 24，与 `Illumination` 的**非默认**变体一一对应；`Lit` 即规范默认响应，故**不**注册为扩展）；`cache_aux` 1 行（`org.prism.cache_aux.surfel` ↔ 对象空间缓存的 `GpuSurfel` 48 B 契约）；`provider` 2 行（`face_shadow_sdf` ↔ `authoring::FACE_SHADOW_SDF_SEMANTIC` + 烘焙 SDF 图集；`measured_brdf` ↔ `prism_render_shading::measured_brdf`，需 `heavy_sampling`）；`transfer` 1 行（`srgb` ↔ IEC 61966-2-1 OETF/EOTF 对）；`downgrade` 1 行（`sample_budget` ↔ §7.2/P1-e 的 `LobeSampleBudget`）；`composite` 1 行（`outline` ↔ §8.5 步骤 6 描边 pass）。**`author_node` 故意不注册**：MaterialX 受限解析与 runtime adapter 已作为 P2-a 首片落地，但通用节点图求值、bake、nodedef ↔ author_node 实例映射尚未落地；此刻登记任何 `author_node` 都只能是占位——kind 与 hook ABI 已就位，等到真实语义实现后再进同一张表。
+  - **目录（余下八类的实际迁入）**：`response_mode` 3 行（`stylized` 22 / `unlit` 23 / `custom` 24，与 `Illumination` 的**非默认**变体一一对应；`Lit` 即规范默认响应，故**不**注册为扩展）；`cache_aux` 1 行（`org.prism.cache_aux.surfel` ↔ 对象空间缓存的 `GpuSurfel` 48 B 契约）；`provider` 2 行（`face_shadow_sdf` ↔ `authoring::FACE_SHADOW_SDF_SEMANTIC` + 烘焙 SDF 图集；`measured_brdf` ↔ `prism_render_shading::measured_brdf`，需 `heavy_sampling`）；`transfer` 1 行（`srgb` ↔ IEC 61966-2-1 OETF/EOTF 对）；`downgrade` 1 行（`sample_budget` ↔ §7.2/P1-e 的 `LobeSampleBudget`）；`composite` 1 行（`outline` ↔ §8.5 步骤 6 描边 pass）。`author_node` 当前保留受限实例，不把未实现的完整词汇表伪装成注册能力；已有实例通过 canonical identity/数值 evaluator 门禁，未来扩展仍必须先提供真实语义和门禁，不允许用占位条目占用注册身份。
   - **新门禁**：`pcm_parity.rs` 增 `the_registry_response_modes_mirror_the_illumination_axis`（双向：每个非默认 `Illumination` 有登记行、每个登记行有运行期变体，且 `unlit` 的 view-invariance 与 §14.3 一致）并把"目录行数"从魔数改为**逐 kind 计数**；`prism_material_pcm` 增 residency 双向谓词、能量轮转、identity-only 协商、目录覆盖（含 `author_node` 为空的显式断言）与 Prism 区余量等用例。
   - 门禁：`prism_material_pcm` **27**、`prism_render_material` **848 + 2(header ABI) + 1(schema parity) + 6(codegen freshness) + 4(pcm_parity)**。
 
@@ -1209,9 +1209,9 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 | **P2-j** | 完成 | 类表由 PCM 注册表 + lobe 目录派生、穷举平价门禁、WESL `CLASS_*` 平价门禁、类数由表驱动（§5.2、§13.a） | — |
 | **P3-a~d 解耦着色** | **P3-a 局部生产切片已接线；完整 shade-cache 闭环未完成** | `shading/texel_cache/` 有稳定 key、预算、generation/epoch 生命周期、active/staging 与 completion proof；GPU writer、自动可见性 demand→page allocation/chart provenance/writer-job 构建、独立 shade page-table，以及 `shading_resolve` group 8 consumer 已落地。Material-VT source→residency→queue upload→completion publication 与主材质 group 5–8、VT sampling 也已接线。两类 cache 使用不同 ABI/资源；已有独立 GPU slice/readback 不等同于完整默认主帧闭环。 | shade jobs 到 active page publication 的生产生命周期、默认主 render pass 端到端 hardware readback/parity、feedback 驱动粗 mip/失效/时序复用；其后再扩展 P3-b~d 的 GI/SSS/emission 等消费和质量门禁 |
 
-> **审计结论（2026-11-10 增量更正）**：P0-material 的 Native composite 已声明/消费 group 2，读取并解包材质与 execution tables，有限消费 base-weight/metalness/transmission/emission 参数；但仍不是 canonical response，registered kind 2 目前直出 albedo，execution plan 的 blend/mask/domain 语义未消费。生产入口使用带材质 bindings 的 target-aware pass，frame graph 声明四项 buffer reads；内部仍存在不带材质 snapshot 的 target-pass 构造入口，不能把它用于可提交的 lighting graph。allocation byte-generation COW 首片已实现；共同逻辑 registry generation、完整 SurfaceData、canonical resolver 与默认全帧 parity 未完成。P1-a 的 source 捕获、resident upload、completion-gated publication、单层 source 格式/geometry 归一化 portable fallback 与 `shading_resolve` Material-VT 采样已有生产实现；仍缺主帧同代可见性、默认主 render pass 全链图像验收、跨设备图像验收及 direct per-material authored binding。P3-a 的自动 demand→page/job 构建及 group 8 consumer 已接线；仍缺主 render pass 全链 publication/readback/parity，以及 feedback 驱动的粗 mip、失效与时序复用。P3-b 尚未覆盖完整多光源/GI/SSS/emission 生产消费。P2-e 作者侧 custom response WESL、完整作者图词汇、编辑器集成与 response/reference parity 仍未实现；本轮已实现受限 nested graph 外参校验、canonical `author_node` identity、image/procedural VT authoring 到既有 `MaterialArtifact`/MaterialVt/MaterialRecord 契约的接入，并由 authoring 全 targets 49 项门禁守护。该 slice 不等于完整 MaterialX 或默认主帧完成。
+> **历史快照（2026-11-10，当前覆盖见 §18 与核验文档 §0.0.3/§7.23/§7.25.2）**：当时 P0-material 的 Native composite 已声明/消费 group 2，读取并解包材质与 execution tables，有限消费 base-weight/metalness/transmission/emission 参数；但仍不是 canonical response，registered kind 2 走受限路径，execution plan 的 blend/mask/domain 语义未消费。生产入口使用带材质 bindings 的 target-aware pass，frame graph 声明 buffer reads；allocation byte-generation COW 首片已实现；共同逻辑 registry generation、完整 SurfaceData、canonical resolver 与默认全帧 parity 未完成。P1-a 的 source 捕获、resident upload、completion-gated publication、单层 source 格式/geometry 归一化 portable fallback 与 `shading_resolve` Material-VT 采样已有生产实现；仍缺主帧同代可见性、默认主 render pass 全链图像验收、跨设备图像验收及 direct per-material authored binding。P3-a 的自动 demand→page/job 构建及 group 8 consumer 已接线；仍缺主 render pass 全链 publication/readback/parity，以及 feedback 驱动的粗 mip、失效与时序复用。P3-b 尚未覆盖完整多光源/GI/SSS/emission 生产消费。P2-e 作者侧 custom response WESL、完整作者图词汇、编辑器集成与 response/reference parity 仍未闭合；本轮已实现受限 nested graph 外参校验、canonical `author_node` identity、image/procedural VT authoring 到既有 `MaterialArtifact`/MaterialVt/MaterialRecord 契约的接入，并由 authoring 全 targets 49 项门禁守护。该 slice 不等于完整 MaterialX 或默认主帧完成。
 
-> **2026-11-10 最新增量**：Material-VT 已补上 UV0 affine context → stable material row → group 1 binding 13 → resolve/VT demand 的同一变换与 generation fail-closed；UV1 仍因几何 ABI 缺少顶点流而拒绝。GI evaluator 已进入 trace→evaluator→candidate 的生产调度和 frame-graph resource declaration，并支持 texture rows/VT lease 的接口，但默认 bundle 尚未构造 VT lease，shader 仍只覆盖 builtin Unlit 的受限 base-color/emissive 子集。故这些切片关闭的是资源/生命周期/失效 tuple 的局部缺口，不改变 P0-material 未完成、默认主帧 GPU/CPU parity 未完成的裁决。
+> **历史快照（2026-11-10；当前覆盖见 §18 与核验文档 §0.0.3/§7.23/§7.25.2）**：Material-VT 已补上 UV0 affine context → stable material row → group 1 binding 13 → resolve/VT demand 的同一变换与 generation fail-closed；当时 UV1 因几何 ABI 缺少顶点流而拒绝、GI evaluator 处于 trace→evaluator→candidate 的生产调度接线阶段。当前 UV1 已有 location 4 输入/UV0 alias，evaluator 已有 texture rows/VT/bindless 两条资源路径；完整主帧 GPU/CPU parity 与材质响应覆盖仍未完成。
 > snapshot 缺失时不再静默降级，详见核验文档 §7.14。其余路线图项要么已完成（上表），要么按 goal 明确挂在编辑器前端（MaterialX / 节点图 / 作者 WESL）。
 
 ### 13.5 P3 远期：解耦着色 / texel-space shading（性能上限最高，工程最重）
@@ -1765,27 +1765,27 @@ schema **只声明布局 + 元数据 + 契约**（在哪、多宽、谁消费、
 
 ## 18. 2026-11-11 当前 code-truth（不改写历史）
 
-本节只覆盖当前工作树的材质切片状态；历史路线图、旧验证快照和旧结论保留原样。当前 `HEAD` 为 `8a7417b34`，并包含 `481580ed0` 的 Native Unlit 场景 fixture 修正；本节按当前工作树源码记录，不把未重新运行的旧二进制结果当作当前通过证据。
+本节只覆盖当前工作树的材质切片状态；历史路线图、旧验证快照和旧结论保留原样。当前 checkout 的 `HEAD` 为 `1b01aab556faba94a4eb87da2bffa60159a30f86`，并包含工作树中的未提交改动；本节按当前工作树源码记录，不把未重新运行的旧二进制结果当作当前通过证据。
 
 ### 已完成的局部切片
 
-- **Surface encode 材质/VT 消费**：`surface_encode.wesl` 已绑定 material headers、parameters、texture rows 和 VT page table/config/atlas/sampler；通过 `sample_texture_slot`、`fold_material_texel` 生成 UV0、footprint、tangent angle 和 sampled material planes。当前仍只有 UV0，不能扩写为 UV1 已完成。
+- **Surface encode 材质/VT 消费**：`surface_encode.wesl` 已绑定 material headers、parameters、texture rows 和 VT page table/config/atlas/sampler；通过 `sample_texture_slot`、`fold_material_texel` 生成 UV0、footprint、tangent angle 和 sampled material planes。canonical UV1 location 4 已支持真实 `Float32x2` 输入；缺失时由 queue/bin admission 显式 alias UV0，但 UV1 的主帧全链路 parity 仍未验收。
 - **Material-VT frame 资源生命周期**：生产入口已捕获 material/execution snapshot、active VT lease、publication generation，并构造同代 `MaterialFrameSnapshotBundle`；frame graph 已声明 texture rows、VT page table/config/atlas 的 import/read 依赖。
 - **原理化分层核心**：coat/base Fresnel 能量耦合及 coat darkening 已有 CPU/WESL/GPU 局部实现和门禁；这不是“待重写公式”，但不是实时主链全组合 parity。
 - **Path-traced reference 基础**：`reference_pt/openpbr.rs` 已有 base/EON、metallic/specular、transmission、coat、sheen、subsurface、thin-film/iridescence、glint、路径传输及五类 proposal 混合 `sample/pdf`；现有独立 OpenPBR/reference adapter CPU 切片已通过记录的定向测试。该项不是 clearcoat-only 占位。
 
 ### 部分完成
 
-- **Native composite**：group 2 当前只绑定 material headers/parameters；composite 消费 group 1 已写入的 sampled material planes，并执行 SurfaceIdentity admission、builtin Lit/Unlit/有限 NPR/MaskBlend 与 finite fail-closed。texture rows/VT 资源仍由 producer、frame graph 和 GI evaluator 持有/消费，不应写成 composite shader 已直接完成完整 VT resolver。
-- **GI evaluator**：已有生产 `prepare_with_material_evaluator`、trace 后 evaluator dispatch、candidate 依赖、texture rows/VT bind group、shader-side VT sampling/代际校验和完整 page-table allocation 校验；相关 evaluator CPU/契约测试已达到 22 项通过。但 shader 仍拒绝非零 `texture_slot_count`，实际材质响应仍限 builtin Unlit/有限 texture semantic 子集，注册/MaskBlend/Lit 组合和硬件 readback parity 尚未闭合。
-- **MaterialX/authoring**：受限 `author_node`、canonical alias、procedural/VT artifact 和定向 CPU/契约门禁已存在；完整 MaterialX vocabulary、任意图语义、编辑器集成和完整 artifact→response/reference parity 仍未完成。
+- **Native composite**：group 2 当前只绑定 material headers/parameters；composite 消费 group 1 已写入的 sampled material planes，并执行 SurfaceIdentity admission、builtin Lit/Unlit/有限 NPR/MaskBlend 与 finite fail-closed。Surface Identity pass 先写每像素 16-word identity，composite 在同一个 physical `surface_identity_buffer` 上原位覆盖为 16-word response；没有独立 response storage allocation/binding。texture rows/VT 资源仍由 producer、frame graph、Surface encode 和 GI evaluator 持有/消费，不应写成 composite shader 已直接完成完整 VT resolver。
+- **GI evaluator**：已有生产 `prepare_with_material_evaluator`、trace 后 evaluator dispatch、candidate 依赖、texture rows/VT bind group、shader-side VT sampling/代际校验和完整 page-table allocation 校验；相关 evaluator CPU/契约测试已达到 22 项通过。bindless 路径绑定 direct texture heap，non-bindless 路径使用 VT/portable atlas；实际材质响应仍限有限 texture semantic 与受限 builtin/组合，注册/MaskBlend/Lit 组合和硬件 readback parity 尚未闭合。
+- **MaterialX/authoring**：MaterialX typed values、文档级结构、nested graph/interface/output、扩展纯数值 operator、canonical `author_node`、graph-scoped image/normalmap、procedural/VT artifact 和 runtime response seam 已有 CPU/契约门禁；完整 MaterialX vocabulary、任意图 shade-time 语义、编辑器集成和 GPU/full-frame artifact→response/reference parity 仍未完成。
 
 ### 仍未完成
 
 - 默认 Native 主 render pass 的完整 material extraction → Surface encode → response/composite → HDR 输出 GPU readback，以及与 CPU golden 的全帧 parity；`481580ed0` 只修正了 Unlit fixture，不等于主链 parity 已完成。
-- 完整 Lit/registered/MaskBlend/channel/domain 组合、完整 texture semantic/VT resolver、UV1、真实动态通道和真实材质提取/打包。
-- GI evaluator 的真实 GPU dispatch/readback 与 CPU oracle parity，以及其对完整材质响应的覆盖。
-- realtime GPU 与 path-traced reference 的图像级 parity、完整生产多 bounce integrator、GPU/backend/cross-adapter parity；当前受限 parity fixture 仍未获得成功的硬件 readback。
+- 完整 Lit/registered/MaskBlend/channel/domain 组合、完整 texture semantic/VT resolver、真实动态通道和真实材质提取/打包；UV1 的主帧全链路 parity 仍未验收。
+- GI evaluator 的生产 dispatch 调度已接线；仍缺真实硬件 dispatch/readback 与 CPU oracle parity，以及其对完整材质响应的覆盖。
+- realtime GPU 与 path-traced reference 的图像级 parity、真实场景级生产 integrator 组合、GPU/backend/cross-adapter parity；当前受限 parity fixture 仍未获得成功的硬件 readback。P2-h 的独立 reference closure、adapter 和固定多 bounce CPU golden 已实现，不再列为占位。
 - 完整 MaterialX 图/编辑器闭环，以及性能 P50/P95/P99 和多适配器证据。
 
 ### 下一验收命令（当前均未在本节记录为已执行）
@@ -1805,6 +1805,21 @@ PRISM_REQUIRE_GPU=1 WGPU_BACKEND=metal cargo test -p prism_render_app --lib nati
 ```
 
 以上命令是下一步验收入口，不是本次已完成的运行结果。
+
+### 18.2 2026-11-11 当前工作树更正
+
+本节覆盖 §18 的两处过期描述，保留历史记录。当前 Surface encode 已完成 canonical UV1
+输入：真实 `Float32x2` UV1 使用 location 4；没有第二 UV 集时，queue/bin admission 将 UV0
+以显式同 offset alias 到 location 4，shader 的 footprint、VT demand、normal-map taps 统一
+消费该输入。故 UV1 不再列为“尚未实现”；剩余项是 UV1 进入默认主帧后的全帧 GPU/CPU golden
+parity，而不是顶点 ABI 缺失。
+
+当前 GI evaluator 的 texture 资源也已形成两条明确路径：bindless 绑定 direct texture heap
+与 generation table，non-bindless 通过已发布 VT/portable atlas 采样并拒绝 direct heap；
+registered response 已有经校验的生产 link seam，并由 evaluator/composite 的 linked pipeline
+消费。仍未完成的是完整 semantic/lobe/channel/domain 消费、所有 registered response 的生产
+覆盖、完整 OpenPBR 组合、GPU readback/CPU oracle parity，以及实时与 path-traced reference
+的图像级对拍。上述实现范围不能升级为“材质重构完成”。
 
 ---
 
@@ -1840,3 +1855,81 @@ PRISM_REQUIRE_GPU=1 WGPU_BACKEND=metal cargo test -p prism_render_app --lib nati
 - **作者迭代闭环 / 可观测性**：热重载 + über 回退 PSO 的零卡顿迭代、内建确定性调试视图（lobe_mask / 置换 / 缓存 / 波前 / furnace 残差）、验证门禁前移、代价可观测；对所有 PCM kind 一视同仁自动继承，不逐 kind 手写工具（§4.6）。
 - **行为作者三档 / 受限 Rust 瓣**：自定义瓣行为分三档——① 节点图组合已验证原语（覆盖 ~95%，无新金标准）→ ② **受限 Rust 子集**经 `proc-macro` 生成 WESL 孪生（CPU 金标准即原生 Rust，零转译，`golden="auto"`）→ ③ 裸 WESL + 手写金标准逃生口（`golden="none"`）；取代早期"受限 DSL"，不自造语言；② 为受检子集（禁 heap/dyn/递归/无界循环），浮点确定性靠两侧共享 `no_std` 数学库（§5.4.1）。
 - **编辑器渲染插件 / 打包即烘焙**：渲染插件在**编辑器运行时**动态加载 / 热重载，**打包即单态化烘焙**成出货运行时的静态零 dispatch 特化；插件不随出货、只烘产物进包；编辑器预览与出货**同源一份 WESL**（WYSIWYG），双线门禁落在打包口；插件边界即**信任边界**（签名 / wasm 沙箱 + CI 字节对拍）（§5.4.2）。
+
+## 18.1 2026-11-11 reference_pt / MaterialX 侧线增量
+
+本轮只推进 path-traced reference 与 MaterialX authoring，未修改 Native render app：
+
+- reference adapter 新增 canonical `GpuSurfaceParameters` 提取边界，显式映射 OpenPBR
+  参数、`emission_color * emission_luminance`、thin-film 微米→纳米、AO/opacity/
+  alpha-cutoff；measured/NPR/normal-map 缺上下文和 glint 缺 per-hit footprint 均 fail-closed。
+- MaterialX image binding 使用 `graph::node` 作用域，避免不同 nodegraph 的同名 image
+  串材质；受限 authoring 仍只接受已验证的 bounded vocabulary，不把未知节点转成默认值。
+- `/private/tmp/prism-agent-reference-authoring` 的 check、50 个 MaterialX authoring
+  integration tests 和 20 个 reference adapter 定向 tests 已通过。它们是 CPU/契约证据，
+  不是 GPU、全帧或跨 backend parity。
+
+该侧线仍不等于完整完成：MaterialX 全 vocabulary/任意图、artifact→runtime response 的
+全组合图像 conformance、GPU reference renderer、实时 GPU↔reference 逐帧对拍及性能
+P50/P95/P99 仍是硬门禁。
+
+## 18.2 2026-11-11 authoring 完整收口增量
+
+本轮只修改 `pkg/prism_render_material_authoring`、其直接 MaterialX/authoring 测试和本文档，
+没有修改 Native composite/GI shader。当前 authoring 的真实闭环如下：
+
+- `default` 与 `value` 明确区分；两者并存、默认值与连接并存、缺少嵌套 graph 外参均结构化拒绝，
+  不再把缺失输入静默解释成 runtime 默认。
+- 受限 procedural graph 支持 nested graph instance、interface/instance override、graph output、
+  cross-graph connection、subtract lowering 和确定性 cycle 检查；纯数值
+  `dotproduct`/`ifequal`/`switch` 已在 authoring evaluator 闭合，纹理/几何/BSDF 等需要
+  shade-time context 的节点仍在执行边界结构化拒绝，其他 unsupported node 仍 fail-closed。
+- image/normalmap/nested graph 追踪使用 `graph::node` 身份；`MaterialArtifact` 将 image source
+  变成现有 VT row，并将 procedural bake 变成 VT row 前要求显式 semantic、bindless index、
+  generation、sampler publication metadata。随后 `material_record` 写入同一 runtime
+  `MaterialRecord` ABI、基础/可选 closure bits 和 texture rows，revision 溢出也拒绝。
+- authoring 暴露独立 `ReferenceMaterial`，直接构造 architecture `reference_pt::OpenPbrMaterial`；
+  texture、normal-map context、anisotropy、measured、NPR、active glint 等无法由当前 authoring
+  边界表达的字段均返回结构化错误，不会被丢弃。
+- `MaterialArtifact::compile_runtime_response` 同时返回现有 `MaterialRecord` 与经
+  `MaterialGraph::normalize` 校验的 procedural response；无效 graph、revision 溢出、缺少
+  texture/publication metadata 都结构化失败。
+- 当前 crate 的 authoring/MaterialX 全量 target 为 **67 passed / 0 failed**。这是 CPU/契约证据，
+  不是默认主帧 GPU readback、实时↔path-traced 图像 parity 或跨 backend 证据；这些边界仍保留在
+  未完成清单中。
+
+## 18.3 2026-11-11 composite / VT / reference 当前 code-truth
+
+本节是对 §18 的实现归属补充；不改写历史验证记录，也不把未执行的硬件门禁写成完成。
+
+- **Identity 与 response 是一次 handoff**：`Surface Identity` pass 负责读取同代 headers、
+  execution tables、lighting-surface map 和 params，写入每像素 identity tuple；composite 只
+  消费已 admission 的 tuple 与 material payload。frame graph 将 response 逻辑资源 alias 到同一
+  `surface_identity_buffer`，composite 读取 identity 后覆盖写 canonical 16-word response，避免
+  Metal storage binding 上限和重复 allocation。identity admission 已实现，不等于完整 response
+  family/channel/domain 组合已完成。
+- **VT 的 owner 边界**：`MaterialVtProducer` 是 source filtering、demand/residency、atlas/page
+  table upload 和 completion-gated publication 的 owner；`MaterialFrameSnapshotBundle` 将已发布
+  material/execution/VT lease 固定为一代并由 frame graph 保活。Surface encode 负责 raster-time
+  texture/VT sample，GI evaluator 负责次级命中材质消费；composite 不直接绑定 texture rows 或
+  VT page-table/config/atlas。bindless evaluator 的 direct texture heap/generation table 与
+  non-bindless 的 VT/portable atlas 是两条已实现的资源路径，完整 semantic/lobe 组合仍开放。
+- **P2-h reference 的正确表述**：OpenPBR reference closure、adapter field mapping、路径传输和
+  固定多 bounce CPU golden 已实现；严格 GPU 没有可用 adapter 时只证明“未发生 dispatch/readback”，
+  不证明 parity。实时 GPU ↔ reference image parity、真实材质/纹理组合、生产 integrator、跨
+  backend/adapter 和 P50/P95/P99 仍是独立未闭合门禁。
+- **无 TODO/占位的口径**：当前材质 runtime/authoring 生产路径没有以 `TODO`、`todo!`、
+  `unimplemented!` 或静默 placeholder 分支充当实现。测试名和契约说明中的 “placeholder” 字样
+  不应被解读为生产占位；仍未完成项必须按上面的 parity、覆盖范围和性能门禁表达。
+
+## 18.4 2026-11-11 材质重构当前验证增量
+
+- texture semantic 已改为显式路由：surface-fold、dedicated-consumer、unsupported 三类分开；未知
+  semantic 不再静默丢弃，CPU/WESL 均 fail-closed。`prism_render_shading` texture semantic 定向
+  门禁为 **22 passed / 0 failed**。
+- subsurface 的质量预算不再直接缩放已归一化的 wrapped-diffuse，修复白炉能量损失；Low/Medium/
+  High/Ultra 白炉门禁已加入，subsurface 定向门禁为 **15 passed / 0 failed**。
+- 当前回归：`prism_render_material` **892 passed**，authoring/MaterialX **67 passed**，
+  `prism_render_app material::` **175 passed**，`composite_contract_tests` **18 passed**。
+- 严格 Metal GPU 主材质门禁仍失败于当前环境没有 adapter；没有发生 dispatch/readback，不能记为
+  GPU 通过。全帧 Native、GI evaluator 硬件 parity、实时↔reference 图像 parity 和性能门禁仍未闭合。
