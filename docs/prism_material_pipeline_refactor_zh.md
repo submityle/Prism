@@ -1761,11 +1761,11 @@ schema **只声明布局 + 元数据 + 契约**（在哪、多宽、谁消费、
 
 > 优先级：glint **中**（视觉收益明确）；测量瓣 **中低**（场景特定）；MaterialX 往返 **中**（协作价值，依赖 §4.5 投影）。
 
-**演进优先级小结**：**17.5 自描述 schema** 已深化为 PCM 单一声明源与全链路 codegen；**17.2 原理化分层**及 **17.1 运行时动态通道**均已有实现切片，不再是待启动项。当前着色系统的主阻塞是 Native 默认 composite 消费 canonical material response（见核验文档 §7.13）；P2-h 剩余的 reference parity 与其他扩展按各自图像/性能门禁推进。17.6 glint、17.3 光谱 RT、17.4 随机采样仍是后续演进方向。
+**演进优先级小结**：**17.5 自描述 schema** 已深化为 PCM 单一声明源与全链路 codegen；**17.2 原理化分层**及 **17.1 运行时动态通道**均已有实现切片，不再是待启动项。当前着色系统的主阻塞是 Native 默认 composite 的真实主帧 GPU/CPU golden parity 与完整组合验收；P2-h 剩余的 reference parity 与其他扩展按各自图像/性能门禁推进。17.6 glint、17.3 光谱 RT、17.4 随机采样仍是后续演进方向。
 
 ## 18. 2026-11-11 当前 code-truth（不改写历史）
 
-本节只覆盖当前工作树的材质切片状态；历史路线图、旧验证快照和旧结论保留原样。当前 checkout 的 `HEAD` 为 `3f159abaf4894329579bf413462a2f7c03d6e421`，并包含工作树中的未提交改动；本节按当前工作树源码记录，不把未重新运行的旧二进制结果当作当前通过证据。
+本节只覆盖当前工作树的材质切片状态；历史路线图、旧验证快照和旧结论保留原样。当前 checkout 的 `HEAD` 为 `87bc25f8b65aadf3cef9dc6ade4a955d53b531fd`，并包含工作树中的未提交改动；本节按当前工作树源码记录，不把未重新运行的旧二进制结果当作当前通过证据。
 
 ### 已完成的局部切片
 
@@ -1773,10 +1773,11 @@ schema **只声明布局 + 元数据 + 契约**（在哪、多宽、谁消费、
 - **Material-VT frame 资源生命周期**：生产入口已捕获 material/execution snapshot、active VT lease、publication generation，并构造同代 `MaterialFrameSnapshotBundle`；frame graph 已声明 texture rows、VT page table/config/atlas 的 import/read 依赖。
 - **原理化分层核心**：coat/base Fresnel 能量耦合及 coat darkening 已有 CPU/WESL/GPU 局部实现和门禁；这不是“待重写公式”，但不是实时主链全组合 parity。
 - **Path-traced reference 基础**：`reference_pt/openpbr.rs` 已有 base/EON、metallic/specular、transmission、coat、sheen、subsurface、thin-film/iridescence、glint、路径传输及五类 proposal 混合 `sample/pdf`；现有独立 OpenPBR/reference adapter CPU 切片已通过记录的定向测试。该项不是 clearcoat-only 占位。
+- **当前 CPU/source 复验**：composite contract **19/19**、reference adapter **22/22**、texture semantic/fold **22/22** 通过；这些是 CPU/source 门禁，不等于真实 GPU 主帧 readback 或 realtime↔reference image parity。
 
 ### 部分完成
 
-- **Native composite**：group 2 当前只绑定 material headers/parameters；composite 消费 group 1 已写入的 sampled material planes，并执行 SurfaceIdentity admission、builtin Lit/Unlit/有限 NPR/MaskBlend 与 finite fail-closed。Surface Identity pass 先写每像素 16-word identity，composite 在同一个 physical `surface_identity_buffer` 上原位覆盖为 16-word response；没有独立 response storage allocation/binding。texture rows/VT 资源仍由 producer、frame graph、Surface encode 和 GI evaluator 持有/消费，不应写成 composite shader 已直接完成完整 VT resolver。
+- **Native composite**：group 2 已绑定同代 material headers/parameters、texture rows、VT page/config/atlas/sampler；bindless 设备再绑定 direct texture/sampler arrays 与 generation table。composite 执行 SurfaceIdentity admission、builtin Lit/Unlit/有限 NPR/MaskBlend 与 finite fail-closed，并在 shade time 重新 fold 完整 `SampledMaterial`，而不是只消费 compact sampled planes。Surface Identity pass 先写每像素 16-word identity，composite 在同一个 physical `surface_identity_buffer` 上原位覆盖为 16-word response；没有独立 response storage allocation/binding。该接线已通过 CPU/source contract，但默认主帧真实 GPU readback 与全组合 parity 仍未完成。
 - **GI evaluator**：已有生产 `prepare_with_material_evaluator`、trace 后 evaluator dispatch、candidate 依赖、texture rows/VT bind group、shader-side VT sampling/代际校验和完整 page-table allocation 校验；相关 evaluator CPU/契约测试已达到 22 项通过。bindless 路径绑定 direct texture heap，non-bindless 路径使用 VT/portable atlas；实际材质响应仍限有限 texture semantic 与受限 builtin/组合，注册/MaskBlend/Lit 组合和硬件 readback parity 尚未闭合。
 - **MaterialX/authoring**：MaterialX typed values、文档级结构、nested graph/interface/output、扩展纯数值 operator、canonical `author_node`、graph-scoped image/normalmap、procedural/VT artifact 和 runtime response seam 已有 CPU/契约门禁；完整 MaterialX vocabulary、任意图 shade-time 语义、编辑器集成和 GPU/full-frame artifact→response/reference parity 仍未完成。
 
@@ -1930,6 +1931,6 @@ P50/P95/P99 仍是硬门禁。
 - subsurface 的质量预算不再直接缩放已归一化的 wrapped-diffuse，修复白炉能量损失；Low/Medium/
   High/Ultra 白炉门禁已加入，subsurface 定向门禁为 **15 passed / 0 failed**。
 - 当前回归：`prism_render_material` **892 passed**，authoring/MaterialX **67 passed**，
-  `prism_render_app material::` **175 passed**，`composite_contract_tests` **18 passed**。
+  `prism_render_app material::` **175 passed**，`composite_contract_tests` **19 passed**。
 - 严格 Metal GPU 主材质门禁仍失败于当前环境没有 adapter；没有发生 dispatch/readback，不能记为
   GPU 通过。全帧 Native、GI evaluator 硬件 parity、实时↔reference 图像 parity 和性能门禁仍未闭合。

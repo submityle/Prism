@@ -1614,7 +1614,7 @@ pub struct LightingTraceGpu {
     retired_bind_groups: Vec<rhi::BindGroupId>,
     candidate_bind_group: Option<(rhi::BindGroupId, [rhi::BufferId; 8])>,
     retired_candidate_bind_groups: Vec<rhi::BindGroupId>,
-    material_candidate_bind_group: Option<(rhi::BindGroupId, [rhi::BufferId; 9])>,
+    material_candidate_bind_group: Option<(rhi::BindGroupId, [rhi::BufferId; 8])>,
     retired_material_candidate_bind_groups: Vec<rhi::BindGroupId>,
     evaluator_config: Option<ResidentBuffer>,
     evaluations: Option<ResidentBuffer>,
@@ -1955,11 +1955,11 @@ impl LightingTraceGpu {
         let material_candidate_layout =
             device.create_bind_group_layout(&rhi::BindGroupLayoutDescriptor {
                 label: Some("lighting-gi-material-candidate-build-layout".into()),
-                entries: (0..9)
+                entries: (0..8)
                     .map(|binding| rhi::BindGroupLayoutEntry {
                         binding,
                         visibility: rhi::ShaderStages::COMPUTE,
-                        ty: if binding == 6 {
+                        ty: if binding == 5 {
                             rhi::BindingType::Buffer {
                                 ty: rhi::BufferBindingType::Uniform,
                                 has_dynamic_offset: false,
@@ -1968,7 +1968,7 @@ impl LightingTraceGpu {
                         } else {
                             rhi::BindingType::Buffer {
                                 ty: rhi::BufferBindingType::Storage {
-                                    read_only: binding != 7,
+                                    read_only: binding != 6,
                                 },
                                 has_dynamic_offset: false,
                                 min_binding_size: None,
@@ -2208,24 +2208,28 @@ impl LightingTraceGpu {
                 byte_size(rays.len(), core::mem::size_of::<LightingGiCandidateInput>())?;
             let radiance_bytes = byte_size(scene.triangles.len() / TRIANGLE_WORDS, 16)?;
             let surface_bytes = byte_size(target.surface_count as usize, 80)?;
-            let candidate_binding_sizes = [
+            let mut candidate_binding_sizes = vec![
                 sizes[3],
                 sizes[4],
                 sizes[1],
                 sizes[2],
-                target.radiance_size_bytes,
                 target.surfaces_size_bytes,
                 target.params_size_bytes,
                 target.candidates_size_bytes,
             ];
+            if material_evaluator.is_none() {
+                candidate_binding_sizes.push(target.radiance_size_bytes);
+            }
             if candidate_binding_sizes.iter().any(|size| *size > limit) {
                 return Err(TraceGpuError::CandidateStorageBindingLimit);
             }
             if target.candidates_size_bytes < candidate_bytes
-                || target.radiance_size_bytes < radiance_bytes
                 || target.surfaces_size_bytes < surface_bytes
                 || target.params_size_bytes < 32
             {
+                return Err(TraceGpuError::CandidateBufferTooSmall);
+            }
+            if material_evaluator.is_none() && target.radiance_size_bytes < radiance_bytes {
                 return Err(TraceGpuError::CandidateBufferTooSmall);
             }
             if target.params_size_bytes > caps.limits.max_uniform_buffer_binding_size {
@@ -2614,7 +2618,6 @@ impl LightingTraceGpu {
                     output,
                     triangle_buffer,
                     attribute_buffer,
-                    target.radiance,
                     target.surfaces,
                     target.params,
                     target.candidates,
@@ -2629,7 +2632,6 @@ impl LightingTraceGpu {
                     self.attributes
                         .expect("attribute buffer was ensured")
                         .capacity_bytes,
-                    target.radiance_size_bytes,
                     target.surfaces_size_bytes,
                     target.params_size_bytes,
                     target.candidates_size_bytes,
@@ -2684,10 +2686,14 @@ impl LightingTraceGpu {
                 id: target.candidates,
                 size_bytes: target.candidates_size_bytes,
             }),
-            radiance: candidate_target.map(|target| TraceGraphBuffer {
-                id: target.radiance,
-                size_bytes: target.radiance_size_bytes,
-            }),
+            radiance: material_evaluator
+                .is_none()
+                .then_some(candidate_target)
+                .flatten()
+                .map(|target| TraceGraphBuffer {
+                    id: target.radiance,
+                    size_bytes: target.radiance_size_bytes,
+                }),
             surfaces: candidate_target.map(|target| TraceGraphBuffer {
                 id: target.surfaces,
                 size_bytes: target.surfaces_size_bytes,
@@ -2779,8 +2785,8 @@ impl LightingTraceGpu {
 
     fn create_material_candidate_bind_group(
         &self,
-        buffers: [rhi::BufferId; 9],
-        sizes: [u64; 9],
+        buffers: [rhi::BufferId; 8],
+        sizes: [u64; 8],
     ) -> rhi::BindGroupId {
         self.device.create_bind_group(&rhi::BindGroupDescriptor {
             label: Some("lighting-gi-material-candidate-build-bind-group".into()),
@@ -3482,14 +3488,34 @@ fn remove_wgsl_function(source: &str, name: &str) -> Option<String> {
 }
 
 fn material_candidate_shader_source() -> String {
-    let mut source = CANDIDATE_WGSL.replace(
-        "@group(0) @binding(7) var<storage, read_write> candidates: array<Candidate>;",
-        "@group(0) @binding(7) var<storage, read_write> candidates: array<Candidate>;\n@group(0) @binding(8) var<storage, read> evaluations: array<vec4<f32>>;",
-    );
+    let mut source = CANDIDATE_WGSL
+        .replace(
+            "@group(0) @binding(4) var<storage, read> outgoing: array<vec4<f32>>;\n",
+            "",
+        )
+        .replace(
+            "@group(0) @binding(5) var<storage, read> surfaces: array<Surface>;",
+            "@group(0) @binding(4) var<storage, read> surfaces: array<Surface>;",
+        )
+        .replace(
+            "@group(0) @binding(6) var<uniform> params: Params;",
+            "@group(0) @binding(5) var<uniform> params: Params;",
+        )
+        .replace(
+            "@group(0) @binding(7) var<storage, read_write> candidates: array<Candidate>;",
+            "@group(0) @binding(6) var<storage, read_write> candidates: array<Candidate>;\n@group(0) @binding(7) var<storage, read> evaluations: array<vec4<f32>>;",
+        );
     assert!(
-        source.contains("@group(0) @binding(8) var<storage, read> evaluations"),
+        source.contains("@group(0) @binding(7) var<storage, read> evaluations"),
         "material candidate shader must expose evaluator output"
     );
+    let old = "let tri=hits[hb+5u]; if(tri>=params.flags.w||tri>=arrayLength(&outgoing)||tri>=(arrayLength(&triangles)/12u)){c.visibility_padding.x=-1.0;candidates[base]=c;return;} let tc=tri*12u; let ab=tri*40u;";
+    let replacement = "let tri=hits[hb+5u]; if(tri>=(arrayLength(&triangles)/12u)){c.visibility_padding.x=-1.0;candidates[base]=c;return;} let tc=tri*12u; let ab=tri*40u;";
+    assert!(
+        source.contains(old),
+        "material candidate shader must remove the trace-only radiance bounds check"
+    );
+    source = source.replace(old, replacement);
     let old = "let le=outgoing[tri].xyz; if(!finite3(le)||any(le<vec3<f32>(0.0))){c.visibility_padding.x=-1.0;candidates[base]=c;return;}";
     let replacement = "let evaluation_base=ri*4u; if(evaluation_base+3u>=arrayLength(&evaluations)){c.visibility_padding.x=-1.0;candidates[base]=c;return;} let evaluation_head=evaluations[evaluation_base]; let evaluation_identity_a=evaluations[evaluation_base+1u]; let evaluation_identity_b=evaluations[evaluation_base+2u]; let evaluation_identity_c=evaluations[evaluation_base+3u]; if(bitcast<u32>(evaluation_head.w)!=1u || bitcast<u32>(evaluation_identity_a.x)!=hits[hb+6u] || bitcast<u32>(evaluation_identity_a.y)!=hits[hb+7u] || bitcast<u32>(evaluation_identity_a.z)!=hits[hb+8u] || bitcast<u32>(evaluation_identity_a.w)!=hits[hb+9u] || bitcast<u32>(evaluation_identity_b.x)!=hits[hb+10u] || bitcast<u32>(evaluation_identity_b.y)!=hits[hb+11u] || bitcast<u32>(evaluation_identity_b.z)!=hits[hb+12u] || bitcast<u32>(evaluation_identity_b.w)!=hits[hb+13u] || bitcast<u32>(evaluation_identity_c.x)!=hits[hb+14u] || bitcast<u32>(evaluation_identity_c.y)!=hits[hb+15u] || bitcast<u32>(evaluation_identity_c.z)!=hits[hb+16u] || bitcast<u32>(evaluation_identity_c.w)!=hits[hb+17u]){c.visibility_padding.x=-1.0;candidates[base]=c;return;} let le=evaluation_head.xyz; if(!finite3(le)||any(le<vec3<f32>(0.0))){c.visibility_padding.x=-1.0;candidates[base]=c;return;}";
     assert!(
@@ -3505,6 +3531,10 @@ fn material_candidate_shader_source() -> String {
                 .expect("candidate radiance expression exists")
                 + old.len(),
         replacement,
+    );
+    assert!(
+        !source.contains("outgoing"),
+        "material candidate shader must not retain the trace-only radiance input"
     );
     source
 }
@@ -3890,6 +3920,7 @@ mod tests {
             normal_scale: 0.5,
             clearcoat: 0.6,
             clearcoat_roughness: 0.8,
+            ..MaterialModulationParams::default()
         };
         let mut sampled = sampled_material_defaults(&parameters);
         sampled = fold_material_texel(
@@ -4126,6 +4157,94 @@ mod tests {
                 ),
             ],
         );
+    }
+
+    #[test]
+    fn material_candidate_layout_consumes_evaluator_output_without_trace_radiance() {
+        use rhi::BufferBindingType::{Storage, Uniform};
+        let (device, _) = descriptor_device();
+        let _trace = LightingTraceGpu::new(device.clone());
+        let layouts = device.layouts.lock().unwrap();
+        let layout = layouts
+            .iter()
+            .find(|layout| {
+                layout.label.as_deref() == Some("lighting-gi-material-candidate-build-layout")
+            })
+            .expect("evaluator-aware candidate layout was recorded");
+        let shader = material_candidate_shader_source();
+        assert_layout_bindings(
+            layout,
+            &shader,
+            &[
+                (
+                    rhi::BindingType::Buffer {
+                        ty: Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    "var<storage, read> rays: array<u32>;",
+                ),
+                (
+                    rhi::BindingType::Buffer {
+                        ty: Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    "var<storage, read> hits: array<u32>;",
+                ),
+                (
+                    rhi::BindingType::Buffer {
+                        ty: Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    "var<storage, read> triangles: array<u32>;",
+                ),
+                (
+                    rhi::BindingType::Buffer {
+                        ty: Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    "var<storage, read> attributes: array<u32>;",
+                ),
+                (
+                    rhi::BindingType::Buffer {
+                        ty: Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    "var<storage, read> surfaces: array<Surface>;",
+                ),
+                (
+                    rhi::BindingType::Buffer {
+                        ty: Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: Some(32),
+                    },
+                    "var<uniform> params: Params;",
+                ),
+                (
+                    rhi::BindingType::Buffer {
+                        ty: Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    "var<storage, read_write> candidates: array<Candidate>;",
+                ),
+                (
+                    rhi::BindingType::Buffer {
+                        ty: Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    "var<storage, read> evaluations: array<vec4<f32>>;",
+                ),
+            ],
+        );
+        assert!(shader.contains("let evaluation_head=evaluations[evaluation_base];"));
+        assert!(shader.contains("let le=evaluation_head.xyz;"));
+        assert!(!shader.contains("outgoing"));
     }
 
     #[test]

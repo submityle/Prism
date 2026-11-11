@@ -835,7 +835,7 @@ CARGO_INCREMENTAL=0 cargo test -p prism_render_architecture --lib ray_scene::nat
 该测试只证明 ABI 消费契约与失效 tuple 拒绝；以下“当前代码事实”不被这 3 项架构测试
 覆盖。
 
-#### 当前代码事实（2026-11-10）
+#### 历史代码事实（2026-11-10；当前裁决见 §7.25.2）
 
 - **生产接线已存在**：`systems.rs` 从 `MaterialFrameSnapshotBundle` 构造
   `NativeGiMaterialEvaluatorInput`，并把它传给 `prepare_with_material_evaluator`；该入口
@@ -858,10 +858,10 @@ CARGO_INCREMENTAL=0 cargo test -p prism_render_architecture --lib ray_scene::nat
   evaluator pass 也只声明 hits/attributes/evaluations，`TraceGraphRecorder` 中这些 material
   resource handles 当前仍未填充为 graph imports/read dependencies，因而 snapshot owner、
   尺寸和同代生命周期尚无完整 graph 证据。
-- **旧输入依赖仍在**：evaluator-aware candidate bind group 仍携带 `outgoing_radiance`，
-  candidate shader 仍用该 buffer 的长度做边界检查，并继续用 triangle/attribute buffer 做
-  身份检查；虽然最终 `le` 已改由 evaluator response 提供，但生产 candidate 还不是完全
-  移除 triangle-radiance 资源依赖的最终形态。旧 trace-only preparation/test 入口也仍存在。
+- **历史旧输入依赖**：该快照中的 evaluator-aware candidate bind group 仍携带
+  `outgoing_radiance`；当前工作树已移除 evaluator-aware candidate 的该绑定和长度检查，
+  `le` 只来自 stamped evaluator output。trace-only preparation/test 入口仍保留，作为独立
+  fallback，不应与 evaluator 路径混写。
 - **当前验证结果**：本轮 `cargo check -p prism_render_app --lib --target-dir
   /private/tmp/prism-material-progress-target` 通过；同 target 的
   `cargo test -p prism_render_app --lib lighting_trace_gpu -- --nocapture` 为 **20 passed /
@@ -873,8 +873,8 @@ CARGO_INCREMENTAL=0 cargo test -p prism_render_architecture --lib ray_scene::nat
 ## 7.23 2026-11-11 当前 code-truth（权威覆盖；不改写历史）
 
 本节只覆盖当前工作树的材质切片状态，覆盖前文与当前源码冲突的“当前结论”；§0.x 和
-§7.20–§7.22 的历史运行记录不删除、不改写。当前 `HEAD` 为 `3f159abaf4894329579bf413462a2f7c03d6e421`，并包含
-`481580ed0` 的 Native Unlit 场景 fixture 修正；因此以下按当前工作树源码记录，未运行的
+§7.20–§7.22 的历史运行记录不删除、不改写。当前 `HEAD` 为 `87bc25f8b65aadf3cef9dc6ade4a955d53b531fd`，并包含
+材质 composite/texture/reference 的未提交工作树改动；因此以下按当前工作树源码记录，未运行的
 命令不计为通过。
 
 ### 已完成的局部切片
@@ -1037,16 +1037,20 @@ GPU dispatch/readback 通过必须分开记录。
   alias 到 identity buffer，不能把它描述成两份物理 storage。
 - **Identity pass 与 composite 的 ownership 已拆清**：execution plan/program、material
   headers、lighting-surface mapping 和 lighting params 的 tuple admission 由 Surface Identity
-  pass 负责；composite 重新校验 live header 与逐像素 identity，但不重复绑定 plan/program、
-  texture-row 或 VT 表。该设计是前置 admission + fail-closed handoff，不是放宽材质契约。
+  pass 负责；composite 重新校验 live header 与逐像素 identity，不重复绑定 plan/program，
+  但会绑定同代 material texture rows、VT page/config/atlas/sampler；bindless 变体还绑定 direct
+  texture/sampler arrays 与 generation table。该设计是前置 admission + fail-closed handoff，
+  不是放宽材质契约。
 - **VT producer/evaluator ownership 已接线**：`MaterialVtProducer` 通过
   `MaterialVtMaterialSourceQueries` 管理 source filtering、demand/residency、atlas/page-table
   staging、queue upload 和 completion-gated active publication，并在发布后刷新受影响 material
   rows。`MaterialFrameSnapshotBundle` 捕获同代 material/execution snapshot 与 active VT lease，
   由 frame graph 保留其 owner；Surface encode 消费 texture rows/VT page table/config/atlas，GI
   evaluator 消费同代 texture rows。bindless evaluator 另消费 direct texture heap/generation
-  table，non-bindless evaluator 使用已发布 VT/portable atlas。composite 消费 Surface encode
-  写入的 sampled material planes，不应写成 composite 自己拥有完整 VT resolver。
+  table，non-bindless evaluator 使用已发布 VT/portable atlas。composite 也会在 shade time
+  重新执行同代 texture-row fold，消费完整 `SampledMaterial` 字段；Surface encode 的 sampled
+  planes 仍用于早期 admission、normal/footprint 与 compact GBuffer，不应把这条接线写成已完成
+  默认主帧硬件 parity。
 - **P2-h/path-traced reference 已实现基础 closure，但 parity 未闭合**：
   `reference_pt/openpbr.rs` 已有 OpenPBR 多瓣响应、路径传输、五类 proposal 的混合
   `sample/pdf`；`ReferencePtMaterialAdapter` 已有受限多瓣映射，固定多 bounce CPU golden
@@ -1054,6 +1058,11 @@ GPU dispatch/readback 通过必须分开记录。
   基础 reference BSDF。仍未闭合的是 realtime GPU ↔ reference 逐帧图像 parity、真实纹理/动态
   通道/材质提取组合、生产级多 bounce integrator、GPU/backend/cross-adapter readback，以及
   完整 OpenPBR 组合覆盖。
+- **当前工作树 CPU/source 门禁复验**：`composite_contract_tests` 为 **19 passed / 0 failed**；
+  `reference_pt_adapter` 为 **22 passed / 0 failed**；`texture_sample` 为 **22 passed / 0 failed**。
+  `prism_render_material --lib` 为 **892 passed / 0 failed**。这些结果确认 composite
+  ABI/owner contract、独立 reference adapter、CPU/WESL 纹理语义 fold 和材质 crate 回归已
+  通过；不改变下方“真实 GPU 主帧与图像 parity 未闭合”的裁决。
 - **严格 GPU 口径**：`PRISM_REQUIRE_GPU=1` 测试若没有可用 adapter、设备创建失败，或没有发生
   dispatch/readback，只能记为失败或未验证；不能记为 skip 通过，不能用 Null RHI、源码存在、
   CPU oracle、WESL link 或编译通过替代硬件 parity。当前工作树没有新的成功主材质 GPU
@@ -1064,8 +1073,10 @@ GPU dispatch/readback 通过必须分开记录。
 
 1. 默认 Native 主 render pass 的完整 material extraction → Surface encode → response/composite
    → HDR readback，以及与 CPU golden 的全帧 parity。
-2. 完整 Lit/registered/MaskBlend/channel/domain、texture semantic/VT resolver、真实动态通道
-   和材质提取/打包组合；UV1 输入/alias 已完成，但 UV1 进入默认主帧后的全链路 parity 仍未完成。
+2. 完整 Lit/registered/MaskBlend/channel/domain、完整 texture semantic/VT resolver、真实动态通道
+   和材质提取/打包组合的默认主帧硬件验收；当前 composite/material fold 已接入完整
+   `SampledMaterial` 字段映射，但尚缺全组合 GPU/CPU golden parity。UV1 输入/alias 已完成，
+   但 UV1 进入默认主帧后的全链路 parity 仍未完成。
 3. GI evaluator 的完整材质响应覆盖、真实硬件 dispatch/readback 与 CPU oracle parity；bindless
    与 non-bindless 两条 VT ownership 路径已接线，不等于完整响应验收。
 4. realtime GPU ↔ path-traced reference 图像级 parity、生产 integrator 组合、跨 backend/adapter
@@ -1161,7 +1172,7 @@ P50/P95/P99 通过。`native_performance_evidence.rs` 的 Null/CPU percentiles �
 - 当前回归证据：`prism_render_material` **892 passed / 0 failed**；
   `prism_render_material_authoring --all-targets` **67 passed / 0 failed**；
   `prism_render_app material::` **175 passed / 0 failed**；
-  `composite_contract_tests` **18 passed / 0 failed**。
+  `composite_contract_tests` **19 passed / 0 failed**。
 - 严格 GPU 门禁 `PRISM_REQUIRE_GPU=1 WGPU_BACKEND=metal` 在当前环境因没有可用 adapter 失败，
   没有发生 GPU dispatch/readback。因此默认 Native 全帧、GI evaluator 硬件 parity、实时↔path-traced
   图像 parity、跨 backend/adapter 和 P50/P95/P99 仍只能记为未完成/未验证。

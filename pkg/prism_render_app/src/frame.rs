@@ -487,9 +487,11 @@ impl FrameGraphBuffers {
                     crate::lighting_gpu::CAMERA_VIEW_BYTES,
                     BufferUsages::UNIFORM,
                 ),
-                (pass.directionals, 0, BufferUsages::STORAGE),
-                (pass.punctuals, 0, BufferUsages::STORAGE),
-                (pass.areas, 0, BufferUsages::STORAGE),
+                (
+                    pass.lights,
+                    crate::lighting_gpu::LIGHT_TABLES_BYTES,
+                    BufferUsages::STORAGE,
+                ),
                 (
                     pass.candidates,
                     crate::lighting_gpu::GI_CANDIDATE_BUFFER_BYTES,
@@ -1878,23 +1880,14 @@ fn append_target_graph(
         ),
         lighting.params,
     );
-    let directionals = buffers.import(
+    let lights = buffers.import(
         graph,
-        "prism-lighting-directionals",
-        BufferDesc::new(0, BufferUsages::STORAGE),
-        lighting.directionals,
-    );
-    let punctuals = buffers.import(
-        graph,
-        "prism-lighting-punctuals",
-        BufferDesc::new(0, BufferUsages::STORAGE),
-        lighting.punctuals,
-    );
-    let areas = buffers.import(
-        graph,
-        "prism-lighting-areas",
-        BufferDesc::new(0, BufferUsages::STORAGE),
-        lighting.areas,
+        "prism-lighting-light-tables",
+        BufferDesc::new(
+            crate::lighting_gpu::LIGHT_TABLES_BYTES,
+            BufferUsages::STORAGE,
+        ),
+        lighting.lights,
     );
     let mut candidates = buffers.import(
         graph,
@@ -1917,11 +1910,10 @@ fn append_target_graph(
     let materials = lighting
         .composite_material_buffers()
         .expect("lighting composite requires canonical material buffers");
-    // The composite bind group contains only the payload it actually consumes.
-    // Execution plans/programs are read by surface identity; VT rows, page
-    // tables, config, and atlas are read by the material evaluator when that
-    // pass is admitted. Keeping those resources out of this pass prevents
-    // stale graph imports from extending their lifetime or dependency chain.
+    // The composite bind group consumes the complete canonical material
+    // snapshot, including texture rows and the VT lease used by the shared
+    // material sampler. Keep every bound resource in the graph so a replaced
+    // publication cannot race the composite dispatch.
     let material_bindings = [
         (
             "prism-material-headers",
@@ -1933,6 +1925,11 @@ fn append_target_graph(
             materials.parameters.expect("validated material parameters"),
             materials.parameters_size_bytes,
         ),
+        (
+            "prism-material-texture-rows",
+            materials.texture_rows.expect("validated material texture rows"),
+            materials.texture_rows_size_bytes,
+        ),
     ];
     let material_reads = material_bindings.map(|(name, buffer, size)| {
         buffers.import(
@@ -1942,27 +1939,57 @@ fn append_target_graph(
             buffer,
         )
     });
-    let [material_headers, material_parameters] = material_reads;
+    let [material_headers, material_parameters, material_texture_rows] = material_reads;
+    let material_vt_page_table = lighting
+        .composite_material_resources()
+        .map(|resources| {
+            buffers.import(
+                graph,
+                "prism-material-vt-page-table-composite",
+                BufferDesc::new(resources.vt_page_table_size_bytes, BufferUsages::STORAGE),
+                resources.vt_page_table,
+            )
+        });
+    let material_vt_config = lighting
+        .composite_material_resources()
+        .map(|resources| {
+            buffers.import(
+                graph,
+                "prism-material-vt-config-composite",
+                BufferDesc::new(resources.vt_config_size_bytes, BufferUsages::STORAGE),
+                resources.vt_config,
+            )
+        });
+    let material_vt_atlas = lighting
+        .composite_material_resources()
+        .and_then(|resources| {
+            external_texture_handles
+                .iter()
+                .find_map(|(view, handle)| (*view == resources.vt_atlas_view).then_some(*handle))
+        });
     if let (Some(trace), Some(hits), Some((trace_triangles, trace_attributes, trace_rays)), true) =
         (trace, trace_hits, trace_inputs, lighting.run_gi)
         && let (
             Some(candidate_output),
-            Some(radiance),
             Some(candidate_surfaces),
             Some(candidate_params),
         ) = (
             trace.candidates,
-            trace.radiance,
             trace.surfaces,
             trace.params,
         )
     {
-        let radiance = buffers.import(
-            graph,
-            "prism-lighting-trace-radiance",
-            BufferDesc::new(radiance.size_bytes, BufferUsages::STORAGE),
-            radiance.id,
-        );
+        let radiance = trace.radiance.map(|radiance| {
+            buffers.import(
+                graph,
+                "prism-lighting-trace-radiance",
+                BufferDesc::new(radiance.size_bytes, BufferUsages::STORAGE),
+                radiance.id,
+            )
+        });
+        if trace.material_evaluations.is_none() && radiance.is_none() {
+            panic!("trace-only GI candidate pass requires outgoing radiance");
+        }
         assert_eq!(candidate_output.id, lighting.candidates);
         assert_eq!(candidate_surfaces.id, lighting.surfaces);
         assert_eq!(candidate_params.id, lighting.params);
@@ -1981,7 +2008,9 @@ fn append_target_graph(
                     let _hits = builder.read_storage_buffer(hits);
                     let _triangles = builder.read_storage_buffer(trace_triangles);
                     let _attributes = builder.read_storage_buffer(trace_attributes);
-                    let _radiance = builder.read_storage_buffer(radiance);
+                    if let Some(radiance) = radiance {
+                        let _radiance = builder.read_storage_buffer(radiance);
+                    }
                     let _surfaces = builder.read_storage_buffer(surfaces);
                     let _params = builder.read_uniform(params);
                     if let Some(evaluations) = trace_material_evaluations {
@@ -2059,11 +2088,19 @@ fn append_target_graph(
             let _gi = builder.read_storage_buffer(gi_output);
             let _params = builder.read_uniform(params);
             let _camera_view = builder.read_uniform(camera_view);
-            let _directionals = builder.read_storage_buffer(directionals);
-            let _punctuals = builder.read_storage_buffer(punctuals);
-            let _areas = builder.read_storage_buffer(areas);
+            let _lights = builder.read_storage_buffer(lights);
             let _headers = builder.read_storage_buffer(material_headers);
             let _parameters = builder.read_storage_buffer(material_parameters);
+            let _texture_rows = builder.read_storage_buffer(material_texture_rows);
+            if let Some(page_table) = material_vt_page_table {
+                let _page_table = builder.read_storage_buffer(page_table);
+            }
+            if let Some(config) = material_vt_config {
+                let _config = builder.read_storage_buffer(config);
+            }
+            if let Some(atlas) = material_vt_atlas {
+                let _atlas = builder.read_texture(atlas);
+            }
             response_output = builder.write_storage_buffer(response_output);
             color = builder.write_storage_texture(color);
             move |context| {
@@ -2636,8 +2673,8 @@ mod tests {
             );
             // Keep the concrete format accounting beside the ABI assertion:
             // WebGPU charges sRGB8 RGBA 8 attachment bytes, not its 4 storage
-            // bytes. The geometry recipe costs 28, material costs 32, and HDR
-            // costs 8 bytes/sample.
+            // bytes. The geometry recipe costs 28, the packed material recipe
+            // costs the explicit 32-byte budget, and HDR costs 8 bytes/sample.
             let bytes: u32 = raster
                 .colors
                 .iter()
@@ -2653,6 +2690,13 @@ mod tests {
                 })
                 .sum();
             assert!(bytes <= 32);
+            if resources.as_slice() == material.as_slice() {
+                assert_eq!(
+                    bytes,
+                    crate::forward_lit::SURFACE_MATERIAL_BYTES_PER_SAMPLE,
+                    "material GBuffer ABI must stay at its packed 32-byte budget"
+                );
+            }
             assert!(raster.colors.iter().all(|a| a.store == StoreOp::Store));
             if raster
                 .colors

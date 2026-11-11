@@ -27,6 +27,7 @@ use crate::lighting::{
     LightingPunctualInput, LightingSurfaceInput, NativeStylizedParams,
 };
 use crate::lighting_trace_gpu::TracePreparationError;
+use crate::material::DEFAULT_TEXTURE_HEAP_CAPACITY as MATERIAL_TEXTURE_HEAP_CAPACITY;
 use crate::target::RenderTarget;
 
 impl GpuTablePayload for LightingDirectionalInput {
@@ -88,6 +89,9 @@ const DIRECTIONAL_BYTES: u64 =
     (MAX_DIRECTIONALS * core::mem::size_of::<LightingDirectionalInput>()) as u64;
 const PUNCTUAL_BYTES: u64 = (MAX_PUNCTUALS * core::mem::size_of::<LightingPunctualInput>()) as u64;
 const AREA_BYTES: u64 = (MAX_AREAS * core::mem::size_of::<LightingAreaInput>()) as u64;
+const PUNCTUAL_LIGHTS_OFFSET: u64 = DIRECTIONAL_BYTES;
+const AREA_LIGHTS_OFFSET: u64 = DIRECTIONAL_BYTES + PUNCTUAL_BYTES;
+pub(crate) const LIGHT_TABLES_BYTES: u64 = DIRECTIONAL_BYTES + PUNCTUAL_BYTES + AREA_BYTES;
 pub(crate) const CAMERA_VIEW_BYTES: u64 = core::mem::size_of::<GpuCameraView>() as u64;
 pub(crate) const LOBE_SAMPLE_BUDGET_BYTES: u64 = 8 * core::mem::size_of::<u32>() as u64;
 const GI_CANDIDATE_BYTES: u64 = (MAX_LIGHTING_SURFACES
@@ -243,14 +247,16 @@ struct AreaLight {
     shape_kind: vec4<u32>,
 };
 
+struct LightTables {
+    directionals: array<DirectionalLight, 1024>,
+    punctuals: array<PunctualLight, 1024>,
+    areas: array<AreaLight, 1024>,
+};
+
 @group(0) @binding(0)
 var<uniform> params: Params;
 @group(0) @binding(1)
-var<storage, read> directionals: array<DirectionalLight, 1024>;
-@group(0) @binding(2)
-var<storage, read> punctuals: array<PunctualLight, 1024>;
-@group(0) @binding(3)
-var<storage, read> areas: array<AreaLight, 1024>;
+var<storage, read> lights: LightTables;
 
 fn normalize_or(value: vec3<f32>, fallback: vec3<f32>) -> vec3<f32> {
     let length_squared = dot(value, value);
@@ -588,13 +594,30 @@ fn composite_store_response(index: u32, response: CompositeResponseOutput) {
     }
 }
 
-fn composite_unpack_material_c(encoded: u32) -> vec4<f32> {
-    return vec4<f32>(
-        f32(encoded & 0xffu) / 255.0,
-        f32((encoded >> 8u) & 0xffu) / 255.0,
+const COMPOSITE_MATERIAL_C_FLAG_SURFACE_VALID: u32 = 1u;
+const COMPOSITE_MATERIAL_C_FLAG_TEXTURE_CONTRACT_VALID: u32 = 2u;
+const COMPOSITE_MATERIAL_C_FLAG_HAS_NORMAL_MAP: u32 = 4u;
+const COMPOSITE_MATERIAL_C_FLAG_HAS_CLEARCOAT_NORMAL: u32 = 8u;
+
+struct CompositeMaterialC {
+    coat_normal_oct: vec2<f32>,
+    coat_roughness: f32,
+    flags: u32,
+}
+
+fn composite_unpack_material_c(encoded: u32) -> CompositeMaterialC {
+    return CompositeMaterialC(
+        vec2<f32>(
+            f32(encoded & 0xffu) / 255.0,
+            f32((encoded >> 8u) & 0xffu) / 255.0,
+        ),
         f32((encoded >> 16u) & 0xffu) / 255.0,
-        f32((encoded >> 24u) & 0xffu) / 255.0,
+        (encoded >> 24u) & 0xffu,
     );
+}
+
+fn composite_material_c_has_flag(value: CompositeMaterialC, flag: u32) -> bool {
+    return (value.flags & flag) != 0u;
 }
 
 fn composite_decode_oct_normal(encoded: vec2<f32>) -> vec3<f32> {
@@ -836,7 +859,7 @@ fn composite_evaluate_program(
         if (params.flags.x == 1u || params.flags.x == 3u) {
             let directional_count = min(params.counts.y, 1024u);
             for (var index = 0u; index < directional_count; index += 1u) {
-                let light = directionals[index];
+                let light = lights.directionals[index];
                 let sample = composite_make_direct_light(
                     normalize_or(light.direction_to_light, frame.normal),
                     light.illuminance,
@@ -849,7 +872,7 @@ fn composite_evaluate_program(
 
             let punctual_count = min(params.counts.z, 1024u);
             for (var index = 0u; index < punctual_count; index += 1u) {
-                let light = punctuals[index];
+                let light = lights.punctuals[index];
                 let to_light = light.position_range.xyz - world_position;
                 let distance_squared = dot(to_light, to_light);
                 if (finite(distance_squared) && distance_squared > 1.0e-8) {
@@ -868,7 +891,7 @@ fn composite_evaluate_program(
 
             let area_count = min(params.flags.y, 1024u);
             for (var index = 0u; index < area_count; index += 1u) {
-                let light = areas[index];
+                let light = lights.areas[index];
                 let measure = area_measure(light);
                 if (!finite(measure) || measure <= 0.0) { continue; }
                 for (var sample_index = 0u; sample_index < 4u; sample_index += 1u) {
@@ -942,7 +965,7 @@ fn composite_evaluate_program(
     if (params.flags.x == 1u || params.flags.x == 3u) {
         let directional_count = min(params.counts.y, 1024u);
         for (var index = 0u; index < directional_count; index += 1u) {
-            let light = directionals[index];
+            let light = lights.directionals[index];
             let sample = composite_make_direct_light(
                 normalize_or(light.direction_to_light, normal),
                 light.illuminance,
@@ -956,7 +979,7 @@ fn composite_evaluate_program(
 
         let punctual_count = min(params.counts.z, 1024u);
         for (var index = 0u; index < punctual_count; index += 1u) {
-            let light = punctuals[index];
+            let light = lights.punctuals[index];
             let to_light = light.position_range.xyz - world_position;
             let distance_squared = dot(to_light, to_light);
             if (finite(distance_squared) && distance_squared > 1.0e-8) {
@@ -976,7 +999,7 @@ fn composite_evaluate_program(
 
         let area_count = min(params.flags.y, 1024u);
         for (var index = 0u; index < area_count; index += 1u) {
-            let light = areas[index];
+            let light = lights.areas[index];
             let measure = area_measure(light);
             if (!finite(measure) || measure <= 0.0) { continue; }
             for (var sample_index = 0u; sample_index < 4u; sample_index += 1u) {
@@ -1041,16 +1064,22 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     );
     let surface_id = textureLoad(surface_id_gbuffer, pixel, 0).x;
     let identity_index = id.y * extent.x + id.x;
-    composite_store_response(identity_index, composite_response_zero());
     let normal_sample = textureLoad(normal_gbuffer, pixel, 0);
     // Material slot zero is valid, so reject the explicitly cleared coverage
     // plane before consulting the slot.
-    if (normal_sample.a <= 0.0 || surface_id == 0xffffffffu ||
-        identity_index * 16u + 16u > arrayLength(&surface_identity_response)) {
+    if (identity_index * 16u + 16u > arrayLength(&surface_identity_response)) {
+        textureStore(hdr_target, pixel, vec4<f32>(0.0));
+        return;
+    }
+    if (normal_sample.a <= 0.0 || surface_id == 0xffffffffu) {
+        composite_store_response(identity_index, composite_response_zero());
         textureStore(hdr_target, pixel, vec4<f32>(0.0));
         return;
     }
     let identity = composite_load_surface_identity(identity_index);
+    // Surface identity and response share one physical buffer. Load the
+    // producer record before clearing its slot for the response writeback.
+    composite_store_response(identity_index, composite_response_zero());
     if (identity.material_index != surface_id || identity.material_index == 0xffffffffu) {
         textureStore(hdr_target, pixel, vec4<f32>(0.0));
         return;
@@ -1095,27 +1124,87 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         !finite(sampled_material_a.z) || !finite(sampled_material_a.w) ||
         !finite(sampled_material_b.x) || !finite(sampled_material_b.y) ||
         !finite(sampled_material_b.z) || !finite(sampled_material_b.w) ||
-        !finite(sampled_material_c.x) || !finite(sampled_material_c.y) ||
-        !finite(sampled_material_c.z) || !finite(sampled_material_c.w) ||
-        sampled_material_c.w <= 0.0) {
+        !finite(sampled_material_c.coat_normal_oct.x) ||
+        !finite(sampled_material_c.coat_normal_oct.y) ||
+        !finite(sampled_material_c.coat_roughness) ||
+        !composite_material_c_has_flag(
+            sampled_material_c,
+            COMPOSITE_MATERIAL_C_FLAG_SURFACE_VALID,
+        ) ||
+        !composite_material_c_has_flag(
+            sampled_material_c,
+            COMPOSITE_MATERIAL_C_FLAG_TEXTURE_CONTRACT_VALID,
+        )) {
         textureStore(hdr_target, pixel, vec4<f32>(0.0));
         return;
     }
     let normal = normalize_or(normal_input, vec3<f32>(0.0, 1.0, 0.0));
 
-    // surface_encode already folded the active base-color map/portable VT into
-    // this texel. Replace only the authored base color in the canonical sample;
-    // all other OpenPBR parameters still come from the validated material row.
+    // Re-run the canonical texture fold at composite time. The raster pass
+    // stores a compact material GBuffer for early admission and normal
+    // reconstruction, but it cannot carry every OpenPBR texture-modulated
+    // field. Keeping this fold here makes direct/registered responses consume
+    // the same complete material record as the surface encode and GI paths.
+    let sampled_material = composite_sample_material(
+        composite_material_headers[identity.material_index],
+        material.surface,
+        surface_data.xy,
+        surface_data.w,
+    );
+    if (!sampled_material.texture_contract_valid) {
+        textureStore(hdr_target, pixel, vec4<f32>(0.0));
+        return;
+    }
     var surface = composite_surface_sample(material.surface);
+    // The compact producer planes are the authoritative result of the
+    // Surface encode texture fold. Reuse them here while retaining the full
+    // re-fold for fields that do not have a dedicated GBuffer lane.
     surface.base_color = sampled_base_color;
+    surface.base_weight = sampled_material.base_weight;
+    surface.diffuse_roughness = sampled_material.base_diffuse_roughness;
     surface.emissive = sampled_material_a.xyz * material.surface.emission_luminance;
     surface.metallic = sampled_material_a.w;
     surface.perceptual_roughness = sampled_material_b.x;
+    surface.specular_weight = sampled_material.specular_weight;
+    surface.specular_color = sampled_material.specular_color;
+    surface.specular_ior = sampled_material.specular_ior;
+    surface.transmission = sampled_material.transmission_weight;
+    surface.index_of_refraction = sampled_material.index_of_refraction;
+    surface.dispersion = sampled_material.transmission_dispersion_scale;
+    surface.transmission_color = sampled_material.transmission_color;
+    surface.transmission_scatter = sampled_material.transmission_scatter;
+    surface.transmission_scatter_anisotropy = sampled_material.transmission_scatter_anisotropy;
+    surface.transmission_dispersion_abbe_number = sampled_material.transmission_dispersion_abbe_number;
+    surface.coat_darkening = sampled_material.coat_darkening;
+    surface.scatter_anisotropy = sampled_material.subsurface_scatter_anisotropy;
     surface.ambient_occlusion = sampled_material_b.y;
     surface.clearcoat = sampled_material_b.z;
+    surface.clearcoat_roughness = sampled_material_c.coat_roughness;
+    surface.coat_ior = sampled_material.coat_ior;
+    surface.coat_color = sampled_material.coat_color;
+    surface.coat_roughness_anisotropy = sampled_material.coat_roughness_anisotropy;
+    surface.sheen = sampled_material.fuzz_weight;
+    surface.fuzz_roughness = sampled_material.fuzz_roughness;
+    surface.fuzz_color = sampled_material.fuzz_color;
+    surface.subsurface = sampled_material.subsurface_weight;
+    surface.subsurface_color = sampled_material.subsurface_color;
+    surface.subsurface_radius = sampled_material.subsurface_radius;
+    surface.subsurface_radius_scale = sampled_material.subsurface_radius_scale;
+    surface.thickness = sampled_material.thickness;
+    surface.anisotropy = sampled_material.anisotropy;
+    surface.anisotropy_rotation = sampled_material.anisotropy_rotation;
     surface.normal_variance = sampled_material_b.w;
-    surface.clearcoat_roughness = sampled_material_c.z;
-    surface.coat_normal = composite_decode_oct_normal(sampled_material_c.xy);
+    surface.iridescence = sampled_material.thin_film_weight;
+    surface.iridescence_thickness_nm = sampled_material.thin_film_thickness * 1000.0;
+    surface.iridescence_ior = sampled_material.thin_film_ior;
+    surface.coat_normal = select(
+        vec3<f32>(0.0),
+        composite_decode_oct_normal(sampled_material_c.coat_normal_oct),
+        composite_material_c_has_flag(
+            sampled_material_c,
+            COMPOSITE_MATERIAL_C_FLAG_HAS_CLEARCOAT_NORMAL,
+        ),
+    );
     let tangent_reference = composite_basis_tangent(normal);
     let tangent_bitangent = composite_basis_bitangent(normal, tangent_reference);
     let tangent_angle = surface_data.z;
@@ -1206,8 +1295,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 /// Builds the complete composite module for one execution-table generation.
 /// The registered link is finite and already validated by the material crate;
 /// it is inserted into the same fixed resource ABI as builtin responses.
-fn build_composite_shader_source(response_link: Option<&str>) -> String {
-    let generated_material = include_str!(concat!(env!("OUT_DIR"), "/composite_material.wgsl"));
+fn build_composite_shader_source(response_link: Option<&str>, bindless: bool) -> String {
+    let generated_material = if bindless {
+        include_str!(concat!(env!("OUT_DIR"), "/composite_material_bindless.wgsl"))
+    } else {
+        include_str!(concat!(env!("OUT_DIR"), "/composite_material.wgsl"))
+    };
     match response_link {
         Some(response_link) if !response_link.trim().is_empty() => format!(
             "{DIRECT_LIGHTING_COMMON_WGSL}\n{generated_material}\n{response_link}\n{}\n{}\n{LIGHTING_COMPOSITE_WGSL}",
@@ -1243,8 +1336,8 @@ fn composite_evaluate_native_registered(
 /// Appends the validated registered-response dispatch to the fixed Native
 /// composite. Registered bodies are function-scoped and receive only the
 /// canonical response ABI plus the Native read-only lighting helpers below.
-fn native_registered_shader_source(response_link: &str) -> String {
-    build_composite_shader_source(Some(response_link))
+fn native_registered_shader_source(response_link: &str, bindless: bool) -> String {
+    build_composite_shader_source(Some(response_link), bindless)
 }
 
 const NATIVE_REGISTERED_HELPERS_WGSL: &str = r#"
@@ -1256,7 +1349,7 @@ fn registered_light(lighting: RegisteredLightingContext, index: u32) -> Register
     var invalid: RegisteredLight;
     if (index >= registered_light_count(lighting)) { return invalid; }
     if (index < lighting.directional_count) {
-        let light = directionals[index];
+        let light = lights.directionals[index];
         return RegisteredLight(
             normalize_or(light.direction_to_light, lighting.frame.normal),
             light.illuminance,
@@ -1265,7 +1358,7 @@ fn registered_light(lighting: RegisteredLightingContext, index: u32) -> Register
         );
     }
     let punctual_index = index - lighting.directional_count;
-    let light = punctuals[punctual_index];
+    let light = lights.punctuals[punctual_index];
     let to_light = light.position_range.xyz - lighting.world_position;
     let distance_squared = dot(to_light, to_light);
     if (!finite(distance_squared) || distance_squared <= 1.0e-8) { return invalid; }
@@ -1281,7 +1374,7 @@ fn registered_light(lighting: RegisteredLightingContext, index: u32) -> Register
 fn registered_area(lighting: RegisteredLightingContext, index: u32) -> RegisteredArea {
     var invalid: RegisteredArea;
     if (index >= lighting.area_count) { return invalid; }
-    let light = areas[index];
+    let light = lights.areas[index];
     return RegisteredArea(
         light.origin.x, light.origin.y, light.origin.z, light.shape.w,
         light.radiance.x, light.radiance.y, light.radiance.z, light.radiance.w,
@@ -1464,8 +1557,11 @@ fn composite_evaluate_native_registered(
 /// carrying UV, footprint, and tangent orientation. Two more `Rgba16Float`
 /// planes carry sampled emissive/metallic and roughness/occlusion/coat/
 /// normal-variance channels; C is a packed `R32Uint` word carrying
-/// oct-encoded coat normal, coat roughness, and an opaque validity marker as
-/// four UNORM8 lanes.
+/// oct-encoded coat normal, coat roughness, and four response flags. The
+/// normal plane carries the sampled base normal in world space, while albedo
+/// carries sampled base RGB plus linear alpha; together these planes carry
+/// every field in the current `SampledMaterial` contract without adding an
+/// MRT attachment.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct LightingCompositeTarget {
     pub position_x_view: TextureViewId,
@@ -1589,9 +1685,7 @@ fn composite_static_layout_descriptor() -> BindGroupLayoutDescriptor {
         label: Some("lighting-composite-static-layout".into()),
         entries: vec![
             uniform_layout(0),
-            storage_layout(1, DIRECTIONAL_BYTES, true),
-            storage_layout(2, PUNCTUAL_BYTES, true),
-            storage_layout(3, AREA_BYTES, true),
+            storage_layout(1, LIGHT_TABLES_BYTES, true),
             storage_layout(4, OUTPUT_BYTES, true),
             camera_view_layout(5),
             lobe_budget_layout(6),
@@ -1711,6 +1805,7 @@ pub(crate) enum LightingCompositeMaterialBindingError {
     MissingTextureRows,
     MissingExecutionPlans,
     MissingExecutionPrograms,
+    MissingTextureOwner,
     InvalidResourceId {
         binding: u32,
     },
@@ -1736,6 +1831,7 @@ impl core::fmt::Display for LightingCompositeMaterialBindingError {
             Self::MissingExecutionPrograms => {
                 "canonical material execution program buffer is missing"
             }
+            Self::MissingTextureOwner => "bindless composite is missing its texture owner",
             Self::InvalidResourceId { .. } => "canonical material resource id is invalid",
             Self::InvalidBindingSize { .. } => "canonical material storage binding size is invalid",
             Self::MissingGenerationProof => "canonical material generation proof is missing",
@@ -1747,12 +1843,59 @@ impl core::fmt::Display for LightingCompositeMaterialBindingError {
 impl std::error::Error for LightingCompositeMaterialBindingError {}
 
 fn composite_material_layout_descriptor() -> BindGroupLayoutDescriptor {
+    composite_material_layout_descriptor_for(false)
+}
+
+fn composite_material_layout_descriptor_for(bindless: bool) -> BindGroupLayoutDescriptor {
+    let mut entries = vec![
+        storage_layout(0, MATERIAL_HEADER_BYTES, true),
+        storage_layout(1, MATERIAL_PARAMETER_WORD_BYTES, true),
+        storage_layout(2, MATERIAL_TEXTURE_ROW_BYTES, true),
+        storage_layout(5, MATERIAL_VT_PAGE_TABLE_BYTES, true),
+        storage_layout(6, MATERIAL_VT_CONFIG_BYTES, true),
+        BindGroupLayoutEntry {
+            binding: 7,
+            visibility: ShaderStages::COMPUTE,
+            ty: BindingType::Texture {
+                sample_type: TextureSampleType::Float,
+                view_dimension: TextureViewDimension::D2Array,
+                multisampled: false,
+            },
+            count: None,
+        },
+        BindGroupLayoutEntry {
+            binding: 8,
+            visibility: ShaderStages::COMPUTE,
+            ty: BindingType::Sampler(SamplerBindingType::Filtering),
+            count: None,
+        },
+    ];
+    if bindless {
+        entries.extend([
+            BindGroupLayoutEntry {
+                binding: 3,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::TextureArray {
+                    sample_type: TextureSampleType::Float,
+                    view_dimension: TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: Some(MATERIAL_TEXTURE_HEAP_CAPACITY),
+            },
+            BindGroupLayoutEntry {
+                binding: 4,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::SamplerArray(SamplerBindingType::Filtering),
+                count: Some(MATERIAL_TEXTURE_HEAP_CAPACITY),
+            },
+            // The generation table stores one u32 per heap slot, not a full
+            // material texture row.
+            storage_layout(9, core::mem::size_of::<u32>() as u64, true),
+        ]);
+    }
     BindGroupLayoutDescriptor {
         label: Some("lighting-composite-material-layout".into()),
-        entries: vec![
-            storage_layout(0, MATERIAL_HEADER_BYTES, true),
-            storage_layout(1, MATERIAL_PARAMETER_WORD_BYTES, true),
-        ],
+        entries,
     }
 }
 
@@ -1771,8 +1914,7 @@ fn validate_composite_material_resources(
             return Err(LightingCompositeMaterialBindingError::InvalidResourceId { binding });
         }
     }
-    if resources.device_generation == 0
-        || resources.publication_generation == 0
+    if resources.publication_generation == 0
         || resources.material_version == 0
         || resources.execution_version == 0
         || resources.material_epoch == 0
@@ -2163,7 +2305,7 @@ mod composite_contract_tests {
                 .iter()
                 .map(|entry| entry.binding)
                 .collect::<Vec<_>>(),
-            vec![0, 1, 2, 3, 4, 5, 6]
+            vec![0, 1, 4, 5, 6]
         );
         assert!(static_layout
             .entries
@@ -2235,28 +2377,51 @@ mod composite_contract_tests {
         let layout = composite_material_layout_descriptor();
         assert_eq!(COMPOSITE_MATERIAL_GROUP, 2);
         assert_eq!(
-            layout
-                .entries
-                .iter()
-                .map(|entry| entry.binding)
-                .collect::<Vec<_>>(),
-            vec![0, 1]
+            layout.entries.iter().map(|entry| entry.binding).collect::<Vec<_>>(),
+            vec![0, 1, 2, 5, 6, 7, 8]
         );
         assert!(layout.entries.iter().all(|entry| {
-            entry.validate().is_ok()
-                && entry.visibility == ShaderStages::COMPUTE
-                && entry.count.is_none()
-                && entry.ty
-                    == BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: Some(match entry.binding {
-                            0 => MATERIAL_HEADER_BYTES,
-                            1 => MATERIAL_PARAMETER_WORD_BYTES,
-                            _ => unreachable!("material binding is outside the contract"),
-                        }),
-                    }
+            entry.validate().is_ok() && entry.visibility == ShaderStages::COMPUTE
         }));
+        for (binding, minimum) in [
+            (0, MATERIAL_HEADER_BYTES),
+            (1, MATERIAL_PARAMETER_WORD_BYTES),
+            (2, MATERIAL_TEXTURE_ROW_BYTES),
+            (5, MATERIAL_VT_PAGE_TABLE_BYTES),
+            (6, MATERIAL_VT_CONFIG_BYTES),
+        ] {
+            let entry = layout.entries.iter().find(|entry| entry.binding == binding).unwrap();
+            assert_eq!(
+                entry.ty,
+                BindingType::Buffer {
+                    ty: BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: Some(minimum),
+                }
+            );
+        }
+        assert!(matches!(
+            layout.entries.iter().find(|entry| entry.binding == 7).unwrap().ty,
+            BindingType::Texture { .. }
+        ));
+        assert!(matches!(
+            layout.entries.iter().find(|entry| entry.binding == 8).unwrap().ty,
+            BindingType::Sampler(_)
+        ));
+
+        let bindless = composite_material_layout_descriptor_for(true);
+        assert_eq!(
+            bindless.entries.iter().map(|entry| entry.binding).collect::<Vec<_>>(),
+            vec![0, 1, 2, 5, 6, 7, 8, 3, 4, 9]
+        );
+        assert_eq!(
+            bindless.entries.iter().find(|entry| entry.binding == 9).unwrap().ty,
+            BindingType::Buffer {
+                ty: BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: Some(core::mem::size_of::<u32>() as u64),
+            }
+        );
 
         let ids =
             [0, 1, 2, 3].map(|index| prism_render_driver::BufferId::from_parts(index + 10, 7));
@@ -2429,7 +2594,7 @@ mod composite_contract_tests {
 
     #[test]
     fn composite_rejects_non_finite_response_before_publication() {
-        let shader = build_composite_shader_source(None);
+        let shader = build_composite_shader_source(None, false);
         let blend = shader
             .find("response = composite_blend_response(")
             .expect("MaskBlend response blend must remain in the composite shader");
@@ -2494,7 +2659,7 @@ mod composite_contract_tests {
             );
         }
 
-        let shader = build_composite_shader_source(None);
+        let shader = build_composite_shader_source(None, false);
         assert!(shader.contains("raw < 0.0 || raw > 1.0"));
         assert!(shader.contains("return CompositeMaskValue(true, raw);"));
         assert!(!material.contains("composite_material_texture_rows_are_valid"));
@@ -2575,15 +2740,21 @@ mod composite_contract_tests {
             "@group(1) @binding(10)",
             "@group(1) @binding(11)",
             "@group(1) @binding(12)",
+            "let sampled_material = composite_sample_material(",
+            "surface.base_color = sampled_base_color",
             "surface.emissive = sampled_material_a.xyz * material.surface.emission_luminance",
             "surface.metallic = sampled_material_a.w",
             "surface.perceptual_roughness = sampled_material_b.x",
             "surface.ambient_occlusion = sampled_material_b.y",
             "surface.clearcoat = sampled_material_b.z",
-            "surface.normal_variance = sampled_material_b.w",
-            "surface.clearcoat_roughness = sampled_material_c.z",
-            "surface.coat_normal = composite_decode_oct_normal(sampled_material_c.xy)",
-            "sampled_material_c.w <= 0.0",
+            "surface.clearcoat_roughness = sampled_material_c.coat_roughness",
+            "surface.transmission_color = sampled_material.transmission_color",
+            "surface.subsurface_color = sampled_material.subsurface_color",
+            "surface.anisotropy = sampled_material.anisotropy",
+            "surface.iridescence = sampled_material.thin_film_weight",
+            "composite_material_c_has_flag",
+            "COMPOSITE_MATERIAL_C_FLAG_TEXTURE_CONTRACT_VALID",
+            "COMPOSITE_MATERIAL_C_FLAG_HAS_CLEARCOAT_NORMAL",
             "composite_unpack_material_c",
         ] {
             assert!(
@@ -2602,7 +2773,7 @@ mod composite_contract_tests {
 
     #[test]
     fn identity_pass_validates_execution_tables_before_composite() {
-        let shader = build_composite_shader_source(None);
+        let shader = build_composite_shader_source(None, false);
         for declaration in [
             "@group(2) @binding(0)",
             "@group(2) @binding(1)",
@@ -2954,7 +3125,7 @@ mod gbuffer_gpu_contract_tests {
                 0,
                 1,
                 u32::MAX,
-                0,
+                1,
                 0,
                 0,
                 0,
@@ -3704,9 +3875,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         let device = f.runtime.device();
         let queue = f.runtime.queue();
         let target = f.target;
+
         let provider = SurfaceEncodeProvider::new(device);
         let vertex_layout = rhi::VertexBufferLayout {
-            array_stride: 32,
+            array_stride: 40,
             step_mode: rhi::VertexStepMode::Vertex,
             attributes: vec![
                 rhi::VertexAttribute {
@@ -3723,6 +3895,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                     format: rhi::VertexFormat::Float32x2,
                     offset: 24,
                     shader_location: 2,
+                },
+                rhi::VertexAttribute {
+                    format: rhi::VertexFormat::Float32x2,
+                    offset: 32,
+                    shader_location: 4,
                 },
             ],
         };
@@ -3750,7 +3927,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         // All components exceed finite binary16 range; z also has fractional
         // bits. An f16 intermediate or component swizzle cannot pass readback.
         let origin = [131_072.0_f32, -262_144.0, 1_048_576.25];
-        let vertices: Vec<[f32; 8]> = [
+        let vertices: Vec<[f32; 10]> = [
             ([-0.5, -0.5], [0.0, 0.0]),
             ([0.5, -0.5], [1.0, 0.0]),
             ([0.5, 0.5], [1.0, 1.0]),
@@ -3759,7 +3936,20 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             ([-0.5, 0.5], [0.0, 1.0]),
         ]
         .into_iter()
-        .map(|([x, y], [u, v])| [origin[0] + x, origin[1] + y, origin[2], 0.6, 0.8, 0.0, u, v])
+        .map(|([x, y], [u, v])| {
+            [
+                origin[0] + x,
+                origin[1] + y,
+                origin[2],
+                0.6,
+                0.8,
+                0.0,
+                u,
+                v,
+                u,
+                v,
+            ]
+        })
         .collect();
         let vertex = device.create_buffer(&BufferDescriptor::new(
             core::mem::size_of_val(vertices.as_slice()) as u64,
@@ -4105,7 +4295,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                     assert_eq!(packed_c & 0xff, 182, "sampled coat normal x");
                     assert_eq!((packed_c >> 8) & 0xff, 200, "sampled coat normal y");
                     assert_eq!((packed_c >> 16) & 0xff, 0, "sampled clearcoat roughness");
-                    assert_eq!((packed_c >> 24) & 0xff, 255, "sampled material C validity");
+                    // The default surface is valid and its texture contract is
+                    // valid; no authored base/coat normal maps are present.
+                    assert_eq!((packed_c >> 24) & 0xff, 3, "sampled material C validity");
                     assert_eq!(sample[21], 0);
                     assert_eq!(sample[22], 0);
                     assert_eq!(sample[23], 0);
@@ -4699,12 +4891,8 @@ pub struct LightingGpuBundle {
     pub gi_output: prism_render_driver::BufferId,
     /// Uniform surface and light counts.
     pub params: prism_render_driver::BufferId,
-    /// Directional light storage buffer.
-    pub directionals: prism_render_driver::BufferId,
-    /// Point and spot light storage buffer.
-    pub punctuals: prism_render_driver::BufferId,
-    /// Rect, disk, and capsule storage buffer.
-    pub areas: prism_render_driver::BufferId,
+    /// Packed directional, punctual, and area light storage buffer.
+    pub lights: prism_render_driver::BufferId,
     /// GI candidate storage buffer.
     pub candidates: prism_render_driver::BufferId,
     /// Packed, shader-aligned surface sample storage buffer.
@@ -4732,6 +4920,8 @@ pub struct LightingGpuBundle {
     pub surface_identity_layout: BindGroupLayoutId,
     /// Canonical material group-2 layout consumed by the composite resolver.
     pub composite_material_layout: BindGroupLayoutId,
+    /// Whether group 2 includes the direct bindless texture/sampler arrays.
+    pub composite_material_bindless: bool,
     /// Native shading-quality budget consumed by the composite lobe helpers.
     pub lobe_sample_budget: BufferId,
     pub camera_view: BufferId,
@@ -4745,9 +4935,7 @@ pub struct LightingGpuBundle {
 pub(crate) struct LightingGpuPass {
     pub gi_output: prism_render_driver::BufferId,
     pub params: prism_render_driver::BufferId,
-    pub directionals: prism_render_driver::BufferId,
-    pub punctuals: prism_render_driver::BufferId,
-    pub areas: prism_render_driver::BufferId,
+    pub lights: prism_render_driver::BufferId,
     pub candidates: prism_render_driver::BufferId,
     pub surfaces: prism_render_driver::BufferId,
     pub material_lighting_surfaces: prism_render_driver::BufferId,
@@ -4761,6 +4949,7 @@ pub(crate) struct LightingGpuPass {
     pub composite_target_layout: BindGroupLayoutId,
     pub surface_identity_layout: BindGroupLayoutId,
     pub composite_material_layout: BindGroupLayoutId,
+    pub composite_material_bindless: bool,
     pub composite_bind_group: prism_render_driver::BindGroupId,
     pub lobe_sample_budget: BufferId,
     pub camera_view: BufferId,
@@ -4832,18 +5021,60 @@ impl LightingGpuPass {
         device: &D,
         buffers: LightingCompositeMaterialBuffers,
         resources: LightingCompositeMaterialResourceIds,
+        direct_owner: Option<&crate::material::NativeMaterialTextureBindingOwner>,
     ) -> Result<BindGroupId, LightingCompositeMaterialBindingError> {
         validate_composite_material_resources(resources)?;
         validate_composite_material_generation(buffers, resources)?;
         let [(headers, headers_size), (parameters, parameters_size)] =
             validate_composite_material_buffers(buffers)?;
+        let mut entries = vec![
+            buffer_binding(0, headers, headers_size),
+            buffer_binding(1, parameters, parameters_size),
+            buffer_binding(2, resources.texture_rows, resources.texture_rows_size_bytes),
+            buffer_binding(5, resources.vt_page_table, resources.vt_page_table_size_bytes),
+            buffer_binding(6, resources.vt_config, resources.vt_config_size_bytes),
+            BindGroupEntry {
+                binding: 7,
+                resource: BindingResource::TextureView(resources.vt_atlas_view),
+            },
+            BindGroupEntry {
+                binding: 8,
+                resource: BindingResource::Sampler(resources.vt_sampler),
+            },
+        ];
+        if self.composite_material_bindless {
+            let owner = direct_owner.ok_or(LightingCompositeMaterialBindingError::MissingTextureOwner)?;
+            if owner.slot_count() != MATERIAL_TEXTURE_HEAP_CAPACITY {
+                return Err(LightingCompositeMaterialBindingError::GenerationMismatch {
+                    field: "texture_slot_count",
+                });
+            }
+            let generation_buffer = owner
+                .generation_buffer()
+                .ok_or(LightingCompositeMaterialBindingError::MissingTextureOwner)?;
+            entries.extend([
+                BindGroupEntry {
+                    binding: 3,
+                    resource: BindingResource::TextureViewArray(owner.views().to_vec()),
+                },
+                BindGroupEntry {
+                    binding: 4,
+                    resource: BindingResource::SamplerArray(owner.samplers().to_vec()),
+                },
+                BindGroupEntry {
+                    binding: 9,
+                    resource: BindingResource::Buffer {
+                        buffer: generation_buffer,
+                        offset: 0,
+                        size: None,
+                    },
+                },
+            ]);
+        }
         Ok(device.create_bind_group(&BindGroupDescriptor {
             label: Some("lighting-composite-material-bind-group".into()),
             layout: Some(self.composite_material_layout),
-            entries: vec![
-                buffer_binding(0, headers, headers_size),
-                buffer_binding(1, parameters, parameters_size),
-            ],
+            entries,
         }))
     }
 
@@ -4855,9 +5086,15 @@ impl LightingGpuPass {
         device: &D,
         buffers: LightingCompositeMaterialBuffers,
         resources: LightingCompositeMaterialResourceIds,
+        direct_owner: Option<&crate::material::NativeMaterialTextureBindingOwner>,
     ) -> Result<Self, LightingCompositeMaterialBindingError> {
         self.composite_material_bind_group = Some(
-            self.create_composite_material_bind_group_with_resources(device, buffers, resources)?,
+            self.create_composite_material_bind_group_with_resources(
+                device,
+                buffers,
+                resources,
+                direct_owner,
+            )?,
         );
         self.composite_material_buffers = Some(buffers);
         self.composite_material_resources = Some(resources);
@@ -4963,9 +5200,7 @@ impl LightingGpuPass {
             layout: Some(self.composite_static_layout),
             entries: vec![
                 buffer_binding(0, self.params, PARAM_BYTES),
-                buffer_binding(1, self.directionals, DIRECTIONAL_BYTES),
-                buffer_binding(2, self.punctuals, PUNCTUAL_BYTES),
-                buffer_binding(3, self.areas, AREA_BYTES),
+                buffer_binding(1, self.lights, LIGHT_TABLES_BYTES),
                 buffer_binding(4, self.gi_output, OUTPUT_BYTES),
                 buffer_binding(5, camera_view, CAMERA_VIEW_BYTES),
                 buffer_binding(6, self.lobe_sample_budget, LOBE_SAMPLE_BUDGET_BYTES),
@@ -5045,6 +5280,8 @@ where
     light_upload: Mutex<LightUploadCache>,
     composite_targets: Mutex<CompositeTargetCache>,
     composite_material_resources: Mutex<Option<LightingCompositeMaterialResourceIds>>,
+    composite_texture_owner:
+        Mutex<Option<Arc<crate::material::NativeMaterialTextureBindingOwner>>>,
     marker: core::marker::PhantomData<fn() -> I>,
 }
 
@@ -5098,6 +5335,7 @@ struct CompositeTargetCache {
     material_buffers: Option<LightingCompositeMaterialBuffers>,
     material_resources: Option<LightingCompositeMaterialResourceIds>,
     material_group: Option<BindGroupId>,
+    material_owner: Option<Arc<crate::material::NativeMaterialTextureBindingOwner>>,
     registered_pipeline: Option<RegisteredCompositePipeline>,
 }
 
@@ -5193,6 +5431,7 @@ impl CompositeTargetCache {
         self.identity_groups.clear();
         self.material_buffers = None;
         self.material_resources = None;
+        self.material_owner = None;
         self.bundle = None;
         self.device_generation = None;
         self.device = None;
@@ -5219,7 +5458,7 @@ where
     }
 
     cache.retire_registered_pipeline(queue);
-    let shader_source = native_registered_shader_source(response_link);
+    let shader_source = native_registered_shader_source(response_link, pass.composite_material_bindless);
     let shader = device.create_shader_module(&ShaderModuleDescriptor {
         label: Some("lighting-composite-registered-shader".into()),
         source: ShaderSource::Wgsl(Cow::Owned(shader_source)),
@@ -5546,6 +5785,19 @@ where
             .unwrap_or_else(std::sync::PoisonError::into_inner) = resources;
     }
 
+    /// Retains the direct texture-array owner for every in-flight composite
+    /// bind group. Replacing the published material heap cannot destroy an
+    /// array that a submitted frame still references.
+    pub(crate) fn set_composite_texture_owner(
+        &self,
+        owner: Option<Arc<crate::material::NativeMaterialTextureBindingOwner>>,
+    ) {
+        *self
+            .composite_texture_owner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = owner;
+    }
+
     /// Creates the initial resource bundle and registers its replay recipe.
     pub fn new(
         runtime: &mut RenderRuntime<I>,
@@ -5570,6 +5822,7 @@ where
             light_upload: Mutex::new(LightUploadCache::default()),
             composite_targets: Mutex::new(CompositeTargetCache::default()),
             composite_material_resources: Mutex::new(None),
+            composite_texture_owner: Mutex::new(None),
             marker: core::marker::PhantomData,
         })
     }
@@ -5751,17 +6004,25 @@ where
         let area_plan = pending.area.clone();
         write_table_plan(
             runtime.queue(),
-            bundle.directionals,
+            bundle.lights,
             &cache.directionals,
             &directional_plan,
+            0,
         );
         write_table_plan(
             runtime.queue(),
-            bundle.punctuals,
+            bundle.lights,
             &cache.punctuals,
             &punctual_plan,
+            PUNCTUAL_LIGHTS_OFFSET,
         );
-        write_table_plan(runtime.queue(), bundle.areas, &cache.areas, &area_plan);
+        write_table_plan(
+            runtime.queue(),
+            bundle.lights,
+            &cache.areas,
+            &area_plan,
+            AREA_LIGHTS_OFFSET,
+        );
         Ok((directional_count, punctual_count, area_count))
     }
 
@@ -5811,9 +6072,7 @@ where
         Some(LightingGpuPass {
             gi_output: bundle.gi_output,
             params: bundle.params,
-            directionals: bundle.directionals,
-            punctuals: bundle.punctuals,
-            areas: bundle.areas,
+            lights: bundle.lights,
             candidates: bundle.candidates,
             surfaces: bundle.surfaces,
             material_lighting_surfaces: bundle.material_lighting_surfaces,
@@ -5827,6 +6086,7 @@ where
             composite_target_layout: bundle.composite_target_layout,
             surface_identity_layout: bundle.surface_identity_layout,
             composite_material_layout: bundle.composite_material_layout,
+            composite_material_bindless: bundle.composite_material_bindless,
             composite_bind_group: bundle.composite_bind_group,
             lobe_sample_budget: bundle.lobe_sample_budget,
             camera_view: bundle.camera_view,
@@ -6024,6 +6284,11 @@ where
             .composite_targets
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let direct_owner = self
+            .composite_texture_owner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         if let Some(response_link) =
             registered_response_wgsl.filter(|source| !source.trim().is_empty())
         {
@@ -6051,6 +6316,7 @@ where
                     &*device,
                     buffers,
                     composite_material_resources,
+                    direct_owner.as_deref(),
                 )
                 .ok()?;
             if owner_matches {
@@ -6067,6 +6333,7 @@ where
             }
             cache.material_buffers = Some(buffers);
             cache.material_resources = Some(composite_material_resources);
+            cache.material_owner = direct_owner;
             group
         };
         pass.composite_material_bind_group = Some(group);
@@ -7683,6 +7950,7 @@ fn write_table_plan<T, Q>(
     buffer: prism_render_driver::BufferId,
     table: &IncrementalGpuTable<T>,
     plan: &UploadPlan,
+    base_offset: u64,
 ) where
     T: GpuTablePayload,
     Q: RenderQueue,
@@ -7692,7 +7960,7 @@ fn write_table_plan<T, Q>(
             .payload_bytes(range.elements.clone())
             .expect("upload plan range must be within the table payload");
         debug_assert_eq!(bytes.len() as u64, range.byte_len);
-        queue.write_buffer(buffer, range.byte_offset, bytes);
+        queue.write_buffer(buffer, base_offset + range.byte_offset, bytes);
     }
 }
 
@@ -7794,21 +8062,9 @@ fn build_bundle<D: prism_render_driver::RenderDevice, Q: RenderQueue>(
     });
     let lobe_budget = GpuLobeSampleBudget::for_quality(shading_quality);
     queue.write_buffer(lobe_sample_budget, 0, bytes_of(&lobe_budget));
-    let directionals = device.create_buffer(&BufferDescriptor {
-        label: Some("lighting-directional-lights".into()),
-        size: DIRECTIONAL_BYTES,
-        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let punctuals = device.create_buffer(&BufferDescriptor {
-        label: Some("lighting-punctual-lights".into()),
-        size: PUNCTUAL_BYTES,
-        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let areas = device.create_buffer(&BufferDescriptor {
-        label: Some("lighting-area-lights".into()),
-        size: AREA_BYTES,
+    let lights = device.create_buffer(&BufferDescriptor {
+        label: Some("lighting-light-tables".into()),
+        size: LIGHT_TABLES_BYTES,
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -7868,7 +8124,12 @@ fn build_bundle<D: prism_render_driver::RenderDevice, Q: RenderQueue>(
         ],
     });
 
-    let composite_shader_source = build_composite_shader_source(None);
+    let composite_material_bindless = device
+        .capabilities()
+        .features
+        .contains(prism_render_driver::Features::BINDLESS);
+    let composite_shader_source =
+        build_composite_shader_source(None, composite_material_bindless);
     let composite_shader = device.create_shader_module(&ShaderModuleDescriptor {
         label: Some("lighting-composite-shader".into()),
         source: ShaderSource::Wgsl(Cow::Owned(composite_shader_source)),
@@ -7878,7 +8139,9 @@ fn build_bundle<D: prism_render_driver::RenderDevice, Q: RenderQueue>(
     let composite_target_layout =
         device.create_bind_group_layout(&composite_target_layout_descriptor());
     let composite_material_layout =
-        device.create_bind_group_layout(&composite_material_layout_descriptor());
+        device.create_bind_group_layout(&composite_material_layout_descriptor_for(
+            composite_material_bindless,
+        ));
     let composite_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
         label: Some("lighting-composite-pipeline-layout".into()),
         bind_group_layouts: vec![
@@ -7920,9 +8183,7 @@ fn build_bundle<D: prism_render_driver::RenderDevice, Q: RenderQueue>(
         layout: Some(composite_static_layout),
         entries: vec![
             buffer_binding(0, params, PARAM_BYTES),
-            buffer_binding(1, directionals, DIRECTIONAL_BYTES),
-            buffer_binding(2, punctuals, PUNCTUAL_BYTES),
-            buffer_binding(3, areas, AREA_BYTES),
+            buffer_binding(1, lights, LIGHT_TABLES_BYTES),
             buffer_binding(4, gi_output, OUTPUT_BYTES),
             buffer_binding(5, camera_view, CAMERA_VIEW_BYTES),
             buffer_binding(6, lobe_sample_budget, LOBE_SAMPLE_BUDGET_BYTES),
@@ -7932,9 +8193,7 @@ fn build_bundle<D: prism_render_driver::RenderDevice, Q: RenderQueue>(
     LightingGpuBundle {
         gi_output,
         params,
-        directionals,
-        punctuals,
-        areas,
+        lights,
         candidates,
         surfaces,
         material_lighting_surfaces,
@@ -7948,6 +8207,7 @@ fn build_bundle<D: prism_render_driver::RenderDevice, Q: RenderQueue>(
         composite_target_layout,
         surface_identity_layout,
         composite_material_layout,
+        composite_material_bindless,
         lobe_sample_budget,
         camera_view,
         composite_bind_group,
