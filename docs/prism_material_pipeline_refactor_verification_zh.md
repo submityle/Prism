@@ -873,7 +873,7 @@ CARGO_INCREMENTAL=0 cargo test -p prism_render_architecture --lib ray_scene::nat
 ## 7.23 2026-11-11 当前 code-truth（权威覆盖；不改写历史）
 
 本节只覆盖当前工作树的材质切片状态，覆盖前文与当前源码冲突的“当前结论”；§0.x 和
-§7.20–§7.22 的历史运行记录不删除、不改写。当前 `HEAD` 为 `8a7417b34`，并包含
+§7.20–§7.22 的历史运行记录不删除、不改写。当前 `HEAD` 为 `3f159abaf4894329579bf413462a2f7c03d6e421`，并包含
 `481580ed0` 的 Native Unlit 场景 fixture 修正；因此以下按当前工作树源码记录，未运行的
 命令不计为通过。
 
