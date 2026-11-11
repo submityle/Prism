@@ -324,6 +324,38 @@ impl MaterialExecutionTables {
         Self::default()
     }
 
+    /// Returns the validated source bodies required by a runtime Native
+    /// linker. Builtins remain in the fixed shader and are not emitted here.
+    #[must_use]
+    pub fn registered_response_sources(
+        &self,
+    ) -> alloc::vec::Vec<crate::response_source::RegisteredResponseSource> {
+        let mut sources = self
+            .programs
+            .iter()
+            .filter_map(|program| match program.program {
+                ProgramRef::Registered(id) => {
+                    Some(crate::response_source::RegisteredResponseSource::new(
+                        id.0,
+                        program
+                            .compiled
+                            .response_source()
+                            .map_or_else(Vec::new, |source| source.bodies().to_vec()),
+                    ))
+                }
+                ProgramRef::Builtin(_) => None,
+            })
+            .collect::<Vec<_>>();
+        sources.sort_by_key(crate::response_source::RegisteredResponseSource::program_id);
+        sources
+    }
+
+    /// Emits the finite WESL/WGSL link section for this exact execution table.
+    #[must_use]
+    pub fn registered_response_wgsl(&self) -> String {
+        crate::response_source::linked_registered_response_wgsl(&self.registered_response_sources())
+    }
+
     /// Adds a package only after checking that the registry contains the same
     /// ready state and the same verified executable digest.
     pub fn register_package(

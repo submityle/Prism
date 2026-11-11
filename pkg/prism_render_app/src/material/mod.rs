@@ -32,7 +32,10 @@ mod schedule_tests;
 #[cfg(test)]
 mod tests;
 
-pub use binding::{FallbackTextures, MaterialBindingLayout, MaterialTextureSlots};
+pub use binding::{
+    FallbackTextures, MaterialBindingLayout, MaterialTextureSlots,
+    NativeMaterialTextureBindingOwner, NativeMaterialTextureBindings,
+};
 pub(crate) use buffers::{header_row_bytes, texture_row_bytes};
 pub use buffers::{
     ExecutionTableSyncError, MaterialBufferSnapshot, MaterialFrameSnapshotBundle,
@@ -44,11 +47,12 @@ pub(crate) use composition_oracle::{
     NativeMaterialCompositionMetadata,
 };
 pub use parameter_heap::ParameterHeap;
-pub(crate) use stage::sync_material_buffers;
 pub use stage::TextureResolutionError;
+pub(crate) use stage::{prepare_native_texture_bindings, sync_material_buffers};
 pub use stage::{MaterialUploadStats, RenderMaterials, TextureRequest};
 pub use texture_heap::{
     BindlessSlot, TextureFallback, TextureHeapAcquireError, TextureHeapStats, TextureSlotHeap,
+    DEFAULT_CAPACITY as DEFAULT_TEXTURE_HEAP_CAPACITY,
 };
 pub use virtual_texture::MaterialVtLeaseSnapshot;
 pub(crate) use vt_source_stage::extract_native_vt_sources;

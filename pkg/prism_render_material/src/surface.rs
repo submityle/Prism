@@ -119,10 +119,9 @@ impl Default for GpuEmissionLobe {
 ///
 /// The `OpenPBR` `coat` group. `coat_ior` drives the coat interface Fresnel
 /// (default `1.5`, reproducing the historical fixed `F0 = 0.04`) and
-/// `coat_color` tints the coat highlight (default white = identity). This is
-/// the first lobe completed against the `OpenPBR` field set (§4.4); the remaining
-/// coat parameters (`coat_darkening`, `coat_roughness_anisotropy`,
-/// `coat_normal`) are still to be added.
+/// `coat_color` tints the coat highlight (default white = identity). The
+/// packed coat fields are complete against the `OpenPBR` field set; `coat_normal`
+/// is a shade-time input carried by the response ABI, not a packed lobe field.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuClearCoatLobe {
@@ -504,6 +503,8 @@ pub struct SurfaceParameterBlock {
 /// Reasons an [`SurfaceParameterBlock::unpack`] can fail.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SurfaceUnpackError {
+    /// The mask contains bits that have no schema-defined lobe slot.
+    UnknownLobeBits { bits: LobeMask },
     /// The word slice length did not match `core + present lobes` for the mask.
     WrongLength { expected: usize, got: usize },
 }
@@ -511,6 +512,12 @@ pub enum SurfaceUnpackError {
 impl core::fmt::Display for SurfaceUnpackError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::UnknownLobeBits { bits } => {
+                write!(
+                    f,
+                    "packed surface parameters contain unknown lobe bits {bits:?}"
+                )
+            }
             Self::WrongLength { expected, got } => write!(
                 f,
                 "packed surface parameters length mismatch: expected {expected} words, got {got}"
@@ -769,6 +776,12 @@ impl SurfaceParameterBlock {
     /// Reverse [`Self::pack`]: read the core, then each present lobe in
     /// canonical order. Absent lobes decode to their neutral defaults.
     pub fn unpack(lobe_mask: LobeMask, words: &[u32]) -> Result<Self, SurfaceUnpackError> {
+        let unknown_bits = lobe_mask.bits() & !LobeMask::all().bits();
+        if unknown_bits != 0 {
+            return Err(SurfaceUnpackError::UnknownLobeBits {
+                bits: LobeMask(unknown_bits),
+            });
+        }
         let expected = SURFACE_CORE_WORDS
             + LobeMask::canonical()
                 .into_iter()
@@ -828,7 +841,7 @@ fn lobe_word_count(bit: LobeMask) -> usize {
     SURFACE_LOBE_WORDS_BY_SLOT
         .get(bit.bits().trailing_zeros() as usize)
         .copied()
-        .unwrap_or(0)
+        .expect("schema-defined lobe bit must have a generated word footprint")
 }
 
 #[cfg(test)]
@@ -1077,5 +1090,12 @@ mod tests {
     fn unpack_rejects_wrong_length() {
         let err = SurfaceParameterBlock::unpack(LobeMask::all(), &[0; 3]).unwrap_err();
         assert!(matches!(err, SurfaceUnpackError::WrongLength { .. }));
+    }
+
+    #[test]
+    fn unpack_rejects_unknown_lobe_bits_instead_of_dropping_them() {
+        let unknown = LobeMask(1 << LobeMask::COUNT);
+        let err = SurfaceParameterBlock::unpack(unknown, &[0; SURFACE_CORE_WORDS]).unwrap_err();
+        assert_eq!(err, SurfaceUnpackError::UnknownLobeBits { bits: unknown });
     }
 }

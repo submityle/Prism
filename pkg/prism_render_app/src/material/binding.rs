@@ -11,8 +11,11 @@
 //! freed, or reused): a slot's *generation* protects stale rows, but the array
 //! itself has to point at the right texture for the rows that are still valid.
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 
+use prism_ecs::prelude::Resource;
 use prism_image::Image;
 use prism_render_driver::{
     BindGroupDescriptor, BindGroupEntry, BindGroupId, BindGroupLayoutDescriptor,
@@ -22,7 +25,7 @@ use prism_render_driver::{
     TextureViewDimension, TextureViewId,
 };
 
-use super::texture_heap::TextureSlotHeap;
+use super::texture_heap::{bindless_capacity, TextureSlotHeap};
 use crate::image::{prepare_image, GpuImage};
 use crate::render_asset::RenderAssets;
 
@@ -92,6 +95,158 @@ pub struct MaterialTextureSlots {
     samplers: Vec<SamplerId>,
     generations: Vec<u32>,
     generation_buffer: Option<BufferId>,
+}
+
+/// A device-owned, immutable generation of the authored image heap bindings.
+///
+/// The arrays borrow view/sampler IDs from prepared `GpuImage`s, while this
+/// owner keeps the generation table and fallback images alive. Frame consumers
+/// retain the `Arc` until graph completion, so replacing the publication cannot
+/// invalidate an in-flight bind group.
+pub struct NativeMaterialTextureBindingOwner {
+    device: Arc<dyn RenderDevice + Send + Sync>,
+    fallbacks: FallbackTextures,
+    slots: MaterialTextureSlots,
+    abandoned: AtomicBool,
+}
+
+impl NativeMaterialTextureBindingOwner {
+    /// Builds one coherent binding generation from the current material heap
+    /// and prepared image table.
+    #[must_use]
+    pub fn build(
+        device: Arc<dyn RenderDevice + Send + Sync>,
+        queue: &dyn RenderQueue,
+        images: &RenderAssets<GpuImage>,
+        heap: &TextureSlotHeap,
+    ) -> Option<Arc<Self>> {
+        let device_capacity =
+            bindless_capacity(device.capabilities().limits.max_bindings_per_bind_group)?;
+        // Material rows already contain heap indices. Shrinking only the
+        // owner would make those rows address resources outside its arrays, so
+        // reject an un-clamped heap instead of creating a mismatched binding.
+        if heap.capacity() > device_capacity {
+            return None;
+        }
+        let fallbacks = FallbackTextures::new(&*device, queue);
+        let slots = MaterialTextureSlots::build(&*device, queue, images, &fallbacks, heap);
+        Some(Arc::new(Self {
+            device,
+            fallbacks,
+            slots,
+            abandoned: AtomicBool::new(false),
+        }))
+    }
+
+    /// Dense texture views in heap slot order.
+    #[must_use]
+    pub fn views(&self) -> &[TextureViewId] {
+        self.slots.views()
+    }
+
+    /// Dense samplers in heap slot order.
+    #[must_use]
+    pub fn samplers(&self) -> &[SamplerId] {
+        self.slots.samplers()
+    }
+
+    /// Published slot generation table.
+    #[must_use]
+    pub const fn generation_buffer(&self) -> Option<BufferId> {
+        self.slots.generation_buffer()
+    }
+
+    /// Number of addressable slots in both binding arrays.
+    #[must_use]
+    pub fn slot_count(&self) -> u32 {
+        self.slots.len() as u32
+    }
+
+    /// Prevent destruction of resources created by a device generation that
+    /// has already been abandoned during recovery.
+    pub fn abandon_device(&self) {
+        self.abandoned.store(true, Ordering::Release);
+    }
+}
+
+impl Drop for NativeMaterialTextureBindingOwner {
+    fn drop(&mut self) {
+        if self.abandoned.load(Ordering::Acquire) {
+            return;
+        }
+        self.slots.release(&*self.device);
+        self.fallbacks.release(&*self.device);
+    }
+}
+
+/// Current published authored-image binding generation for native compute
+/// consumers. The resource is rebuilt only when the material heap, prepared
+/// image table, or device generation changes.
+#[derive(Resource, Default)]
+pub struct NativeMaterialTextureBindings {
+    owner: Option<Arc<NativeMaterialTextureBindingOwner>>,
+    device_generation: u64,
+    material_version: u64,
+    image_version: u64,
+}
+
+impl NativeMaterialTextureBindings {
+    /// Rebuilds the binding generation when its source publication changed.
+    pub fn prepare(
+        &mut self,
+        device: Arc<dyn RenderDevice + Send + Sync>,
+        queue: &dyn RenderQueue,
+        device_generation: u64,
+        materials: &super::stage::RenderMaterials,
+        images: &RenderAssets<GpuImage>,
+    ) {
+        let material_version = materials.texture_binding_version();
+        let image_version = images.version();
+        if self.owner.is_some()
+            && self.device_generation == device_generation
+            && self.material_version == material_version
+            && self.image_version == image_version
+        {
+            return;
+        }
+        if self.device_generation != device_generation {
+            if let Some(owner) = self.owner.as_ref() {
+                owner.abandon_device();
+            }
+        }
+        self.owner = if device.capabilities().features.contains(Features::BINDLESS) {
+            NativeMaterialTextureBindingOwner::build(device, queue, images, materials.textures())
+        } else {
+            None
+        };
+        self.device_generation = device_generation;
+        self.material_version = material_version;
+        self.image_version = image_version;
+    }
+
+    /// Returns the immutable binding generation for a frame.
+    #[must_use]
+    pub fn snapshot(&self) -> Option<Arc<NativeMaterialTextureBindingOwner>> {
+        self.owner.clone()
+    }
+
+    /// Material texture-heap publication paired with the current binding.
+    #[must_use]
+    pub const fn material_version(&self) -> u64 {
+        self.material_version
+    }
+
+    /// Prepared-image publication paired with the current binding.
+    #[must_use]
+    pub const fn image_version(&self) -> u64 {
+        self.image_version
+    }
+
+    /// Device generation that owns the published texture arrays.
+    #[must_use]
+    pub const fn device_generation(&self) -> u64 {
+        self.device_generation
+    }
 }
 
 impl MaterialTextureSlots {
@@ -255,6 +410,11 @@ impl MaterialBindingLayout {
         if !device.capabilities().features.contains(Features::BINDLESS) {
             return None;
         }
+        let slots =
+            bindless_capacity(device.capabilities().limits.max_bindings_per_bind_group)?.min(slots);
+        if slots <= super::texture_heap::FIRST_DYNAMIC_SLOT {
+            return None;
+        }
         let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("prism material".into()),
             entries: Self::entries(slots),
@@ -330,6 +490,7 @@ impl MaterialBindingLayout {
     /// a single resource where the shader indexes dynamically.
     #[must_use]
     pub fn entries(slots: u32) -> alloc::vec::Vec<BindGroupLayoutEntry> {
+        let slots = slots.min(super::texture_heap::BINDLESS_ARRAY_CAPACITY_CEILING);
         alloc::vec![
             BindGroupLayoutEntry {
                 binding: 0,

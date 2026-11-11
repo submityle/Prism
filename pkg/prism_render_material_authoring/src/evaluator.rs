@@ -121,7 +121,22 @@ fn eval_node_inner(
         }
         return Ok(value.clone());
     }
-    if output.is_some_and(|name| name != "out") {
+    if let Some(selected) = output
+        && selected != "out"
+        && !matches!(
+            node.category.as_str(),
+            "separate2" | "separate3" | "separate4"
+        )
+    {
+        return Err(error(
+            DiagnosticCode::UnsafeConnection,
+            format!(
+                "node '{}' output '{}' has no executable output semantics",
+                node.name, selected
+            ),
+        ));
+    }
+    if output.is_some_and(|name| name != "out") && node.inputs.is_empty() {
         if let Some(declared) = node
             .outputs
             .iter()
@@ -158,7 +173,7 @@ fn eval_node_inner(
         };
         values.push(value);
     }
-    evaluate_operator(&node.category, &values)
+    evaluate_operator(&node.category, &values, output)
 }
 
 fn eval_graph_instance(
@@ -191,7 +206,7 @@ fn eval_graph_instance(
 
     let mut effective = implementation.clone();
     for interface in &mut effective.inputs {
-        if interface.value.is_none()
+        if interface.explicit_default().is_none()
             && interface.connection.is_none()
             && !interface.attributes.contains_key("interfacename")
         {
@@ -199,7 +214,7 @@ fn eval_graph_instance(
                 .inputs
                 .iter()
                 .find(|declared| declared.name == interface.name)
-                .and_then(|declared| declared.value.clone());
+                .and_then(crate::Input::explicit_default);
         }
         if let Some(override_input) = instance
             .inputs
@@ -349,7 +364,7 @@ fn eval_author_node(
                 )
             })?
         } else {
-            declared.value.clone().ok_or_else(|| {
+            declared.explicit_default().ok_or_else(|| {
                 error(
                     DiagnosticCode::InvalidStructure,
                     format!(
@@ -372,7 +387,7 @@ fn eval_author_node(
         values.push(value);
     }
 
-    let mut result = evaluate_operator(&definition.category, &values)?;
+    let mut result = evaluate_operator(&definition.category, &values, output)?;
     let output_type = declared_output
         .type_name
         .as_deref()
@@ -404,7 +419,11 @@ fn eval_author_node(
     Ok(result)
 }
 
-fn evaluate_operator(category: &str, values: &[TypedValue]) -> Result<TypedValue, AuthoringError> {
+fn evaluate_operator(
+    category: &str,
+    values: &[TypedValue],
+    selected_output: Option<&str>,
+) -> Result<TypedValue, AuthoringError> {
     let category = crate::author_node::canonical_category(category).unwrap_or(category);
     match category {
         "convert" => values
@@ -417,7 +436,9 @@ fn evaluate_operator(category: &str, values: &[TypedValue]) -> Result<TypedValue
                 )
             })
             .and_then(|value| typed(&value.type_name, numbers(value)?)),
-        "add" | "subtract" | "multiply" | "divide" => binary(category, values),
+        "add" | "subtract" | "multiply" | "divide" | "modulo" | "power" | "pow" | "max" | "min" => {
+            binary(category, values)
+        }
         "mix" => {
             if values.len() != 3 {
                 return Err(error(
@@ -469,6 +490,37 @@ fn evaluate_operator(category: &str, values: &[TypedValue]) -> Result<TypedValue
                 x.into_iter().map(|v| v.clamp(lo[0], hi[0])).collect(),
             )
         }
+        "smoothstep" => smoothstep(values),
+        "step" => step(values),
+        "remap" => remap(values),
+        "abs" => unary(values, f32::abs),
+        "acos" => unary(values, f32::acos),
+        "asin" => unary(values, f32::asin),
+        "ceil" => unary(values, f32::ceil),
+        "cos" => unary(values, f32::cos),
+        "degrees" => unary(values, f32::to_degrees),
+        "exp" => unary(values, f32::exp),
+        "floor" => unary(values, f32::floor),
+        "ln" => unary(values, f32::ln),
+        "log" => unary(values, |value| value.log10()),
+        "radians" => unary(values, f32::to_radians),
+        "round" => unary(values, f32::round),
+        "sign" => unary(values, f32::signum),
+        "sin" => unary(values, f32::sin),
+        "sqrt" => unary(values, f32::sqrt),
+        "tan" => unary(values, f32::tan),
+        "atan2" => binary(category, values),
+        "dotproduct" => dotproduct(values),
+        "crossproduct" => crossproduct(values),
+        "normalize" => normalize(values),
+        "magnitude" => magnitude(values),
+        "distance" => distance(values),
+        "combine2" | "combine3" | "combine4" => combine(values, category),
+        "separate2" | "separate3" | "separate4" => separate(values, selected_output),
+        "extract" => extract(values),
+        "ifgreater" => conditional(values, |a, b| a > b),
+        "ifequal" => conditional(values, |a, b| a == b),
+        "switch" => switch_value(values),
         _ => Err(error(
             DiagnosticCode::UnsafeConnection,
             format!("node category '{category}' requires a bake/runtime"),
@@ -517,8 +569,8 @@ fn evaluate_input_inner(
     input: &crate::Input,
     stack: &mut BTreeSet<String>,
 ) -> Result<Option<TypedValue>, AuthoringError> {
-    if let Some(value) = &input.value {
-        return Ok(Some(value.clone()));
+    if let Some(value) = input.explicit_default() {
+        return Ok(Some(value));
     }
     if let Some(connection) = &input.connection {
         return evaluate_connection_inner(index, document, graph, connection, stack).map(Some);
@@ -556,8 +608,8 @@ fn evaluate_interface(
                 ),
             )
         })?;
-    let result = if let Some(value) = &input.value {
-        Ok(value.clone())
+    let result = if let Some(value) = input.explicit_default() {
+        Ok(value)
     } else if let Some(connection) = &input.connection {
         evaluate_connection_inner(index, document, graph, connection, stack)
     } else if let Some(alias) = input.attributes.get("interfacename") {
@@ -633,7 +685,8 @@ fn eval_graph_output(
 }
 fn numbers(v: &TypedValue) -> Result<Vec<f32>, AuthoringError> {
     v.value
-        .split(',')
+        .split(|character: char| character == ',' || character.is_ascii_whitespace())
+        .filter(|part| !part.is_empty())
         .map(|s| {
             s.trim().parse::<f32>().map_err(|_| {
                 error(
@@ -755,7 +808,11 @@ fn binary(op: &str, v: &[TypedValue]) -> Result<TypedValue, AuthoringError> {
     }
     let a = numbers(&v[0])?;
     let b = numbers(&v[1])?;
-    if a.len() != b.len() {
+    let width = a.len().max(b.len());
+    if ![a.len(), b.len()]
+        .iter()
+        .all(|length| *length == 1 || *length == width)
+    {
         return Err(error(
             DiagnosticCode::InvalidValue,
             "arithmetic inputs have incompatible dimensions",
@@ -763,23 +820,368 @@ fn binary(op: &str, v: &[TypedValue]) -> Result<TypedValue, AuthoringError> {
     }
     typed(
         &v[0].type_name,
-        a.into_iter()
-            .zip(b)
-            .map(|(x, y)| match op {
-                "add" => x + y,
-                "subtract" => x - y,
-                "multiply" => x * y,
-                "divide" => {
-                    if y == 0.0 {
-                        f32::NAN
-                    } else {
-                        x / y
+        (0..width)
+            .map(|index| {
+                let x = a[if a.len() == 1 { 0 } else { index }];
+                let y = b[if b.len() == 1 { 0 } else { index }];
+                match op {
+                    "add" => x + y,
+                    "subtract" => x - y,
+                    "multiply" => x * y,
+                    "divide" => {
+                        if y == 0.0 {
+                            f32::NAN
+                        } else {
+                            x / y
+                        }
                     }
+                    "modulo" => {
+                        if y == 0.0 {
+                            f32::NAN
+                        } else {
+                            x % y
+                        }
+                    }
+                    "power" | "pow" => x.powf(y),
+                    "max" => x.max(y),
+                    "min" => x.min(y),
+                    "atan2" => x.atan2(y),
+                    _ => f32::NAN,
                 }
-                _ => unreachable!(),
             })
             .collect(),
     )
+}
+
+fn unary(
+    values: &[TypedValue],
+    operation: impl Fn(f32) -> f32,
+) -> Result<TypedValue, AuthoringError> {
+    if values.len() != 1 {
+        return Err(error(
+            DiagnosticCode::InvalidStructure,
+            "unary operator requires one input",
+        ));
+    }
+    let input = numbers(&values[0])?;
+    typed(
+        &values[0].type_name,
+        input.into_iter().map(operation).collect(),
+    )
+}
+
+fn smoothstep(values: &[TypedValue]) -> Result<TypedValue, AuthoringError> {
+    if values.len() != 3 {
+        return Err(error(
+            DiagnosticCode::InvalidStructure,
+            "smoothstep requires low, high, and value",
+        ));
+    }
+    let low = scalar_value(&values[0])?;
+    let high = scalar_value(&values[1])?;
+    if low >= high {
+        return Err(error(
+            DiagnosticCode::InvalidValue,
+            "smoothstep low bound must be lower than high bound",
+        ));
+    }
+    let value = numbers(&values[2])?;
+    typed(
+        &values[2].type_name,
+        value
+            .into_iter()
+            .map(|x| {
+                let t = ((x - low) / (high - low)).clamp(0.0, 1.0);
+                t * t * (3.0 - 2.0 * t)
+            })
+            .collect(),
+    )
+}
+
+fn step(values: &[TypedValue]) -> Result<TypedValue, AuthoringError> {
+    if values.len() != 2 {
+        return Err(error(
+            DiagnosticCode::InvalidStructure,
+            "step requires edge and value",
+        ));
+    }
+    let edge = scalar_value(&values[0])?;
+    let input = numbers(&values[1])?;
+    typed(
+        &values[1].type_name,
+        input
+            .into_iter()
+            .map(|value| if value < edge { 0.0 } else { 1.0 })
+            .collect(),
+    )
+}
+
+fn remap(values: &[TypedValue]) -> Result<TypedValue, AuthoringError> {
+    if values.len() != 5 {
+        return Err(error(
+            DiagnosticCode::InvalidStructure,
+            "remap requires input, in_low, in_high, out_low, and out_high",
+        ));
+    }
+    let in_low = scalar_value(&values[1])?;
+    let in_high = scalar_value(&values[2])?;
+    let out_low = scalar_value(&values[3])?;
+    let out_high = scalar_value(&values[4])?;
+    if in_low == in_high {
+        return Err(error(
+            DiagnosticCode::InvalidValue,
+            "remap input range cannot have zero length",
+        ));
+    }
+    typed(
+        &values[0].type_name,
+        numbers(&values[0])?
+            .into_iter()
+            .map(|value| out_low + (value - in_low) * (out_high - out_low) / (in_high - in_low))
+            .collect(),
+    )
+}
+
+fn scalar_value(value: &TypedValue) -> Result<f32, AuthoringError> {
+    let values = numbers(value)?;
+    if values.len() != 1 {
+        return Err(error(
+            DiagnosticCode::InvalidValue,
+            format!("expected scalar, got type '{}'", value.type_name),
+        ));
+    }
+    Ok(values[0])
+}
+
+fn dotproduct(values: &[TypedValue]) -> Result<TypedValue, AuthoringError> {
+    if values.len() != 2 {
+        return Err(error(
+            DiagnosticCode::InvalidStructure,
+            "dotproduct requires two inputs",
+        ));
+    }
+    let a = numbers(&values[0])?;
+    let b = numbers(&values[1])?;
+    if a.len() != b.len() || a.is_empty() {
+        return Err(error(
+            DiagnosticCode::InvalidValue,
+            "dotproduct dimensions differ",
+        ));
+    }
+    typed(
+        "float",
+        vec![a.into_iter().zip(b).map(|(x, y)| x * y).sum()],
+    )
+}
+
+fn crossproduct(values: &[TypedValue]) -> Result<TypedValue, AuthoringError> {
+    if values.len() != 2 {
+        return Err(error(
+            DiagnosticCode::InvalidStructure,
+            "crossproduct requires two inputs",
+        ));
+    }
+    let a = numbers(&values[0])?;
+    let b = numbers(&values[1])?;
+    if a.len() != 3 || b.len() != 3 {
+        return Err(error(
+            DiagnosticCode::InvalidValue,
+            "crossproduct requires vector3 inputs",
+        ));
+    }
+    typed(
+        "vector3",
+        vec![
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ],
+    )
+}
+
+fn normalize(values: &[TypedValue]) -> Result<TypedValue, AuthoringError> {
+    if values.len() != 1 {
+        return Err(error(
+            DiagnosticCode::InvalidStructure,
+            "normalize requires one input",
+        ));
+    }
+    let mut value = numbers(&values[0])?;
+    let length = value.iter().map(|v| v * v).sum::<f32>().sqrt();
+    if length == 0.0 {
+        return Err(error(
+            DiagnosticCode::InvalidValue,
+            "cannot normalize a zero vector",
+        ));
+    }
+    for component in &mut value {
+        *component /= length;
+    }
+    typed(&values[0].type_name, value)
+}
+
+fn magnitude(values: &[TypedValue]) -> Result<TypedValue, AuthoringError> {
+    if values.len() != 1 {
+        return Err(error(
+            DiagnosticCode::InvalidStructure,
+            "magnitude requires one input",
+        ));
+    }
+    let value = numbers(&values[0])?;
+    typed(
+        "float",
+        vec![value.iter().map(|v| v * v).sum::<f32>().sqrt()],
+    )
+}
+
+fn distance(values: &[TypedValue]) -> Result<TypedValue, AuthoringError> {
+    if values.len() != 2 {
+        return Err(error(
+            DiagnosticCode::InvalidStructure,
+            "distance requires two inputs",
+        ));
+    }
+    let a = numbers(&values[0])?;
+    let b = numbers(&values[1])?;
+    if a.len() != b.len() {
+        return Err(error(
+            DiagnosticCode::InvalidValue,
+            "distance dimensions differ",
+        ));
+    }
+    typed(
+        "float",
+        vec![a
+            .into_iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).powi(2))
+            .sum::<f32>()
+            .sqrt()],
+    )
+}
+
+fn combine(values: &[TypedValue], category: &str) -> Result<TypedValue, AuthoringError> {
+    let expected = category
+        .strip_prefix("combine")
+        .and_then(|value| value.parse::<usize>().ok())
+        .ok_or_else(|| error(DiagnosticCode::InvalidStructure, "invalid combine category"))?;
+    if values.len() != expected
+        || values
+            .iter()
+            .any(|value| numbers(value).map_or(true, |v| v.len() != 1))
+    {
+        return Err(error(
+            DiagnosticCode::InvalidValue,
+            format!("{category} requires {expected} scalar inputs"),
+        ));
+    }
+    typed(
+        &format!("vector{expected}"),
+        values
+            .iter()
+            .map(scalar_value)
+            .collect::<Result<Vec<_>, _>>()?,
+    )
+}
+
+fn separate(
+    values: &[TypedValue],
+    selected_output: Option<&str>,
+) -> Result<TypedValue, AuthoringError> {
+    if values.len() != 1 {
+        return Err(error(
+            DiagnosticCode::InvalidStructure,
+            "separate requires one input",
+        ));
+    }
+    let components = numbers(&values[0])?;
+    let index = match selected_output {
+        None => 0,
+        Some("outx" | "x" | "out_x") => 0,
+        Some("outy" | "y" | "out_y") => 1,
+        Some("outz" | "z" | "out_z") => 2,
+        Some("outw" | "w" | "out_w") => 3,
+        Some(output) => {
+            return Err(error(
+                DiagnosticCode::InvalidReference,
+                format!("separate output '{output}' is not a component output"),
+            ));
+        }
+    };
+    let value = components.get(index).copied().ok_or_else(|| {
+        error(
+            DiagnosticCode::InvalidReference,
+            "separate output is outside the input dimension",
+        )
+    })?;
+    typed("float", vec![value])
+}
+
+fn extract(values: &[TypedValue]) -> Result<TypedValue, AuthoringError> {
+    if values.len() != 2 {
+        return Err(error(
+            DiagnosticCode::InvalidStructure,
+            "extract requires value and index",
+        ));
+    }
+    let components = numbers(&values[0])?;
+    let index = scalar_value(&values[1])?;
+    if index < 0.0 || index.fract() != 0.0 {
+        return Err(error(
+            DiagnosticCode::InvalidValue,
+            "extract index must be a non-negative integer",
+        ));
+    }
+    typed(
+        "float",
+        vec![*components.get(index as usize).ok_or_else(|| {
+            error(
+                DiagnosticCode::InvalidValue,
+                "extract index is outside the input dimension",
+            )
+        })?],
+    )
+}
+
+fn conditional(
+    values: &[TypedValue],
+    predicate: impl Fn(f32, f32) -> bool,
+) -> Result<TypedValue, AuthoringError> {
+    if values.len() != 4 {
+        return Err(error(
+            DiagnosticCode::InvalidStructure,
+            "conditional requires comparison and two branches",
+        ));
+    }
+    let a = scalar_value(&values[0])?;
+    let b = scalar_value(&values[1])?;
+    Ok(if predicate(a, b) {
+        values[2].clone()
+    } else {
+        values[3].clone()
+    })
+}
+
+fn switch_value(values: &[TypedValue]) -> Result<TypedValue, AuthoringError> {
+    if values.len() < 2 {
+        return Err(error(
+            DiagnosticCode::InvalidStructure,
+            "switch requires an index and at least one value",
+        ));
+    }
+    let index = scalar_value(&values[0])?;
+    if index < 0.0 || index.fract() != 0.0 {
+        return Err(error(
+            DiagnosticCode::InvalidValue,
+            "switch index must be a non-negative integer",
+        ));
+    }
+    values.get(index as usize + 1).cloned().ok_or_else(|| {
+        error(
+            DiagnosticCode::InvalidValue,
+            "switch index is outside its inputs",
+        )
+    })
 }
 fn error(code: DiagnosticCode, message: impl Into<String>) -> AuthoringError {
     AuthoringError::new(code, message, None)

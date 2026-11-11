@@ -4,7 +4,7 @@ use roxmltree::{Document as XmlDocument, Node as XmlNode};
 
 use crate::{
     diagnostic::{location, AuthoringError, DiagnosticCode},
-    Connection, Document, Input, Node, NodeDef, NodeGraph, Output, TypedValue,
+    Connection, Document, DocumentElement, Input, Node, NodeDef, NodeGraph, Output, TypedValue,
 };
 
 const ROOT_ATTRIBUTES: &[&str] = &[
@@ -22,6 +22,7 @@ const INPUT_ATTRIBUTES: &[&str] = &[
     "nodegraph",
     "output",
     "interfacename",
+    "default",
     "enum",
     "unit",
     "colorspace",
@@ -45,6 +46,145 @@ const NODE_ATTRIBUTES: &[&str] = &[
     "uaddressmode",
     "vaddressmode",
     "default",
+    "datatype",
+    "value_type",
+    "nodegroup",
+    "target",
+    "version",
+    "isdefaultversion",
+];
+
+const GRAPH_ATTRIBUTES: &[&str] = &[
+    "name",
+    "nodedef",
+    "doc",
+    "namespace",
+    "nodegroup",
+    "target",
+    "version",
+    "isdefaultversion",
+];
+
+const DOCUMENT_ELEMENT_TAGS: &[&str] = &[
+    "material",
+    "surfacematerial",
+    "volumematerial",
+    "displacementmaterial",
+    "look",
+    "collection",
+    "geomprop",
+    "propertyset",
+    "property",
+    "implementation",
+    "sourcecode",
+    "unit",
+    "unitdef",
+    "targetdef",
+    "typedef",
+    "variantset",
+    "variant",
+    "backdrop",
+];
+
+/// MaterialX 1.38 core node categories whose structure is meaningful to this
+/// frontend. Categories that need shade-time data or a runtime extension are
+/// retained in the graph and fail with a structured execution diagnostic when
+/// a Prism consumer attempts to evaluate them.
+const KNOWN_NODE_CATEGORIES: &[&str] = &[
+    "constant",
+    "value",
+    "add",
+    "plus",
+    "subtract",
+    "multiply",
+    "mult",
+    "divide",
+    "modulo",
+    "mix",
+    "blend",
+    "clamp",
+    "smoothstep",
+    "step",
+    "remap",
+    "convert",
+    "abs",
+    "acos",
+    "asin",
+    "atan2",
+    "ceil",
+    "cos",
+    "degrees",
+    "exp",
+    "floor",
+    "ln",
+    "log",
+    "max",
+    "min",
+    "power",
+    "pow",
+    "radians",
+    "round",
+    "sign",
+    "sin",
+    "sqrt",
+    "tan",
+    "dotproduct",
+    "crossproduct",
+    "normalize",
+    "magnitude",
+    "distance",
+    "combine2",
+    "combine3",
+    "combine4",
+    "separate2",
+    "separate3",
+    "separate4",
+    "swizzle",
+    "extract",
+    "ifgreater",
+    "ifequal",
+    "switch",
+    "texcoord",
+    "texcoord2",
+    "position",
+    "normal",
+    "tangent",
+    "bitangent",
+    "geompropvalue",
+    "time",
+    "frame",
+    "noise2d",
+    "noise3d",
+    "noise",
+    "fractal3d",
+    "cellnoise2d",
+    "cellnoise3d",
+    "voronoi",
+    "curve",
+    "ramp",
+    "image",
+    "tiledimage",
+    "normalmap",
+    "heighttonormal",
+    "transformpoint",
+    "transformvector",
+    "transformnormal",
+    "rotate2d",
+    "rotate3d",
+    "open_pbr_surface",
+    "standard_surface",
+    "dielectric_bsdf",
+    "conductor_bsdf",
+    "generalized_schlick_bsdf",
+    "oren_nayar_diffuse_bsdf",
+    "burley_diffuse_bsdf",
+    "subsurface_bsdf",
+    "sheen_bsdf",
+    "thin_film",
+    "surface_unlit",
+    "surface_shader",
+    "volume_shader",
+    "displacement_shader",
 ];
 
 /// Parses the explicitly supported MaterialX subset.
@@ -94,6 +234,9 @@ pub fn parse_materialx(source: &str) -> Result<Document, AuthoringError> {
             "nodegraph" => {
                 let graph = parse_nodegraph(&xml, child, &mut nodegraph_ids)?;
                 result.nodegraphs.push(graph);
+            }
+            tag if DOCUMENT_ELEMENT_TAGS.contains(&tag) => {
+                result.elements.push(parse_document_element(&xml, child)?);
             }
             _ => {
                 return Err(fail(
@@ -216,7 +359,7 @@ fn parse_nodegraph(
             }
         }
     }
-    let mut graph_attributes = attrs(xml, element, &["name", "nodedef", "doc", "namespace"])?;
+    let mut graph_attributes = attrs(xml, element, GRAPH_ATTRIBUTES)?;
     graph_attributes.remove("nodedef");
     Ok(NodeGraph {
         name,
@@ -225,6 +368,92 @@ fn parse_nodegraph(
         nodes,
         outputs,
         attributes: graph_attributes,
+    })
+}
+
+fn parse_document_element(
+    xml: &XmlDocument<'_>,
+    element: XmlNode<'_, '_>,
+) -> Result<DocumentElement, AuthoringError> {
+    let category = element.tag_name().name().to_owned();
+    let name = element.attribute("name").map(str::to_owned);
+    let mut inputs = Vec::new();
+    let mut outputs = Vec::new();
+    let mut children = Vec::new();
+    let mut input_ids = BTreeSet::new();
+    let mut output_ids = BTreeSet::new();
+    for child in element.children().filter(XmlNode::is_element) {
+        match child.tag_name().name() {
+            "input" => {
+                let input = parse_input(xml, child, false)?;
+                insert_id(xml, &mut input_ids, &input.name, child)?;
+                inputs.push(input);
+            }
+            "output" => {
+                let output = parse_output(xml, child, false)?;
+                insert_id(xml, &mut output_ids, &output.name, child)?;
+                outputs.push(output);
+            }
+            tag if DOCUMENT_ELEMENT_TAGS.contains(&tag) => {
+                children.push(parse_document_element(xml, child)?);
+            }
+            _ => {
+                return Err(fail(
+                    xml,
+                    child,
+                    DiagnosticCode::UnsupportedElement,
+                    format!(
+                        "unsupported <{}> inside <{category}>",
+                        child.tag_name().name()
+                    ),
+                ));
+            }
+        }
+    }
+    let attributes = attrs(
+        xml,
+        element,
+        &[
+            "name",
+            "type",
+            "value",
+            "node",
+            "nodedef",
+            "target",
+            "version",
+            "namespace",
+            "nodegroup",
+            "doc",
+            "uri",
+            "file",
+            "sourcecode",
+            "unit",
+            "unitspace",
+            "uimap",
+            "inherit",
+        ],
+    )?;
+    let text = element
+        .text()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let value = match element.attribute("value") {
+        Some(raw) => Some(
+            TypedValue::from_lexical(element.attribute("type").unwrap_or("string"), raw)
+                .map_err(|message| fail(xml, element, DiagnosticCode::InvalidValue, message))?,
+        ),
+        None => None,
+    };
+    Ok(DocumentElement {
+        category,
+        name,
+        value,
+        attributes,
+        inputs,
+        outputs,
+        children,
+        text,
     })
 }
 
@@ -245,32 +474,8 @@ fn parse_node(xml: &XmlDocument<'_>, element: XmlNode<'_, '_>) -> Result<Node, A
         ));
     }
     // A strict allow-list guarantees unsupported node semantics cannot disappear during round-trip.
-    const SUPPORTED: &[&str] = &[
-        "constant",
-        "add",
-        "plus",
-        "subtract",
-        "multiply",
-        "mult",
-        "divide",
-        "mix",
-        "blend",
-        "convert",
-        "clamp",
-        "texcoord",
-        "texcoord2",
-        "noise",
-        "curve",
-        "ramp",
-        "open_pbr_surface",
-        "standard_surface",
-        "image",
-        "normalmap",
-        "dotproduct",
-        "ifequal",
-        "switch",
-    ];
-    if !SUPPORTED.contains(&category.as_str()) && element.attribute("nodedef").is_none() {
+    if !KNOWN_NODE_CATEGORIES.contains(&category.as_str()) && element.attribute("nodedef").is_none()
+    {
         return Err(fail(
             xml,
             element,
@@ -304,15 +509,32 @@ fn parse_node(xml: &XmlDocument<'_>, element: XmlNode<'_, '_>) -> Result<Node, A
             }
         }
     }
-    let value = element.attribute("value").map(|value| TypedValue {
-        type_name: element.attribute("type").unwrap_or("string").to_owned(),
-        value: canonical_value(value),
-    });
+    let value_type = element
+        .attribute("datatype")
+        .or_else(|| element.attribute("value_type"))
+        .or_else(|| {
+            (!generic_element)
+                .then(|| element.attribute("type"))
+                .flatten()
+        })
+        .map(str::to_owned);
+    let value = element
+        .attribute("value")
+        .map(|value| {
+            parse_typed_value(
+                xml,
+                element,
+                value_type.as_deref().unwrap_or("string"),
+                value,
+            )
+        })
+        .transpose()?;
     Ok(Node {
         name,
         category,
         generic_element,
         value,
+        value_type,
         inputs,
         outputs,
         attributes: attrs(xml, element, NODE_ATTRIBUTES)?,
@@ -335,10 +557,19 @@ fn parse_input(
         ));
     }
     let literal = element.attribute("value");
+    let default = element.attribute("default");
     let node = element.attribute("nodename");
     let graph = element.attribute("nodegraph");
     let interface = element.attribute("interfacename");
-    if literal.is_some() && (node.is_some() || graph.is_some()) {
+    if literal.is_some() && default.is_some() {
+        return Err(fail(
+            xml,
+            element,
+            DiagnosticCode::InvalidStructure,
+            format!("input '{name}' cannot contain both value and default"),
+        ));
+    }
+    if (literal.is_some() || default.is_some()) && (node.is_some() || graph.is_some()) {
         return Err(fail(
             xml,
             element,
@@ -346,7 +577,9 @@ fn parse_input(
             format!("input '{name}' cannot contain both a literal and a connection"),
         ));
     }
-    if interface.is_some() && (literal.is_some() || node.is_some() || graph.is_some()) {
+    if interface.is_some()
+        && (literal.is_some() || default.is_some() || node.is_some() || graph.is_some())
+    {
         return Err(fail(
             xml,
             element,
@@ -362,10 +595,16 @@ fn parse_input(
             format!("input '{name}' requires a non-empty interfacename"),
         ));
     }
-    let value = literal.map(|value| TypedValue {
-        type_name: type_name.clone().unwrap_or_else(|| "string".into()),
-        value: canonical_value(value),
-    });
+    let value = literal
+        .map(|value| {
+            parse_typed_value(
+                xml,
+                element,
+                type_name.as_deref().unwrap_or("string"),
+                value,
+            )
+        })
+        .transpose()?;
     let connection = node.or(graph).map(|_| Connection {
         node: node.map(str::to_owned),
         output: element.attribute("output").map(str::to_owned),
@@ -395,10 +634,17 @@ fn parse_output(
             format!("nodedef output '{name}' requires a type"),
         ));
     }
-    let value = element.attribute("value").map(|value| TypedValue {
-        type_name: type_name.clone().unwrap_or_else(|| "string".into()),
-        value: canonical_value(value),
-    });
+    let value = element
+        .attribute("value")
+        .map(|value| {
+            parse_typed_value(
+                xml,
+                element,
+                type_name.as_deref().unwrap_or("string"),
+                value,
+            )
+        })
+        .transpose()?;
     let node = element.attribute("nodename");
     let graph = element.attribute("nodegraph");
     if !declaration && value.is_some() {
@@ -624,7 +870,12 @@ fn attrs(
             name,
             "name" | "type" | "value" | "node" | "nodename" | "nodegraph" | "output"
         ) {
-            result.insert(name.to_owned(), attribute.value().to_owned());
+            let value = if name == "default" {
+                canonical_value(attribute.value())
+            } else {
+                attribute.value().to_owned()
+            };
+            result.insert(name.to_owned(), value);
         }
     }
     Ok(result)
@@ -677,4 +928,20 @@ fn canonical_value(value: &str) -> String {
         .filter(|token| !token.is_empty())
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn parse_typed_value(
+    xml: &XmlDocument<'_>,
+    node: XmlNode<'_, '_>,
+    type_name: &str,
+    raw: &str,
+) -> Result<TypedValue, AuthoringError> {
+    TypedValue::from_lexical(type_name, raw).map_err(|message| {
+        fail(
+            xml,
+            node,
+            DiagnosticCode::InvalidValue,
+            format!("invalid {type_name} value: {message}"),
+        )
+    })
 }

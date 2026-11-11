@@ -149,16 +149,29 @@ pub(crate) fn validate_document(document: &Document) -> Result<(), AuthoringErro
         {
             continue;
         }
-        if let Some(canonical) = canonical_category(&definition.category) {
-            let builtin = builtin_author_node(canonical).ok_or_else(|| {
-                error(
-                    DiagnosticCode::InvalidReference,
-                    format!("author_node category '{canonical}' is absent from the PCM catalogue"),
-                )
-            })?;
-            validate_schema_binding(canonical, builtin)?;
-            validate_operator_signature(definition)?;
-        }
+        let Some(canonical) = canonical_category(&definition.category) else {
+            if matches!(
+                definition.category.as_str(),
+                "open_pbr_surface" | "standard_surface"
+            ) {
+                continue;
+            }
+            return Err(error(
+                DiagnosticCode::UnsupportedMaterial,
+                format!(
+                    "nodedef '{}' category '{}' has no graph implementation or executable PCM author_node",
+                    definition.name, definition.category
+                ),
+            ));
+        };
+        let builtin = builtin_author_node(canonical).ok_or_else(|| {
+            error(
+                DiagnosticCode::InvalidReference,
+                format!("author_node category '{canonical}' is absent from the PCM catalogue"),
+            )
+        })?;
+        validate_schema_binding(canonical, builtin)?;
+        validate_operator_signature(definition)?;
     }
 
     for node in document
@@ -227,7 +240,7 @@ fn validate_graph_instance(
     }
 
     for input in &node.inputs {
-        if input.value.is_none()
+        if input.explicit_default().is_none()
             && input.connection.is_none()
             && !input.attributes.contains_key("interfacename")
         {
@@ -305,8 +318,8 @@ fn validate_graph_instance(
         // An `interfacename` on the implementation only forwards the value;
         // it is not a value for an instance that omitted the parameter.
         let has_implementation_binding = implementation_input
-            .is_some_and(|input| input.value.is_some() || input.connection.is_some());
-        if declared.value.is_none() && !has_implementation_binding {
+            .is_some_and(|input| input.explicit_default().is_some() || input.connection.is_some());
+        if declared.explicit_default().is_none() && !has_implementation_binding {
             return Err(error(
                 DiagnosticCode::InvalidStructure,
                 format!(
@@ -372,7 +385,7 @@ fn validate_instance(node: &Node, definition: &NodeDef) -> Result<(), AuthoringE
     validate_operator_signature(definition)?;
 
     for input in &node.inputs {
-        if input.value.is_none()
+        if input.explicit_default().is_none()
             && input.connection.is_none()
             && !input.attributes.contains_key("interfacename")
         {
@@ -406,7 +419,8 @@ fn validate_instance(node: &Node, definition: &NodeDef) -> Result<(), AuthoringE
         }
     }
     for declared in &definition.inputs {
-        if !node.inputs.iter().any(|input| input.name == declared.name) && declared.value.is_none()
+        if !node.inputs.iter().any(|input| input.name == declared.name)
+            && declared.explicit_default().is_none()
         {
             return Err(error(
                 DiagnosticCode::InvalidStructure,

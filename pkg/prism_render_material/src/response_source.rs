@@ -34,6 +34,73 @@ impl ResponseSource {
     }
 }
 
+/// The finite registered-response source set needed by a runtime linker.
+///
+/// The bodies have already crossed `CompiledEntry::from_response_wgsl`, so a
+/// consumer may link this set into its own fixed resource ABI without
+/// reopening authoring input or accepting arbitrary globals.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RegisteredResponseSource {
+    program_id: u32,
+    bodies: Vec<String>,
+}
+
+impl RegisteredResponseSource {
+    /// Creates one linker source from an already validated registered program.
+    /// Callers should obtain `bodies` from `CompiledEntry::response_source`;
+    /// this type does not perform authoring or shader validation itself.
+    pub fn new(program_id: u32, bodies: Vec<String>) -> Self {
+        Self { program_id, bodies }
+    }
+
+    #[must_use]
+    pub const fn program_id(&self) -> u32 {
+        self.program_id
+    }
+
+    #[must_use]
+    pub fn bodies(&self) -> &[String] {
+        &self.bodies
+    }
+}
+
+/// Emits the finite function/link section required by a Native composite
+/// pipeline. The caller supplies the fixed shader resources and the
+/// fail-closed adapter; no package source can add bindings or globals.
+#[must_use]
+pub fn linked_registered_response_wgsl(sources: &[RegisteredResponseSource]) -> String {
+    let mut output = String::from(RESPONSE_FUNCTION_ABI);
+    for source in sources {
+        for (variant, body) in source.bodies.iter().enumerate() {
+            output.push_str(&response_function(
+                &format!("prism_native_registered_p{}_v{variant}", source.program_id),
+                body,
+            ));
+        }
+    }
+    output.push_str(
+        "fn prism_native_registered_evaluate(\n    surface: RegisteredSurfaceData,\n    lighting: RegisteredLightingContext,\n    view: RegisteredView,\n    custom: RegisteredCustomData,\n    program_id: u32,\n    permutation_low: u32,\n    permutation_high: u32,\n) -> RegisteredResponse {\n",
+    );
+    output.push_str(
+        "var invalid: RegisteredResponse;\ninvalid.direct = vec3<f32>(bitcast<f32>(0x7fc00000u), 0.0, 0.0);\nif (permutation_high != 0u) { return invalid; }\nswitch program_id {\n",
+    );
+    for source in sources {
+        output.push_str(&format!(
+            "case {}u: {{ switch permutation_low {{\n",
+            source.program_id
+        ));
+        for variant in 0..source.bodies.len() {
+            output.push_str(&format!(
+                    "case {variant}u: {{ return prism_native_registered_p{}_v{variant}(surface, lighting, view, custom); }}\n",
+                    source.program_id
+                ));
+        }
+        output.push_str("default: { return invalid; }\n} }\n");
+    }
+    output.push_str("default: { return invalid; }\n}\n}\n");
+    output
+}
+
 /// The same header is used both by package validation and the scene linker.
 pub fn response_function(name: &str, body: &str) -> String {
     format!("fn {name}(surface: RegisteredSurfaceData, lighting: RegisteredLightingContext, view: RegisteredView, custom: RegisteredCustomData) -> RegisteredResponse {{\n{body}\n}}\n")

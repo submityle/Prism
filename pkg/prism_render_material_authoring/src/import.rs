@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use prism_render_material::GpuSurfaceParameters;
 
@@ -23,6 +23,8 @@ pub struct RuntimeSurface {
 /// row instead of a scalar parameter.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeTextureInput {
+    /// MaterialX nodegraph that owns the image/normal-map node.
+    pub graph: String,
     /// Canonical Prism surface field name.
     pub field: String,
     /// MaterialX image or normal-map node name.
@@ -72,16 +74,24 @@ pub(crate) fn adapt_openpbr_surface_with_textures(
     document: &Document,
     nodegraph: &str,
     node_name: &str,
-    texture_nodes: &BTreeMap<String, u32>,
+    texture_nodes: &BTreeMap<TextureNodeKey, u32>,
 ) -> Result<RuntimeSurface, AuthoringError> {
     adapt_surface(document, nodegraph, node_name, Some(texture_nodes))
+}
+
+/// A graph-scoped MaterialX image identity used while assembling an artifact.
+/// MaterialX node names are only unique inside their nodegraph.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct TextureNodeKey {
+    pub graph: String,
+    pub node: String,
 }
 
 fn adapt_surface(
     document: &Document,
     nodegraph: &str,
     node_name: &str,
-    texture_nodes: Option<&BTreeMap<String, u32>>,
+    texture_nodes: Option<&BTreeMap<TextureNodeKey, u32>>,
 ) -> Result<RuntimeSurface, AuthoringError> {
     let graph = document
         .nodegraphs
@@ -120,7 +130,7 @@ fn adapt_surface(
     let evaluation_index = crate::evaluator::EvaluationIndex::new(document);
     let mut parameters = GpuSurfaceParameters::default();
     let mut report = AdapterReport::default();
-    let mut supplied_fields = std::collections::BTreeSet::new();
+    let mut supplied_fields = BTreeSet::new();
     for input in &node.inputs {
         let Some(field) = aliases.get(input.name.as_str()).copied() else {
             report.unsupported_fields.push(input.name.clone());
@@ -145,8 +155,9 @@ fn adapt_surface(
                 report.supported_fields.push(field.to_owned());
                 report.textured_fields.push(field.to_owned());
                 report.texture_inputs.push(RuntimeTextureInput {
+                    graph: texture_node.graph,
                     field: field.to_owned(),
-                    node: texture_node,
+                    node: texture_node.node,
                 });
                 continue;
             }
@@ -182,6 +193,14 @@ fn adapt_surface(
     report.textured_fields.dedup();
     report.unsupported_fields.sort();
     report.unsupported_fields.dedup();
+    if let Some(field) = report.unsupported_fields.first() {
+        return Err(error(
+            DiagnosticCode::UnsupportedField,
+            format!(
+                "MaterialX field '{field}' has no Prism runtime mapping; refusing to apply a default"
+            ),
+        ));
+    }
     report.diagnostics = report
         .unsupported_fields
         .iter()
@@ -251,6 +270,10 @@ fn field_aliases(category: &str) -> BTreeMap<&'static str, &'static str> {
     }
     map.insert("specular_roughness_anisotropy", "anisotropy");
     map.insert("transmission_depth", "thickness");
+    map.insert("thinfilm_weight", "thin_film_weight");
+    map.insert("thinfilm_thickness", "thin_film_thickness");
+    map.insert("thinfilm_ior", "thin_film_ior");
+    map.insert("geometry_opacity", "geometry_opacity");
     if category == "standard_surface" {
         map.insert("base", "base_weight");
         map.insert("diffuse_roughness", "base_diffuse_roughness");
@@ -260,7 +283,13 @@ fn field_aliases(category: &str) -> BTreeMap<&'static str, &'static str> {
         map.insert("specular_anisotropy", "anisotropy");
         map.insert("specular_rotation", "anisotropy_rotation");
         map.insert("coat", "coat_weight");
+        map.insert("coat_IOR", "coat_ior");
         map.insert("subsurface", "subsurface_weight");
+        map.insert("subsurface_radius", "subsurface_radius");
+        map.insert("subsurface_radius_scale", "subsurface_radius_scale");
+        map.insert("sheen", "fuzz_weight");
+        map.insert("sheen_color", "fuzz_color");
+        map.insert("sheen_roughness", "fuzz_roughness");
         // Standard Surface's emission input is a weight/intensity, while the
         // runtime field is OpenPBR luminance in nits. Without an explicit
         // unit/exposure conversion this is not a safe alias; leave it in the
@@ -305,24 +334,181 @@ fn texture_source_node(
     document: &Document,
     graph: &crate::NodeGraph,
     input: &crate::Input,
-) -> Option<String> {
-    let connection = input.connection.as_ref()?;
+) -> Option<TextureNodeKey> {
+    let mut active = BTreeSet::new();
+    resolve_texture_input(document, graph, input, &BTreeMap::new(), &mut active)
+}
+
+fn resolve_texture_input(
+    document: &Document,
+    graph: &crate::NodeGraph,
+    input: &crate::Input,
+    interfaces: &BTreeMap<String, TextureNodeKey>,
+    active: &mut BTreeSet<String>,
+) -> Option<TextureNodeKey> {
+    if let Some(connection) = input.connection.as_ref() {
+        return resolve_texture_connection(document, graph, connection, interfaces, active);
+    }
+    input
+        .attributes
+        .get("interfacename")
+        .and_then(|name| interfaces.get(name).cloned())
+}
+
+fn resolve_texture_connection(
+    document: &Document,
+    graph: &crate::NodeGraph,
+    connection: &crate::Connection,
+    interfaces: &BTreeMap<String, TextureNodeKey>,
+    active: &mut BTreeSet<String>,
+) -> Option<TextureNodeKey> {
     let target = connection
         .nodegraph
         .as_deref()
         .and_then(|name| document.nodegraphs.iter().find(|item| item.name == name))
         .unwrap_or(graph);
-    let node_name = connection.node.as_deref()?;
-    let node = target.nodes.iter().find(|node| node.name == node_name)?;
-    match node.category.as_str() {
-        "image" => Some(node.name.clone()),
-        "normalmap" => node
-            .inputs
-            .iter()
-            .find(|input| matches!(input.name.as_str(), "in" | "input" | "normal"))
-            .and_then(|input| texture_source_node(document, target, input)),
-        _ => None,
+    let target_interfaces = if target.name == graph.name {
+        interfaces
+    } else {
+        &BTreeMap::new()
+    };
+    if let Some(node_name) = connection.node.as_deref() {
+        return resolve_texture_node(
+            document,
+            target,
+            node_name,
+            connection.output.as_deref(),
+            target_interfaces,
+            active,
+        );
     }
+    let output = connection
+        .output
+        .as_deref()
+        .or_else(|| (target.outputs.len() == 1).then(|| target.outputs[0].name.as_str()))?;
+    resolve_texture_output(document, target, output, target_interfaces, active)
+}
+
+fn resolve_texture_output(
+    document: &Document,
+    graph: &crate::NodeGraph,
+    output_name: &str,
+    interfaces: &BTreeMap<String, TextureNodeKey>,
+    active: &mut BTreeSet<String>,
+) -> Option<TextureNodeKey> {
+    let key = format!("{}::@output::{output_name}", graph.name);
+    if !active.insert(key.clone()) {
+        return None;
+    }
+    let result = graph
+        .outputs
+        .iter()
+        .find(|output| output.name == output_name)
+        .and_then(|output| output.connection.as_ref())
+        .and_then(|connection| {
+            resolve_texture_connection(document, graph, connection, interfaces, active)
+        });
+    active.remove(&key);
+    result
+}
+
+fn resolve_texture_node(
+    document: &Document,
+    graph: &crate::NodeGraph,
+    node_name: &str,
+    selected_output: Option<&str>,
+    interfaces: &BTreeMap<String, TextureNodeKey>,
+    active: &mut BTreeSet<String>,
+) -> Option<TextureNodeKey> {
+    let key = format!("{}::{node_name}", graph.name);
+    if !active.insert(key.clone()) {
+        return None;
+    }
+    let result = graph
+        .nodes
+        .iter()
+        .find(|node| node.name == node_name)
+        .and_then(|node| match node.category.as_str() {
+            "image" => Some(TextureNodeKey {
+                graph: graph.name.clone(),
+                node: node.name.clone(),
+            }),
+            "normalmap" => node
+                .inputs
+                .iter()
+                .find(|input| matches!(input.name.as_str(), "in" | "input" | "normal"))
+                .and_then(|input| {
+                    resolve_texture_input(document, graph, input, interfaces, active)
+                }),
+            _ => node.nodedef().and_then(|definition_name| {
+                let implementation = document
+                    .nodegraphs
+                    .iter()
+                    .find(|candidate| candidate.nodedef.as_deref() == Some(definition_name))?;
+                let mut implementation_interfaces = BTreeMap::new();
+                for interface in &implementation.inputs {
+                    let value = if let Some(override_input) = node
+                        .inputs
+                        .iter()
+                        .find(|input| input.name == interface.name)
+                    {
+                        resolve_texture_input(document, graph, override_input, interfaces, active)
+                    } else {
+                        resolve_texture_interface(
+                            document,
+                            implementation,
+                            &interface.name,
+                            &BTreeMap::new(),
+                            active,
+                        )
+                    }?;
+                    implementation_interfaces.insert(interface.name.clone(), value);
+                }
+                let output = selected_output.or_else(|| {
+                    (implementation.outputs.len() == 1)
+                        .then(|| implementation.outputs[0].name.as_str())
+                })?;
+                resolve_texture_output(
+                    document,
+                    implementation,
+                    output,
+                    &implementation_interfaces,
+                    active,
+                )
+            }),
+        });
+    active.remove(&key);
+    result
+}
+
+fn resolve_texture_interface(
+    document: &Document,
+    graph: &crate::NodeGraph,
+    name: &str,
+    interfaces: &BTreeMap<String, TextureNodeKey>,
+    active: &mut BTreeSet<String>,
+) -> Option<TextureNodeKey> {
+    if let Some(value) = interfaces.get(name) {
+        return Some(value.clone());
+    }
+    let key = format!("{}::@interface::{name}", graph.name);
+    if !active.insert(key.clone()) {
+        return None;
+    }
+    let result = graph
+        .inputs
+        .iter()
+        .find(|input| input.name == name)
+        .and_then(|input| {
+            if let Some(alias) = input.attributes.get("interfacename") {
+                return resolve_texture_interface(document, graph, alias, interfaces, active);
+            }
+            input.connection.as_ref().and_then(|connection| {
+                resolve_texture_connection(document, graph, connection, interfaces, active)
+            })
+        });
+    active.remove(&key);
+    result
 }
 
 fn value_type(value: &TypedValue) -> Option<&str> {

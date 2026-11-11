@@ -865,6 +865,41 @@ fn the_material_binding_layout_declares_the_abi_and_its_arrays() {
     assert!(matches!(entries[5].ty, BindingType::Buffer { .. }));
 }
 
+#[test]
+fn bindless_layout_and_owner_reject_a_heap_larger_than_the_device_contract() {
+    use crate::material::{
+        MaterialBindingLayout, NativeMaterialTextureBindingOwner, TextureSlotHeap,
+    };
+    use prism_render_driver::{Backend, DeviceCapabilities, Features, Limits, RenderDevice};
+    use prism_render_driver_null::{NullDevice, NullQueue};
+
+    let device: Arc<dyn RenderDevice + Send + Sync> =
+        Arc::new(NullDevice::new_with_capabilities(DeviceCapabilities {
+            backend: Backend::Noop,
+            features: Features::BINDLESS,
+            limits: Limits {
+                max_bindings_per_bind_group: 8,
+                ..Limits::baseline()
+            },
+        }));
+    let layout = MaterialBindingLayout::new(device.as_ref(), 64).expect("bindless layout");
+    assert_eq!(layout.slots, 8, "layout clamps to the exposed limit");
+
+    let images = crate::RenderAssets::<crate::GpuImage>::new();
+    let oversized_heap = TextureSlotHeap::new(9);
+    assert!(
+        NativeMaterialTextureBindingOwner::build(
+            Arc::clone(&device),
+            &NullQueue::new(),
+            &images,
+            &oversized_heap,
+        )
+        .is_none(),
+        "owner must not publish arrays with a count the device cannot address"
+    );
+    let _ = device.capabilities();
+}
+
 /// The binding is accepted by a real device: the layout's array counts and the
 /// resources bound must agree, which only the backend can confirm (a mismatch is
 /// a validation error at group creation).

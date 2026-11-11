@@ -417,6 +417,12 @@ impl MaterialRegistry {
         self.execution_package_count = package_count;
         self.execution_tables = Some(tables.clone());
         self.execution_table_version = self.execution_table_version.wrapping_add(1).max(1);
+        // Headers contain dense plan/program/package indices. A table rebuild
+        // is therefore a material-buffer mutation even when authored records
+        // did not change: every active row (and the permanent fallback row)
+        // must be re-emitted before the new table version can be paired with
+        // the material snapshot.
+        self.dirty.extend(0..self.slots.len() as u32);
         Ok(())
     }
 
@@ -1060,5 +1066,22 @@ mod tests {
         registry.mark_all_dirty();
         assert!(registry.snapshot().buffer_version > version_before);
         assert!(registry.take_dirty().contains(&handle.index));
+    }
+
+    #[test]
+    fn installing_execution_tables_redirties_every_material_header_row() {
+        let mut registry = MaterialRegistry::new(8);
+        let first = registry.allocate().unwrap();
+        let second = registry.allocate().unwrap();
+        registry.publish(record(first, 1)).unwrap();
+        registry.publish(record(second, 1)).unwrap();
+        registry.take_dirty();
+
+        registry
+            .install_execution_tables(&MaterialExecutionTables::new())
+            .unwrap();
+        let dirty = registry.take_dirty();
+        assert_eq!(dirty, vec![0, first.index, second.index]);
+        assert_eq!(registry.execution_table_version(), 2);
     }
 }

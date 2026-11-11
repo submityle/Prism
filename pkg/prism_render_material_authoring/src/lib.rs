@@ -25,18 +25,26 @@ mod import;
 mod ir;
 mod parse;
 mod procedural;
+mod reference;
 
 pub use archetype::MaterialArchetype;
+pub use artifact::{
+    MaterialArtifact, MaterialArtifactError, MaterialArtifactRequest, MaterialRuntimeResponse,
+    MaterialVtAuthoringBinding, MaterialVtPublication,
+};
 pub use author_node::{author_node_identity, author_node_manifest, AuthorNodeIdentity};
 pub use diagnostic::{AuthoringError, Diagnostic, DiagnosticCode, Severity, SourceLocation};
 pub use evaluator::evaluate_connection;
 pub use export::export_materialx;
-pub use artifact::{
-    MaterialArtifact, MaterialArtifactError, MaterialArtifactRequest, MaterialVtAuthoringBinding,
+pub use import::{adapt_openpbr_surface, AdapterReport, RuntimeSurface, RuntimeTextureInput};
+pub use ir::{
+    value_type_kind, Connection, Document, DocumentElement, Input, Node, NodeDef, NodeGraph,
+    Output, TypedValue, ValueTypeKind,
 };
-pub use import::{
-    adapt_openpbr_surface, AdapterReport, RuntimeSurface, RuntimeTextureInput,
-};
-pub use ir::{Connection, Document, Input, Node, NodeDef, NodeGraph, Output, TypedValue};
 pub use parse::parse_materialx;
 pub use procedural::{bake_procedural_graph, lower_procedural_graph, ProceduralGraphError};
+pub use reference::{
+    reference_material, reference_material_from_parameters,
+    reference_material_from_parameters_with_context, reference_material_with_context,
+    ReferenceMaterial, ReferenceMaterialError, ReferenceShadeContext,
+};

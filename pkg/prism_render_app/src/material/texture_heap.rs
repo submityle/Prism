@@ -48,8 +48,36 @@ pub const BLACK_SLOT: u32 = 2;
 pub const FIRST_DYNAMIC_SLOT: u32 = 3;
 /// The generation stamped on the reserved slots. They never move, so it is fixed.
 pub const RESERVED_GENERATION: u32 = 1;
+/// The portable ceiling for a dense authored texture/sampler array.
+///
+/// The frozen Prism RHI does not yet expose wgpu's dedicated binding-array
+/// limits. Wgpu guarantees at least 1,000 sampler-array elements whenever the
+/// binding-array feature is available, so this ceiling is the largest value
+/// this layer may publish without inventing a larger adapter capability.
+pub const BINDLESS_ARRAY_CAPACITY_CEILING: u32 = 1_000;
 /// The default capacity (reserved slots included).
-pub const DEFAULT_CAPACITY: u32 = 1 << 16;
+pub const DEFAULT_CAPACITY: u32 = BINDLESS_ARRAY_CAPACITY_CEILING;
+
+/// Returns one shared capacity for the heap, layout, and owner arrays.
+///
+/// `max_bindings_per_bind_group` is the only binding-count limit currently
+/// exposed by the Prism RHI. It is a conservative additional bound; the
+/// portable ceiling above also covers the sampler-array guarantee that the
+/// RHI cannot report yet. `None` means that the device cannot address even one
+/// dynamic authored image through this path.
+#[must_use]
+pub const fn bindless_capacity(max_bindings_per_bind_group: u32) -> Option<u32> {
+    let capacity = if max_bindings_per_bind_group < BINDLESS_ARRAY_CAPACITY_CEILING {
+        max_bindings_per_bind_group
+    } else {
+        BINDLESS_ARRAY_CAPACITY_CEILING
+    };
+    if capacity > FIRST_DYNAMIC_SLOT {
+        Some(capacity)
+    } else {
+        None
+    }
+}
 
 /// Which reserved slot a semantic resolves to when its map is intentionally
 /// absent. Capacity exhaustion is an error and never selects a fallback.
@@ -366,7 +394,20 @@ impl TextureSlotHeap {
 mod tests {
     use prism_asset::{AssetId, AssetIndex};
 
-    use super::{TextureSlotHeap, FIRST_DYNAMIC_SLOT, RESERVED_GENERATION};
+    use super::{
+        bindless_capacity, TextureSlotHeap, BINDLESS_ARRAY_CAPACITY_CEILING, FIRST_DYNAMIC_SLOT,
+        RESERVED_GENERATION,
+    };
+
+    #[test]
+    fn bindless_capacity_uses_the_exposed_limit_and_portable_ceiling() {
+        assert_eq!(
+            bindless_capacity(u32::MAX),
+            Some(BINDLESS_ARRAY_CAPACITY_CEILING)
+        );
+        assert_eq!(bindless_capacity(FIRST_DYNAMIC_SLOT), None);
+        assert_eq!(bindless_capacity(FIRST_DYNAMIC_SLOT + 1), Some(4));
+    }
 
     /// The generation skips zero on wrap, so `0` stays available as "never handed
     /// out" for consumers that reserve it. The test pokes the slot's generation

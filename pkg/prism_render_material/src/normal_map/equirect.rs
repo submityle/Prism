@@ -31,8 +31,8 @@
 //! * Snyder, *Map Projections: A Working Manual*, USGS (1987) -- the
 //!   equirectangular (plate carree) projection.
 
-use prism_math::ops;
 use core::f32::consts::{PI, TAU};
+use prism_math::ops;
 
 /// Encode a full-sphere unit normal to its equirectangular panel coordinate
 /// `(u, v)` in `[0, 1]^2`.
@@ -71,8 +71,8 @@ pub fn equirect_decode(uv: [f32; 2]) -> [f32; 3] {
 mod tests {
     use super::{equirect_decode, equirect_encode};
     use alloc::vec::Vec;
-    use prism_math::ops;
     use core::f32::consts::TAU;
+    use prism_math::ops;
 
     fn sphere_samples() -> Vec<[f32; 3]> {
         let mut out = Vec::new();

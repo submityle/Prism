@@ -1,9 +1,10 @@
 // Material virtual-texture page resolution and physical-atlas address math.
 //
-// The page-table binding is part of the production group(1) ABI and is owned by
-// this resolver module. Keeping it here avoids passing storage pointers through
-// helper calls, which is rejected by naga/Metal for runtime arrays. The
-// page-table entry ABI is the existing GpuPageTable contract:
+// The page-table binding is owned by this resolver module so lookup helpers can
+// read the runtime array directly; passing storage pointers through helper
+// calls is rejected by naga/Metal for runtime arrays. The consumer selects the
+// production material group with MATERIAL_GROUP_2. The page-table entry ABI is
+// the existing GpuPageTable contract:
 //   word 0 = texture id
 //   word 1 = (mip << 24) | (layer << 8)
 //   word 2 = (page_x << 16) | page_y
@@ -38,7 +39,12 @@ struct MaterialVirtualTextureConfig {
     coarsest_mip: u32,
 }
 
-@group(1) @binding(5) var<storage, read> material_vt_page_table: array<u32>;
+@if(MATERIAL_GROUP_2) {
+    @group(2) @binding(5) var<storage, read> material_vt_page_table: array<u32>;
+}
+@if(!MATERIAL_GROUP_2) {
+    @group(1) @binding(5) var<storage, read> material_vt_page_table: array<u32>;
+}
 
 // Request derived from a material row and the compute resolve's explicit LOD.
 // Coordinates are in the virtual image's mip-space page grid.
@@ -264,10 +270,26 @@ fn material_vt_empty_resolution(vt_is_enabled: bool) -> MaterialVirtualTextureRe
     return out;
 }
 
-// A page-table hit is not sufficient by itself: w3 is an atlas slot and must
-// address a real tile in the configured layered atlas. Keep the multiplication
-// checked before comparing the slot so a malformed config cannot turn a slot
-// into an out-of-range layer or an overflowing atlas capacity.
+// Validate the geometry shared by source-backed atlas rows and page-table rows.
+// Keep multiplication and subtraction bounded before atlas UV construction.
+fn material_vt_geometry_is_valid(config: MaterialVirtualTextureConfig) -> bool {
+    if config.page_size == 0u
+        || config.tile_extent_px == 0u
+        || config.tiles_per_row == 0u
+        || config.atlas_layers == 0u
+    {
+        return false;
+    }
+    if config.tiles_per_row > 0xffffffffu / config.tiles_per_row
+        || config.tile_extent_px > 0xffffffffu / config.tiles_per_row {
+        return false;
+    }
+    if config.gutter_px > (config.tile_extent_px - 1u) / 2u {
+        return false;
+    }
+    return config.page_size <= config.tile_extent_px - 2u * config.gutter_px;
+}
+
 fn material_vt_slot_is_valid(slot: u32, config: MaterialVirtualTextureConfig) -> bool {
     if config.tiles_per_row == 0u || config.atlas_layers == 0u {
         return false;
@@ -309,23 +331,8 @@ fn material_vt_resolve(
         || requested_page_x > MATERIAL_VT_MAX_KEY_COORD
         || requested_page_y > MATERIAL_VT_MAX_KEY_COORD
         || config.entry_count == 0u
-        || config.page_size == 0u
-        || config.tile_extent_px == 0u
-        || config.tiles_per_row == 0u
-        || config.atlas_layers == 0u
+        || !material_vt_geometry_is_valid(config)
     {
-        return miss;
-    }
-    if config.tiles_per_row > 0xffffffffu / config.tiles_per_row
-        || config.tile_extent_px > 0xffffffffu / config.tiles_per_row {
-        return miss;
-    }
-    // Keep subtraction well-defined while validating the caller-owned packing
-    // contract: tile_extent = page_size + 2 * gutter (+ optional spare texels).
-    if config.gutter_px > (config.tile_extent_px - 1u) / 2u {
-        return miss;
-    }
-    if config.page_size > config.tile_extent_px - 2u * config.gutter_px {
         return miss;
     }
 

@@ -1,6 +1,8 @@
 use std::fmt::Write;
 
-use crate::{Connection, Document, Input, Node, NodeDef, NodeGraph, Output, TypedValue};
+use crate::{
+    Connection, Document, DocumentElement, Input, Node, NodeDef, NodeGraph, Output, TypedValue,
+};
 
 /// Exports the supported IR as deterministic, UTF-8 MaterialX XML.
 ///
@@ -16,6 +18,9 @@ pub fn export_materialx(document: &Document) -> String {
     }
     for graph in &document.nodegraphs {
         export_nodegraph(&mut out, graph, 1);
+    }
+    for element in &document.elements {
+        export_document_element(&mut out, element, 1);
     }
     out.push_str("</materialx>\n");
     out
@@ -69,14 +74,27 @@ fn export_nodegraph(out: &mut String, graph: &NodeGraph, indent: usize) {
 
 fn export_node(out: &mut String, node: &Node, indent: usize) {
     let mut attrs = format!(" name=\"{}\"", escape(&node.name));
-    let element = if node.generic_element { "node" } else { &node.category };
+    let element = if node.generic_element {
+        "node"
+    } else {
+        &node.category
+    };
     if node.generic_element {
         attrs.push_str(&format!(" type=\"{}\"", escape(&node.category)));
     }
     if let Some(value) = &node.value {
+        let value_type = node
+            .value_type
+            .as_deref()
+            .unwrap_or(value.type_name.as_str());
+        let value_attribute = if node.generic_element {
+            "datatype"
+        } else {
+            "type"
+        };
         attrs.push_str(&format!(
-            " type=\"{}\"{}",
-            escape(&value.type_name),
+            " {value_attribute}=\"{}\"{}",
+            escape(value_type),
             value_attributes(value)
         ));
     }
@@ -93,6 +111,49 @@ fn export_node(out: &mut String, node: &Node, indent: usize) {
         export_output(out, output, indent + 1, false);
     }
     line(out, indent, &format!("</{}>", element));
+}
+
+fn export_document_element(out: &mut String, element: &DocumentElement, indent: usize) {
+    let mut attrs = String::new();
+    if let Some(name) = &element.name {
+        attrs.push_str(&format!(" name=\"{}\"", escape(name)));
+    }
+    if let Some(value) = &element.value {
+        attrs.push_str(&format!(" type=\"{}\"", escape(&value.type_name)));
+        attrs.push_str(&value_attributes(value));
+    }
+    attrs.push_str(&attributes(&element.attributes));
+    if element.inputs.is_empty()
+        && element.outputs.is_empty()
+        && element.children.is_empty()
+        && element.value.is_none()
+        && element.text.is_none()
+    {
+        line(
+            out,
+            indent,
+            &format!("<{}{} />", escape(&element.category), attrs),
+        );
+        return;
+    }
+    line(
+        out,
+        indent,
+        &format!("<{}{}>", escape(&element.category), attrs),
+    );
+    for input in &element.inputs {
+        export_input(out, input, indent + 1, false);
+    }
+    for output in &element.outputs {
+        export_output(out, output, indent + 1, false);
+    }
+    for child in &element.children {
+        export_document_element(out, child, indent + 1);
+    }
+    if let Some(text) = &element.text {
+        line(out, indent + 1, &escape(text));
+    }
+    line(out, indent, &format!("</{}>", escape(&element.category)));
 }
 
 fn export_input(out: &mut String, input: &Input, indent: usize, declaration: bool) {

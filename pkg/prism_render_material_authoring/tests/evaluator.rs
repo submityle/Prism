@@ -96,6 +96,31 @@ fn evaluator_rejects_reversed_clamp_bounds_without_panicking() {
 }
 
 #[test]
+fn separate_rejects_unknown_output_instead_of_returning_x_component() {
+    let document = parse_materialx(
+        r#"<materialx><nodegraph name="g">
+      <constant name="value" type="vector3" value="0.1, 0.2, 0.3"/>
+      <separate3 name="split"><input name="in" nodename="value"/></separate3>
+    </nodegraph></materialx>"#,
+    )
+    .unwrap();
+    let graph = &document.nodegraphs[0];
+    let error = evaluate_connection(
+        &document,
+        graph,
+        &Connection {
+            node: Some("split".into()),
+            output: Some("outq".into()),
+            nodegraph: None,
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(error.0.code, DiagnosticCode::InvalidReference);
+    assert!(error.to_string().contains("outq"));
+}
+
+#[test]
 fn evaluator_resolves_graph_outputs_and_interfaces_through_nested_expressions() {
     let document = parse_materialx(
         r#"<materialx><nodegraph name="g"><input name="scale" type="float" value="0.5"/><constant name="base" type="float" value="0.4"/><multiply name="scaled"><input name="in1" nodename="base"/><input name="in2" interfacename="scale"/></multiply><output name="out" type="float" nodename="scaled"/></nodegraph></materialx>"#,

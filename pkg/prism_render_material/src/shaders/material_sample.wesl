@@ -57,6 +57,36 @@ const SEMANTIC_CLEAR_COAT_NORMAL: u32 = 7u;
 const SEMANTIC_FACE_SDF: u32 = 8u;
 const SEMANTIC_MEASURED_BRDF: u32 = 9u;
 const SEMANTIC_ILLUMINATION_MASK: u32 = 10u;
+const SEMANTIC_TRANSMISSION_WEIGHT: u32 = 12u;
+const SEMANTIC_TRANSMISSION_COLOR: u32 = 13u;
+const SEMANTIC_TRANSMISSION_SCATTER: u32 = 14u;
+const SEMANTIC_TRANSMISSION_SCATTER_ANISOTROPY: u32 = 15u;
+const SEMANTIC_TRANSMISSION_DISPERSION_SCALE: u32 = 16u;
+const SEMANTIC_TRANSMISSION_DISPERSION_ABBE_NUMBER: u32 = 17u;
+const SEMANTIC_FUZZ_WEIGHT: u32 = 18u;
+const SEMANTIC_FUZZ_ROUGHNESS: u32 = 19u;
+const SEMANTIC_FUZZ_COLOR: u32 = 20u;
+const SEMANTIC_SUBSURFACE_WEIGHT: u32 = 21u;
+const SEMANTIC_SUBSURFACE_COLOR: u32 = 22u;
+const SEMANTIC_SUBSURFACE_RADIUS: u32 = 23u;
+const SEMANTIC_SUBSURFACE_RADIUS_SCALE: u32 = 24u;
+const SEMANTIC_SUBSURFACE_SCATTER_ANISOTROPY: u32 = 25u;
+const SEMANTIC_THIN_FILM_WEIGHT: u32 = 26u;
+const SEMANTIC_THIN_FILM_THICKNESS: u32 = 27u;
+const SEMANTIC_THIN_FILM_IOR: u32 = 28u;
+const SEMANTIC_THICKNESS: u32 = 29u;
+const SEMANTIC_BASE_WEIGHT: u32 = 30u;
+const SEMANTIC_BASE_DIFFUSE_ROUGHNESS: u32 = 31u;
+const SEMANTIC_SPECULAR_WEIGHT: u32 = 32u;
+const SEMANTIC_SPECULAR_COLOR: u32 = 33u;
+const SEMANTIC_SPECULAR_IOR: u32 = 34u;
+const SEMANTIC_ANISOTROPY: u32 = 35u;
+const SEMANTIC_ANISOTROPY_ROTATION: u32 = 36u;
+const SEMANTIC_COAT_IOR: u32 = 37u;
+const SEMANTIC_COAT_COLOR: u32 = 38u;
+const SEMANTIC_COAT_ROUGHNESS_ANISOTROPY: u32 = 39u;
+const SEMANTIC_COAT_DARKENING: u32 = 40u;
+const SEMANTIC_EMISSION_LUMINANCE: u32 = 41u;
 
 // Squared-length floor for a decoded normal before it collapses to +Z. Mirrors
 // `NORMAL_EPSILON` on the CPU golden and `normalize_or` across the reference.
@@ -68,20 +98,68 @@ const NORMAL_EPSILON: f32 = 1e-12;
 // bindless specialization. This is important: a non-bindless device has no
 // binding-array entries in MaterialBindGroup, so merely leaving the arrays
 // unused would still make its pipeline layout invalid.
-@if(MATERIAL_BINDLESS) @group(1) @binding(3) var material_texture_heap: binding_array<texture_2d<f32>>;
-@if(MATERIAL_BINDLESS) @group(1) @binding(4) var material_sampler_heap: binding_array<sampler>;
+@if(MATERIAL_BINDLESS) {
+    @if(MATERIAL_GROUP_2) {
+        @group(2) @binding(3) var material_texture_heap: binding_array<texture_2d<f32>>;
+        @group(2) @binding(4) var material_sampler_heap: binding_array<sampler>;
+    }
+    @if(!MATERIAL_GROUP_2) {
+        @group(1) @binding(3) var material_texture_heap: binding_array<texture_2d<f32>>;
+        @group(1) @binding(4) var material_sampler_heap: binding_array<sampler>;
+    }
+}
 // Bindless-only slot generation publication. The CPU bind-group owner supplies
 // this dense table at binding 9; keeping it behind the same specialization is
 // what makes the non-bindless layout free of both arrays and binding 9.
-@if(MATERIAL_BINDLESS) @group(1) @binding(9) var<storage, read> material_texture_generation_table: array<u32>;
+@if(MATERIAL_BINDLESS) {
+    @if(MATERIAL_GROUP_2) {
+        @group(2) @binding(9) var<storage, read> material_texture_generation_table: array<u32>;
+    }
+    @if(!MATERIAL_GROUP_2) {
+        @group(1) @binding(9) var<storage, read> material_texture_generation_table: array<u32>;
+    }
+}
 
 // Material-VT production ABI. Bindings 5-8 deliberately extend the existing
 // material group without moving the bindless arrays: the parent integration
 // supplies these resources, including valid dummy resources when disabled.
-@group(1) @binding(5) var<storage, read> material_vt_page_table: array<u32>;
-@group(1) @binding(6) var<storage, read> material_vt_config: MaterialVirtualTextureConfig;
-@group(1) @binding(7) var material_vt_atlas: texture_2d_array<f32>;
-@group(1) @binding(8) var material_vt_sampler: sampler;
+// The page-table declaration lives in material_virtual_texture.wesl because the
+// lookup helpers in that module read the runtime array directly.
+@if(MATERIAL_GROUP_2) {
+    @group(2) @binding(6) var<storage, read> material_vt_config_words: array<u32>;
+    @group(2) @binding(7) var material_vt_atlas: texture_2d_array<f32>;
+    @group(2) @binding(8) var material_vt_sampler: sampler;
+}
+@if(!MATERIAL_GROUP_2) {
+    @group(1) @binding(6) var<storage, read> material_vt_config_words: array<u32>;
+    @group(1) @binding(7) var material_vt_atlas: texture_2d_array<f32>;
+    @group(1) @binding(8) var material_vt_sampler: sampler;
+}
+
+fn material_vt_config() -> MaterialVirtualTextureConfig {
+    var out: MaterialVirtualTextureConfig;
+    if arrayLength(&material_vt_config_words) < 8u {
+        out.enabled = 0u;
+        out.entry_count = 0u;
+        out.page_size = 0u;
+        out.tile_extent_px = 0u;
+        out.tiles_per_row = 0u;
+        out.atlas_layers = 0u;
+        out.gutter_px = 0u;
+        out.coarsest_mip = 0u;
+        return out;
+    }
+    out.enabled = material_vt_config_words[0];
+    out.entry_count = material_vt_config_words[1];
+    out.page_size = material_vt_config_words[2];
+    out.tile_extent_px = material_vt_config_words[3];
+    out.tiles_per_row = material_vt_config_words[4];
+    out.atlas_layers = material_vt_config_words[5];
+    out.gutter_px = material_vt_config_words[6];
+    out.coarsest_mip = material_vt_config_words[7];
+    return out;
+}
+
 // Texture-modulated surface inputs handed to the analytic BSDF. Mirrors
 // `SampledMaterial` on the CPU golden field for field.
 struct SampledMaterial {
@@ -99,6 +177,37 @@ struct SampledMaterial {
     clearcoat_roughness: f32,
     clearcoat_normal_tangent: vec3<f32>,
     has_clearcoat_normal: bool,
+    emission_luminance: f32,
+    base_weight: f32,
+    base_diffuse_roughness: f32,
+    specular_weight: f32,
+    specular_color: vec3<f32>,
+    specular_ior: f32,
+    coat_ior: f32,
+    coat_color: vec3<f32>,
+    coat_roughness_anisotropy: f32,
+    coat_darkening: f32,
+    anisotropy: f32,
+    anisotropy_rotation: f32,
+    fuzz_weight: f32,
+    fuzz_roughness: f32,
+    fuzz_color: vec3<f32>,
+    subsurface_weight: f32,
+    subsurface_color: vec3<f32>,
+    subsurface_radius: f32,
+    subsurface_radius_scale: vec3<f32>,
+    subsurface_scatter_anisotropy: f32,
+    transmission_weight: f32,
+    thickness: f32,
+    index_of_refraction: f32,
+    transmission_dispersion_scale: f32,
+    transmission_color: vec3<f32>,
+    transmission_scatter: vec3<f32>,
+    transmission_scatter_anisotropy: f32,
+    transmission_dispersion_abbe_number: f32,
+    thin_film_weight: f32,
+    thin_film_thickness: f32,
+    thin_film_ior: f32,
 }
 
 // Exact IEC 61966-2-1 sRGB electro-optical transfer function (single channel).
@@ -151,6 +260,37 @@ fn sampled_material_defaults(parameters: PrismSurfaceParameters) -> SampledMater
     out.clearcoat_roughness = parameters.coat_roughness;
     out.clearcoat_normal_tangent = vec3<f32>(0.0, 0.0, 1.0);
     out.has_clearcoat_normal = false;
+    out.emission_luminance = parameters.emission_luminance;
+    out.base_weight = parameters.base_weight;
+    out.base_diffuse_roughness = parameters.base_diffuse_roughness;
+    out.specular_weight = parameters.specular_weight;
+    out.specular_color = parameters.specular_color.xyz;
+    out.specular_ior = parameters.specular_ior;
+    out.coat_ior = parameters.coat_ior;
+    out.coat_color = parameters.coat_color.xyz;
+    out.coat_roughness_anisotropy = parameters.coat_roughness_anisotropy;
+    out.coat_darkening = parameters.coat_darkening;
+    out.anisotropy = parameters.anisotropy;
+    out.anisotropy_rotation = parameters.anisotropy_rotation;
+    out.fuzz_weight = parameters.fuzz_weight;
+    out.fuzz_roughness = parameters.fuzz_roughness;
+    out.fuzz_color = parameters.fuzz_color.xyz;
+    out.subsurface_weight = parameters.subsurface_weight;
+    out.subsurface_color = parameters.subsurface_color.xyz;
+    out.subsurface_radius = parameters.subsurface_radius;
+    out.subsurface_radius_scale = parameters.subsurface_radius_scale.xyz;
+    out.subsurface_scatter_anisotropy = parameters.subsurface_scatter_anisotropy;
+    out.transmission_weight = parameters.transmission_weight;
+    out.thickness = parameters.thickness;
+    out.index_of_refraction = parameters.index_of_refraction;
+    out.transmission_dispersion_scale = parameters.transmission_dispersion_scale;
+    out.transmission_color = parameters.transmission_color.xyz;
+    out.transmission_scatter = parameters.transmission_scatter.xyz;
+    out.transmission_scatter_anisotropy = parameters.transmission_scatter_anisotropy;
+    out.transmission_dispersion_abbe_number = parameters.transmission_dispersion_abbe_number;
+    out.thin_film_weight = parameters.thin_film_weight;
+    out.thin_film_thickness = parameters.thin_film_thickness;
+    out.thin_film_ior = parameters.thin_film_ior;
     return out;
 }
 
@@ -251,26 +391,26 @@ fn sample_texture_slot(
     uv: vec2<f32>,
     lod: f32,
 ) -> vec4<f32> {
+    let vt_config = material_vt_config();
     if !material_texture_record_is_valid(record) {
         return material_default_texture_texel(record.semantic);
     }
     @if(!MATERIAL_BINDLESS) {
         if record.virtual_texture_id == 0xfffffffeu
-            && material_vt_config.enabled != 0u
-            && material_vt_geometry_is_valid(material_vt_config)
-            && material_vt_slot_is_valid(record.index, material_vt_config)
+            && vt_config.enabled != 0u
+            && material_vt_geometry_is_valid(vt_config)
+            && material_vt_slot_is_valid(record.index, vt_config)
             && record.virtual_texture_width > 0u
             && record.virtual_texture_height > 0u
             && record.virtual_texture_width <= record.virtual_texture_page_size
             && record.virtual_texture_height <= record.virtual_texture_page_size
-            && record.virtual_texture_page_size == material_vt_config.page_size {
+            && record.virtual_texture_page_size == vt_config.page_size {
             let atlas_dimensions = textureDimensions(material_vt_atlas);
             let atlas_layers = textureNumLayers(material_vt_atlas);
-            let configured_extent = material_vt_config.tile_extent_px
-                * material_vt_config.tiles_per_row;
+            let configured_extent = vt_config.tile_extent_px * vt_config.tiles_per_row;
             if atlas_dimensions.x != configured_extent
                 || atlas_dimensions.y != configured_extent
-                || atlas_layers < material_vt_config.atlas_layers {
+                || atlas_layers < vt_config.atlas_layers {
                 return material_default_texture_texel(record.semantic);
             }
             let source_uv = clamp(
@@ -285,15 +425,15 @@ fn sample_texture_slot(
             var portable = resolution;
             portable.hit = true;
             portable.slot = record.index;
-            portable.atlas_layer = record.index / max(material_vt_config.tiles_per_row * material_vt_config.tiles_per_row, 1u);
+            portable.atlas_layer = record.index / max(vt_config.tiles_per_row * vt_config.tiles_per_row, 1u);
             portable.page_local_uv = source_uv;
             portable.atlas_uv = material_vt_atlas_uv(
                 source_uv,
                 record.index,
-                material_vt_config.tile_extent_px,
-                material_vt_config.tiles_per_row,
-                material_vt_config.page_size,
-                material_vt_config.gutter_px,
+                vt_config.tile_extent_px,
+                vt_config.tiles_per_row,
+                vt_config.page_size,
+                vt_config.gutter_px,
             );
             return material_vt_sample_resolved(material_vt_atlas, material_vt_sampler, portable);
         }
@@ -317,8 +457,7 @@ fn sample_texture_slot(
     }
     // One page table/configuration describes one atlas geometry. A row with a
     // different page size cannot be resolved safely and remains direct-bound.
-    if material_vt_config.enabled == 0u
-        || record.virtual_texture_page_size != material_vt_config.page_size {
+    if vt_config.enabled == 0u || record.virtual_texture_page_size != vt_config.page_size {
         @if(MATERIAL_BINDLESS) {
             return sample_texture_slot_direct(record, uv, lod);
         }
@@ -328,7 +467,7 @@ fn sample_texture_slot(
     }
 
     let resolution = material_vt_resolve(
-        material_vt_config,
+        vt_config,
         record.virtual_texture_id,
         0u,
         request.mip,
@@ -346,13 +485,12 @@ fn sample_texture_slot(
     }
     let atlas_dimensions = textureDimensions(material_vt_atlas);
     let atlas_layers = textureNumLayers(material_vt_atlas);
-    let configured_extent = material_vt_config.tile_extent_px
-        * material_vt_config.tiles_per_row;
+    let configured_extent = vt_config.tile_extent_px * vt_config.tiles_per_row;
     if atlas_dimensions.x == 0u
         || atlas_dimensions.y == 0u
         || atlas_dimensions.x != configured_extent
         || atlas_dimensions.y != configured_extent
-        || atlas_layers < material_vt_config.atlas_layers
+        || atlas_layers < vt_config.atlas_layers
         || resolution.atlas_layer >= atlas_layers {
         @if(MATERIAL_BINDLESS) {
             return sample_texture_slot_direct(record, uv, lod);
@@ -481,6 +619,37 @@ fn fail_closed_sampled_material(sampled: SampledMaterial) -> SampledMaterial {
     out.clearcoat_roughness = 1.0;
     out.clearcoat_normal_tangent = vec3<f32>(0.0, 0.0, 1.0);
     out.has_clearcoat_normal = false;
+    out.emission_luminance = 0.0;
+    out.base_weight = 0.0;
+    out.base_diffuse_roughness = 1.0;
+    out.specular_weight = 0.0;
+    out.specular_color = vec3<f32>(0.0);
+    out.specular_ior = 1.0;
+    out.coat_ior = 1.0;
+    out.coat_color = vec3<f32>(0.0);
+    out.coat_roughness_anisotropy = 0.0;
+    out.coat_darkening = 0.0;
+    out.anisotropy = 0.0;
+    out.anisotropy_rotation = 0.0;
+    out.fuzz_weight = 0.0;
+    out.fuzz_roughness = 1.0;
+    out.fuzz_color = vec3<f32>(0.0);
+    out.subsurface_weight = 0.0;
+    out.subsurface_color = vec3<f32>(0.0);
+    out.subsurface_radius = 0.0;
+    out.subsurface_radius_scale = vec3<f32>(0.0);
+    out.subsurface_scatter_anisotropy = 0.0;
+    out.transmission_weight = 0.0;
+    out.thickness = 0.0;
+    out.index_of_refraction = 1.0;
+    out.transmission_dispersion_scale = 0.0;
+    out.transmission_color = vec3<f32>(0.0);
+    out.transmission_scatter = vec3<f32>(0.0);
+    out.transmission_scatter_anisotropy = 0.0;
+    out.transmission_dispersion_abbe_number = 1.0;
+    out.thin_film_weight = 0.0;
+    out.thin_film_thickness = 0.0;
+    out.thin_film_ior = 1.0;
     out.texture_contract_valid = false;
     return out;
 }
@@ -528,6 +697,36 @@ fn fold_material_texel(
             out.clearcoat_normal_tangent = decode_tangent_normal(rgb, normal_scale);
             out.has_clearcoat_normal = true;
         }
+        case SEMANTIC_TRANSMISSION_WEIGHT: { out.transmission_weight = out.transmission_weight * texel.x; }
+        case SEMANTIC_TRANSMISSION_COLOR: { out.transmission_color = out.transmission_color * srgb_to_linear(rgb); }
+        case SEMANTIC_TRANSMISSION_SCATTER: { out.transmission_scatter = out.transmission_scatter * rgb; }
+        case SEMANTIC_TRANSMISSION_SCATTER_ANISOTROPY: { out.transmission_scatter_anisotropy = out.transmission_scatter_anisotropy * (texel.x * 2.0 - 1.0); }
+        case SEMANTIC_TRANSMISSION_DISPERSION_SCALE: { out.transmission_dispersion_scale = out.transmission_dispersion_scale * texel.x; }
+        case SEMANTIC_TRANSMISSION_DISPERSION_ABBE_NUMBER: { out.transmission_dispersion_abbe_number = out.transmission_dispersion_abbe_number * texel.x; }
+        case SEMANTIC_FUZZ_WEIGHT: { out.fuzz_weight = out.fuzz_weight * texel.x; }
+        case SEMANTIC_FUZZ_ROUGHNESS: { out.fuzz_roughness = out.fuzz_roughness * texel.x; }
+        case SEMANTIC_FUZZ_COLOR: { out.fuzz_color = out.fuzz_color * srgb_to_linear(rgb); }
+        case SEMANTIC_SUBSURFACE_WEIGHT: { out.subsurface_weight = out.subsurface_weight * texel.x; }
+        case SEMANTIC_SUBSURFACE_COLOR: { out.subsurface_color = out.subsurface_color * srgb_to_linear(rgb); }
+        case SEMANTIC_SUBSURFACE_RADIUS: { out.subsurface_radius = out.subsurface_radius * texel.x; }
+        case SEMANTIC_SUBSURFACE_RADIUS_SCALE: { out.subsurface_radius_scale = out.subsurface_radius_scale * rgb; }
+        case SEMANTIC_SUBSURFACE_SCATTER_ANISOTROPY: { out.subsurface_scatter_anisotropy = out.subsurface_scatter_anisotropy * (texel.x * 2.0 - 1.0); }
+        case SEMANTIC_THIN_FILM_WEIGHT: { out.thin_film_weight = out.thin_film_weight * texel.x; }
+        case SEMANTIC_THIN_FILM_THICKNESS: { out.thin_film_thickness = out.thin_film_thickness * texel.x; }
+        case SEMANTIC_THIN_FILM_IOR: { out.thin_film_ior = out.thin_film_ior * texel.x; }
+        case SEMANTIC_THICKNESS: { out.thickness = out.thickness * texel.x; }
+        case SEMANTIC_BASE_WEIGHT: { out.base_weight = out.base_weight * texel.x; }
+        case SEMANTIC_BASE_DIFFUSE_ROUGHNESS: { out.base_diffuse_roughness = out.base_diffuse_roughness * texel.x; }
+        case SEMANTIC_SPECULAR_WEIGHT: { out.specular_weight = out.specular_weight * texel.x; }
+        case SEMANTIC_SPECULAR_COLOR: { out.specular_color = out.specular_color * srgb_to_linear(rgb); }
+        case SEMANTIC_SPECULAR_IOR: { out.specular_ior = out.specular_ior * texel.x; }
+        case SEMANTIC_ANISOTROPY: { out.anisotropy = out.anisotropy * texel.x; }
+        case SEMANTIC_ANISOTROPY_ROTATION: { out.anisotropy_rotation = out.anisotropy_rotation * texel.x; }
+        case SEMANTIC_COAT_IOR: { out.coat_ior = out.coat_ior * texel.x; }
+        case SEMANTIC_COAT_COLOR: { out.coat_color = out.coat_color * srgb_to_linear(rgb); }
+        case SEMANTIC_COAT_ROUGHNESS_ANISOTROPY: { out.coat_roughness_anisotropy = out.coat_roughness_anisotropy * texel.x; }
+        case SEMANTIC_COAT_DARKENING: { out.coat_darkening = out.coat_darkening * texel.x; }
+        case SEMANTIC_EMISSION_LUMINANCE: { out.emission_luminance = out.emission_luminance * texel.x; }
         case SEMANTIC_FACE_SDF, SEMANTIC_MEASURED_BRDF, SEMANTIC_ILLUMINATION_MASK: {}
         default: {
             return fail_closed_sampled_material(out);

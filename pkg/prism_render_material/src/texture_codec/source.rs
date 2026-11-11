@@ -258,15 +258,19 @@ impl TexelSource for BcTexelSource {
         let offset = block_index * bb;
 
         let blob = &self.mips[mip as usize];
-        let Some(bytes) = blob.get(offset..offset + bb) else {
-            // Layout was validated in `new`, so this is unreachable in practice;
-            // return opaque black rather than panicking if ever reached.
-            return [0.0, 0.0, 0.0, 1.0];
-        };
+        // `new` validates every mip's exact block layout. Keep corruption
+        // visible if this internal invariant is ever broken; a black texel
+        // would silently change the material response.
+        let bytes = blob
+            .get(offset..offset + bb)
+            .expect("validated BC mip layout must contain the requested block");
 
-        // `new` validated every block for fallible formats, so decode always
-        // succeeds here; keep a defensive opaque-black fallback regardless.
-        let texels = self.format.decode(bytes).unwrap_or([[0, 0, 0, 255]; 16]);
+        // Fallible formats were prevalidated by `new`; an error here means the
+        // source was mutated through an invalid internal path.
+        let texels = self
+            .format
+            .decode(bytes)
+            .expect("validated BC block must remain decodable");
         let local = ((y % 4) * 4 + (x % 4)) as usize;
         let px = texels[local];
         [
@@ -337,6 +341,21 @@ mod tests {
         // mip far beyond range clamps to the only level; oversized coords clamp.
         let t = src.texel(99, 99, 99);
         assert!(t[0] > 0.99 && (t[3] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    #[should_panic(expected = "validated BC mip layout must contain the requested block")]
+    fn texel_does_not_turn_internal_layout_corruption_into_black() {
+        // Bypass `new` only to exercise the invariant guard directly. A
+        // malformed source must stay visible to callers instead of producing
+        // a plausible but wrong material colour.
+        let src = BcTexelSource {
+            format: BcFormat::Bc1,
+            width: 4,
+            height: 4,
+            mips: vec![vec![0u8; 7]],
+        };
+        let _ = src.texel(0, 0, 0);
     }
 
     #[test]

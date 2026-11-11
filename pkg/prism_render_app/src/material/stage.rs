@@ -17,6 +17,7 @@ pub const FALLBACK_MATERIAL_INDEX: u32 = 0;
 
 use crate::runtime_resource::RenderRuntimeResource;
 
+use super::binding::NativeMaterialTextureBindings;
 use super::buffers::{
     ExecutionTableSyncError, MaterialParameterBuffers, MaterialSyncReport,
     NativeExecutionTableBuffers,
@@ -80,6 +81,8 @@ pub struct RenderMaterials {
     /// republish releases exactly what it took and a retirement releases the
     /// rest.
     held: BTreeMap<u32, Vec<HeldTexture>>,
+    /// Publication number for the authored texture heap bindings.
+    texture_binding_version: u64,
 }
 
 impl RenderMaterials {
@@ -90,6 +93,7 @@ impl RenderMaterials {
             registry: MaterialRegistry::new(capacity),
             textures: TextureSlotHeap::default(),
             held: BTreeMap::new(),
+            texture_binding_version: 0,
         }
     }
 
@@ -113,6 +117,7 @@ impl RenderMaterials {
     /// anything is published.
     pub fn set_texture_capacity(&mut self, capacity: u32) {
         self.textures.reset_with_capacity(capacity);
+        self.texture_binding_version = self.texture_binding_version.wrapping_add(1);
     }
 
     /// Resolves a material's authored texture references into ABI rows.
@@ -194,6 +199,7 @@ impl RenderMaterials {
             }
         }
         self.textures = heap;
+        self.texture_binding_version = self.texture_binding_version.wrapping_add(1);
         self.held.remove(&index);
         if !images.is_empty() {
             self.held.insert(index, images);
@@ -245,6 +251,9 @@ impl RenderMaterials {
             if self.textures.slot_of(held.image) == Some(held.slot) {
                 self.textures.release(held.image);
             }
+        }
+        if !images.is_empty() {
+            self.texture_binding_version = self.texture_binding_version.wrapping_add(1);
         }
         images.len()
     }
@@ -307,9 +316,39 @@ impl RenderMaterials {
     pub fn registry_mut(&mut self) -> &mut MaterialRegistry {
         &mut self.registry
     }
+
+    /// Publication number for the current authored texture heap state.
+    #[must_use]
+    pub const fn texture_binding_version(&self) -> u64 {
+        self.texture_binding_version
+    }
 }
 
 impl Resource for RenderMaterials {}
+
+/// Publishes the bindless authored-image arrays after GPU images and material
+/// rows have been prepared. Non-bindless devices intentionally publish no
+/// direct heap; their shader path must consume a valid portable VT row.
+pub(crate) fn prepare_native_texture_bindings<I>(
+    mut bindings: ResMut<NativeMaterialTextureBindings>,
+    materials: Res<RenderMaterials>,
+    images: Res<crate::render_asset::RenderAssets<crate::GpuImage>>,
+    runtime: Res<RenderRuntimeResource<I>>,
+) where
+    I: Instance + Send + Sync + 'static,
+    I::Adapter: Send + Sync + 'static,
+    I::Device: Send + Sync + 'static,
+    I::Queue: Send + Sync + FrameSync + 'static,
+    I::Surface: Send + Sync + 'static,
+{
+    bindings.prepare(
+        runtime.runtime().device_handle(),
+        runtime.runtime().queue(),
+        runtime.runtime().device_generation(),
+        &materials,
+        &images,
+    );
+}
 
 /// The most recent upload pass's report.
 #[derive(Resource, Default, Debug)]

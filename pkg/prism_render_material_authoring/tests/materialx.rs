@@ -1,7 +1,7 @@
 #![allow(missing_docs, reason = "integration tests are self-describing")]
 
 use prism_render_material_authoring::{
-    adapt_openpbr_surface, export_materialx, parse_materialx, Connection, DiagnosticCode, Severity,
+    adapt_openpbr_surface, export_materialx, parse_materialx, Connection, DiagnosticCode,
 };
 
 const SOURCE: &str = r#"<?xml version="1.0"?>
@@ -78,7 +78,7 @@ fn author_node_instances_fail_closed_on_invalid_nodedef_contracts() {
         (
             r#"<materialx><nodedef name="ND_noise" node="noise"><input name="in" type="float" value="0"/><output name="out" type="float"/></nodedef><nodegraph name="g"><noise name="n" nodedef="ND_noise"/></nodegraph></materialx>"#,
             DiagnosticCode::UnsupportedMaterial,
-            "no executable PCM author_node",
+            "no graph implementation or executable PCM author_node",
         ),
         (
             r#"<materialx><nodedef name="ND_add" node="add"><input name="a" type="float" value="1"/><input name="b" type="float" value="2"/><output name="out" type="float"/></nodedef><nodegraph name="g"><multiply name="n" nodedef="ND_add"/></nodegraph></materialx>"#,
@@ -173,6 +173,76 @@ fn unknown_node_is_rejected_with_location_and_machine_code() {
 }
 
 #[test]
+fn document_elements_and_source_text_round_trip_without_dropping_structure() {
+    let document = parse_materialx(
+        r#"<materialx version="1.38">
+          <surfacematerial name="mat"><input name="shader" type="surfaceshader" nodename="surface"/></surfacematerial>
+          <implementation name="impl" target="glsl"><sourcecode><![CDATA[return base_color;]]></sourcecode><propertyset name="props"><property name="scale" type="float" value="2"/></propertyset></implementation>
+          <nodegraph name="surface"><open_pbr_surface name="surface"/></nodegraph>
+        </materialx>"#,
+    )
+    .expect("document-level MaterialX elements parse");
+    assert_eq!(document.elements.len(), 2);
+    assert_eq!(document.elements[0].category, "surfacematerial");
+    assert_eq!(
+        document.elements[1].children[0].text.as_deref(),
+        Some("return base_color;")
+    );
+    assert_eq!(
+        document.elements[1].children[1].children[0].name.as_deref(),
+        Some("scale")
+    );
+    assert_eq!(
+        document.elements[1].children[1].children[0]
+            .value
+            .as_ref()
+            .map(|value| value.value.as_str()),
+        Some("2")
+    );
+    let round_trip = parse_materialx(&export_materialx(&document)).expect("document round trip");
+    assert_eq!(round_trip, document);
+}
+
+#[test]
+fn unknown_document_element_attributes_are_structured_errors() {
+    let error =
+        parse_materialx(r#"<materialx><implementation name="impl" unexpected="x"/></materialx>"#)
+            .expect_err("unknown document attributes must not be dropped");
+    assert_eq!(error.0.code, DiagnosticCode::UnsupportedElement);
+    assert!(error.to_string().contains("unexpected"));
+}
+
+#[test]
+fn known_numeric_nodes_evaluate_at_the_authoring_boundary() {
+    let cases = [
+        (
+            "dotproduct",
+            r#"<input name="a" type="vector3" value="1, 2, 3"/><input name="b" type="vector3" value="4, 5, 6"/>"#,
+            32.0,
+        ),
+        (
+            "ifequal",
+            r#"<input name="a" type="float" value="1"/><input name="b" type="float" value="1"/><input name="yes" type="float" value="0.75"/><input name="no" type="float" value="0.25"/>"#,
+            0.75,
+        ),
+        (
+            "switch",
+            r#"<input name="index" type="float" value="1"/><input name="first" type="float" value="0.25"/><input name="second" type="float" value="0.75"/>"#,
+            0.75,
+        ),
+    ];
+    for (category, inputs, expected) in cases {
+        let source = format!(
+            "<materialx><nodegraph name=\"g\"><{category} name=\"x\">{inputs}</{category}><open_pbr_surface name=\"s\"><input name=\"specular_roughness\" type=\"float\" nodename=\"x\"/></open_pbr_surface></nodegraph></materialx>"
+        );
+        let document = parse_materialx(&source).expect("known numeric node parses");
+        let surface = adapt_openpbr_surface(&document, "g", "s")
+            .expect("known numeric node has bounded evaluator semantics");
+        assert!((surface.parameters.specular_roughness - expected).abs() < 1.0e-6);
+    }
+}
+
+#[test]
 fn malformed_connection_is_diagnostic() {
     let error = parse_materialx(
         r#"<materialx><nodegraph name="g"><constant name="c" type="float" value="1"/><standard_surface name="s"><input name="base" nodename="missing"/></standard_surface></nodegraph></materialx>"#,
@@ -185,11 +255,13 @@ fn malformed_connection_is_diagnostic() {
 #[test]
 fn unsupported_surface_input_is_reported_without_being_silently_applied() {
     let document = parse_materialx(
-        r#"<materialx><nodegraph name="g"><standard_surface name="s"><input name="thinfilm_thickness" type="float" value="200"/></standard_surface></nodegraph></materialx>"#,
+        r#"<materialx><nodegraph name="g"><standard_surface name="s"><input name="artist_custom_parameter" type="float" value="200"/></standard_surface></nodegraph></materialx>"#,
     )
     .expect("structural parser accepts a supported surface node");
-    let surface = adapt_openpbr_surface(&document, "g", "s").expect("surface import");
-    assert_eq!(surface.report.unsupported_fields, ["thinfilm_thickness"]);
+    let error = adapt_openpbr_surface(&document, "g", "s")
+        .expect_err("unsupported surface semantics must fail closed");
+    assert_eq!(error.0.code, DiagnosticCode::UnsupportedField);
+    assert!(error.to_string().contains("artist_custom_parameter"));
 }
 
 #[test]
@@ -433,18 +505,10 @@ fn unsupported_fields_are_reported_as_loss_without_mutating_runtime_defaults() {
     )
     .expect("the subset parser preserves supported surface-node inputs");
 
-    let adapted = adapt_openpbr_surface(&document, "g", "s")
-        .expect("unsupported fields are recoverable losses");
-    assert_eq!(adapted.parameters.base_color, [0.2, 0.3, 0.4, 1.0]);
-    assert_eq!(adapted.parameters.coat_weight, 0.0);
-    assert_eq!(
-        adapted.report.unsupported_fields,
-        ["artist_custom_parameter", "coat_normal"]
-    );
-    assert_eq!(adapted.report.diagnostics.len(), 2);
-    assert!(adapted.report.diagnostics.iter().all(|d| {
-        d.code == DiagnosticCode::UnsupportedField && d.severity == Severity::Warning
-    }));
+    let error = adapt_openpbr_surface(&document, "g", "s")
+        .expect_err("unsupported fields must not be recoverable defaults");
+    assert_eq!(error.0.code, DiagnosticCode::UnsupportedField);
+    assert!(error.to_string().contains("artist_custom_parameter"));
 }
 
 #[test]
@@ -590,27 +654,57 @@ fn omitted_supported_fields_keep_runtime_defaults_and_alias_collisions_fail() {
 }
 
 #[test]
+fn explicit_default_round_trips_and_is_applied_without_becoming_an_omitted_input() {
+    let source = r#"<materialx><nodegraph name="g">
+      <open_pbr_surface name="s">
+        <input name="base_metalness" type="float" default="0.25"/>
+      </open_pbr_surface>
+    </nodegraph></materialx>"#;
+    let document = parse_materialx(source).expect("explicit default is valid MaterialX input");
+    let input = &document.nodegraphs[0].nodes[0].inputs[0];
+    assert!(input.value.is_none());
+    assert_eq!(
+        input.explicit_default().expect("default is explicit").value,
+        "0.25"
+    );
+    let round_trip = export_materialx(&document);
+    assert!(round_trip.contains("default=\"0.25\""));
+    let adapted = adapt_openpbr_surface(&document, "g", "s").expect("default is evaluated");
+    assert_eq!(adapted.parameters.base_metalness, 0.25);
+    assert_eq!(adapted.report.applied_fields, ["base_metalness"]);
+}
+
+#[test]
+fn interface_alias_cycles_fail_closed_during_evaluation() {
+    let document = parse_materialx(
+        r#"<materialx><nodegraph name="g">
+          <input name="a" type="float" interfacename="b"/>
+          <input name="b" type="float" interfacename="a"/>
+          <open_pbr_surface name="s"><input name="specular_roughness" type="float" interfacename="a"/></open_pbr_surface>
+        </nodegraph></materialx>"#,
+    )
+    .expect("alias cycle is structurally representable");
+    let error = adapt_openpbr_surface(&document, "g", "s")
+        .expect_err("interface alias cycle must not turn into a default");
+    assert_eq!(error.0.code, DiagnosticCode::UnsafeConnection);
+    assert!(error.to_string().contains("cyclic graph interface"));
+}
+
+#[test]
 fn malformed_supported_literals_fail_instead_of_falling_back_to_defaults() {
     for raw in ["0.1, 0.2", "NaN", "inf"] {
         let xml = format!(
             "<materialx><nodegraph name=\"g\"><open_pbr_surface name=\"s\"><input name=\"base_color\" type=\"color3\" value=\"{raw}\"/></open_pbr_surface></nodegraph></materialx>"
         );
-        let document = parse_materialx(&xml).expect("literal is structurally valid");
-        let error = adapt_openpbr_surface(&document, "g", "s").expect_err("invalid color rejected");
+        let error = parse_materialx(&xml).expect_err("typed literal must fail during parsing");
         assert_eq!(error.0.code, DiagnosticCode::InvalidValue);
     }
 
-    let document = parse_materialx(
+    let error = parse_materialx(
         r#"<materialx><nodegraph name="g"><open_pbr_surface name="s"><input name="specular_ior" type="float" value="1, 2"/></open_pbr_surface></nodegraph></materialx>"#,
     )
-    .expect("literal is structurally valid");
-    assert_eq!(
-        adapt_openpbr_surface(&document, "g", "s")
-            .unwrap_err()
-            .0
-            .code,
-        DiagnosticCode::InvalidValue
-    );
+    .expect_err("typed literal must fail during parsing");
+    assert_eq!(error.0.code, DiagnosticCode::InvalidValue);
 }
 
 #[test]
@@ -621,9 +715,7 @@ fn standard_surface_aliases_map_to_runtime_fields_without_claiming_color_opacity
           <input name="metalness" type="float" value="0.4"/>
           <input name="specular_IOR" type="float" value="1.4"/>
           <input name="transmission" type="float" value="0.25"/>
-          <input name="opacity" type="color3" value="0.5, 0.6, 0.7"/>
           <input name="emission_color" type="color3" value="0.9, 0.8, 0.7"/>
-          <input name="emission" type="float" value="0.3"/>
         </standard_surface></nodegraph></materialx>"#,
     )
     .expect("valid Standard Surface structure");
@@ -634,7 +726,23 @@ fn standard_surface_aliases_map_to_runtime_fields_without_claiming_color_opacity
     assert_eq!(adapted.parameters.transmission_weight, 0.25);
     assert_eq!(adapted.parameters.emission_color, [0.9, 0.8, 0.7, 1.0]);
     assert_eq!(adapted.parameters.emission_luminance, 0.0);
-    assert_eq!(adapted.report.unsupported_fields, ["emission", "opacity"]);
+    assert!(adapted.report.unsupported_fields.is_empty());
+
+    let document = parse_materialx(
+        r#"<materialx><nodegraph name="g"><standard_surface name="s"><input name="opacity" type="color3" value="0.5, 0.6, 0.7"/></standard_surface></nodegraph></materialx>"#,
+    )
+    .expect("opacity remains structurally representable");
+    let error = adapt_openpbr_surface(&document, "g", "s")
+        .expect_err("color opacity cannot be coerced to scalar geometry opacity");
+    assert_eq!(error.0.code, DiagnosticCode::UnsupportedField);
+
+    let document = parse_materialx(
+        r#"<materialx><nodegraph name="g"><standard_surface name="s"><input name="emission" type="float" value="0.3"/></standard_surface></nodegraph></materialx>"#,
+    )
+    .expect("emission remains structurally representable");
+    let error = adapt_openpbr_surface(&document, "g", "s")
+        .expect_err("standard emission weight has no safe OpenPBR luminance alias");
+    assert_eq!(error.0.code, DiagnosticCode::UnsupportedField);
 }
 
 #[test]

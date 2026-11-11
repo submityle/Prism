@@ -11,10 +11,12 @@ use std::fmt;
 
 use prism_render_architecture::abi::GenerationalHandle;
 use prism_render_material::{
-    fallback_material_record, GpuMaterialTexture, MaterialGraph, MaterialRecord,
-    MaterialRenderClass, MaterialVtSourceSnapshot, ProceduralVtBakeConfig, ShadingPlan,
+    fallback_material_record, ClosureKind, GpuMaterialTexture, MaterialFeatureFlags, MaterialGraph,
+    MaterialRecord, MaterialRenderClass, MaterialValidationError, MaterialVtSourceSnapshot,
+    NormalizedMaterial, ProceduralVtBakeConfig, ShadingPlan,
 };
 
+use crate::import::TextureNodeKey;
 use crate::{
     author_node_identity, lower_procedural_graph, AuthorNodeIdentity, AuthoringError, Document,
     ProceduralGraphError, RuntimeSurface,
@@ -23,6 +25,8 @@ use crate::{
 /// One immutable source and its ABI row for an authored MaterialX image.
 #[derive(Clone, Debug)]
 pub struct MaterialVtAuthoringBinding {
+    /// MaterialX nodegraph that owns the image node.
+    pub graph: String,
     /// MaterialX image node name used by surface inputs.
     pub node: String,
     /// Existing material texture semantic (`0` = base color, `1` = emissive,
@@ -38,6 +42,24 @@ pub struct MaterialVtAuthoringBinding {
     pub source: MaterialVtSourceSnapshot,
 }
 
+/// Explicit runtime publication metadata for a procedural VT source.
+///
+/// The bake produces immutable source bytes, but it cannot invent a bindless
+/// slot, generation, sampler, or shader semantic. Those values therefore have
+/// to be supplied by the asset/resource publisher before an artifact is
+/// publishable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MaterialVtPublication {
+    /// Stable material texture semantic consumed by the shader.
+    pub semantic: u32,
+    /// Bindless image index assigned by the resource publisher.
+    pub bindless_index: u32,
+    /// Generation paired with `bindless_index`.
+    pub generation: u32,
+    /// Bindless sampler index paired with the image.
+    pub sampler_index: u32,
+}
+
 /// Authoring request for one material artifact.
 #[derive(Clone, Debug)]
 pub struct MaterialArtifactRequest {
@@ -49,6 +71,8 @@ pub struct MaterialArtifactRequest {
     pub procedural_graph: Option<String>,
     /// Optional bake configuration for `procedural_graph`.
     pub procedural_vt: Option<ProceduralVtBakeConfig>,
+    /// Explicit runtime publication metadata for the procedural source.
+    pub procedural_publication: Option<MaterialVtPublication>,
     /// Response/composition plan selected by authoring.
     pub plan: ShadingPlan,
     /// Blend/raster family selected by authoring.
@@ -66,6 +90,7 @@ impl MaterialArtifactRequest {
             surface_node: surface_node.into(),
             procedural_graph: None,
             procedural_vt: None,
+            procedural_publication: None,
             plan: ShadingPlan::default(),
             render_class: MaterialRenderClass::default(),
             render_domain: prism_render_material::RenderDomain::Surface,
@@ -78,9 +103,11 @@ impl MaterialArtifactRequest {
         mut self,
         graph: impl Into<String>,
         config: ProceduralVtBakeConfig,
+        publication: MaterialVtPublication,
     ) -> Self {
         self.procedural_graph = Some(graph.into());
         self.procedural_vt = Some(config);
+        self.procedural_publication = Some(publication);
         self
     }
 }
@@ -113,6 +140,14 @@ pub enum MaterialArtifactError {
     MissingTextureBinding(String),
     /// A procedural bake was requested without a graph name.
     MissingProceduralGraph,
+    /// A procedural bake was requested without explicit runtime publication
+    /// metadata.
+    MissingProceduralPublication,
+    /// The requested revision cannot be represented by the runtime ABI.
+    RevisionOverflow(u64),
+    /// The lowered procedural graph cannot be admitted by the runtime graph
+    /// validator without changing its semantics.
+    RuntimeValidation(MaterialValidationError),
 }
 
 impl fmt::Display for MaterialArtifactError {
@@ -144,6 +179,14 @@ impl fmt::Display for MaterialArtifactError {
             Self::MissingProceduralGraph => {
                 formatter.write_str("a procedural VT bake requires a procedural graph")
             }
+            Self::MissingProceduralPublication => formatter.write_str(
+                "a procedural VT bake requires explicit semantic, bindless index, generation, and sampler publication metadata",
+            ),
+            Self::RevisionOverflow(revision) => write!(
+                formatter,
+                "material revision {revision} exceeds the runtime u32 ABI",
+            ),
+            Self::RuntimeValidation(error) => write!(formatter, "{error}"),
         }
     }
 }
@@ -173,6 +216,8 @@ pub struct MaterialArtifact {
     pub procedural_graph: Option<MaterialGraph>,
     /// Optional baked procedural VT source.
     pub procedural_source: Option<MaterialVtSourceSnapshot>,
+    /// Explicit publication metadata for `procedural_source`.
+    pub procedural_publication: Option<MaterialVtPublication>,
     /// Image sources and their exact GPU rows, ordered by node name.
     pub textures: Vec<MaterialVtAuthoringBinding>,
     /// Direct author-node identities present in the document.
@@ -181,6 +226,21 @@ pub struct MaterialArtifact {
     pub render_class: MaterialRenderClass,
     /// Runtime object domain selected by authoring.
     pub render_domain: prism_render_material::RenderDomain,
+}
+
+/// The complete authoring-to-runtime response produced for one artifact.
+///
+/// `record` is the existing publication ABI. `procedural` is the validated,
+/// live-pruned graph for callers that compile or inspect the procedural
+/// response before publishing its baked VT row. Keeping both values together
+/// prevents a caller from publishing a record while silently skipping graph
+/// validation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaterialRuntimeResponse {
+    /// Existing runtime material record, including exact texture rows.
+    pub record: MaterialRecord,
+    /// Validated procedural response, when the artifact contains one.
+    pub procedural: Option<NormalizedMaterial>,
 }
 
 impl MaterialArtifact {
@@ -192,21 +252,35 @@ impl MaterialArtifact {
         request: MaterialArtifactRequest,
         bindings: impl IntoIterator<Item = MaterialVtAuthoringBinding>,
     ) -> Result<Self, MaterialArtifactError> {
-        let mut textures = BTreeMap::<String, MaterialVtAuthoringBinding>::new();
+        let mut textures = BTreeMap::<TextureNodeKey, MaterialVtAuthoringBinding>::new();
         for binding in bindings {
-            if textures.contains_key(&binding.node) {
-                return Err(MaterialArtifactError::DuplicateTextureNode(binding.node));
+            let key = TextureNodeKey {
+                graph: binding.graph.clone(),
+                node: binding.node.clone(),
+            };
+            if textures.contains_key(&key) {
+                return Err(MaterialArtifactError::DuplicateTextureNode(
+                    qualified_texture_node(&key),
+                ));
             }
-            let Some(node) = document
+            let Some(graph) = document
                 .nodegraphs
                 .iter()
-                .flat_map(|graph| graph.nodes.iter())
-                .find(|node| node.name == binding.node)
+                .find(|graph| graph.name == binding.graph)
             else {
-                return Err(MaterialArtifactError::InvalidTextureNode(binding.node));
+                return Err(MaterialArtifactError::InvalidTextureNode(
+                    qualified_texture_node(&key),
+                ));
+            };
+            let Some(node) = graph.nodes.iter().find(|node| node.name == binding.node) else {
+                return Err(MaterialArtifactError::InvalidTextureNode(
+                    qualified_texture_node(&key),
+                ));
             };
             if node.category != "image" {
-                return Err(MaterialArtifactError::InvalidTextureNode(binding.node));
+                return Err(MaterialArtifactError::InvalidTextureNode(
+                    qualified_texture_node(&key),
+                ));
             }
             let descriptor = binding.source.descriptor();
             if descriptor.texture_id() == prism_render_material::NO_VIRTUAL_TEXTURE
@@ -214,9 +288,11 @@ impl MaterialArtifact {
                 || descriptor.height() == 0
                 || descriptor.page_size() == 0
             {
-                return Err(MaterialArtifactError::InvalidTextureSource(binding.node));
+                return Err(MaterialArtifactError::InvalidTextureSource(
+                    qualified_texture_node(&key),
+                ));
             }
-            textures.insert(binding.node.clone(), binding);
+            textures.insert(key, binding);
         }
 
         // Admit every authored image to the surface adapter first. This lets
@@ -225,11 +301,17 @@ impl MaterialArtifact {
         // generic unsafe-connection diagnostic.
         let texture_semantics = document
             .nodegraph_images()
-            .map(|node| {
+            .map(|(graph, node)| {
                 (
-                    node.name.clone(),
+                    TextureNodeKey {
+                        graph: graph.name.clone(),
+                        node: node.name.clone(),
+                    },
                     textures
-                        .get(&node.name)
+                        .get(&TextureNodeKey {
+                            graph: graph.name.clone(),
+                            node: node.name.clone(),
+                        })
                         .map_or(u32::MAX, |binding| binding.semantic),
                 )
             })
@@ -241,16 +323,20 @@ impl MaterialArtifact {
             &texture_semantics,
         )?;
         for input in &surface.texture_inputs {
-            let Some(binding) = textures.get(&input.node) else {
+            let key = TextureNodeKey {
+                graph: input.graph.clone(),
+                node: input.node.clone(),
+            };
+            let Some(binding) = textures.get(&key) else {
                 return Err(MaterialArtifactError::MissingTextureBinding(
-                    input.node.clone(),
+                    qualified_texture_node(&key),
                 ));
             };
             let expected = expected_semantic(&input.field);
             if binding.semantic != expected {
                 return Err(MaterialArtifactError::TextureSemanticMismatch {
                     field: input.field.clone(),
-                    node: input.node.clone(),
+                    node: qualified_texture_node(&key),
                     actual: binding.semantic,
                     expected,
                 });
@@ -275,14 +361,25 @@ impl MaterialArtifact {
                 lower_procedural_graph(document, graph).map_err(MaterialArtifactError::from)
             })
             .transpose()?;
-        let procedural_source = match (procedural_graph.as_ref(), request.procedural_vt) {
-            (Some(graph), Some(config)) => Some(
+        let procedural_source = match (
+            procedural_graph.as_ref(),
+            request.procedural_vt,
+            request.procedural_publication,
+        ) {
+            (Some(graph), Some(config), Some(_publication)) => Some(
                 prism_render_material::bake_procedural_vt(graph, config).map_err(|error| {
                     MaterialArtifactError::Procedural(ProceduralGraphError::Bake(error))
                 })?,
             ),
-            (None, Some(_)) => return Err(MaterialArtifactError::MissingProceduralGraph),
-            _ => None,
+            (None, Some(_), _) => return Err(MaterialArtifactError::MissingProceduralGraph),
+            (Some(_), Some(_), None) => {
+                return Err(MaterialArtifactError::MissingProceduralPublication)
+            }
+            (Some(_), None, Some(_)) => {
+                return Err(MaterialArtifactError::MissingProceduralPublication)
+            }
+            (None, None, Some(_)) => return Err(MaterialArtifactError::MissingProceduralGraph),
+            (Some(_), None, None) | (None, None, None) => None,
         };
 
         let mut author_nodes = document
@@ -302,6 +399,7 @@ impl MaterialArtifact {
             plan: request.plan,
             procedural_graph,
             procedural_source,
+            procedural_publication: request.procedural_publication,
             textures: textures.into_values().collect(),
             author_nodes,
             render_class: request.render_class,
@@ -312,7 +410,8 @@ impl MaterialArtifact {
     /// Returns the exact VT rows to publish, in deterministic node order.
     #[must_use]
     pub fn texture_rows(&self) -> Vec<GpuMaterialTexture> {
-        self.textures
+        let mut rows = self
+            .textures
             .iter()
             .map(|binding| {
                 binding
@@ -325,21 +424,107 @@ impl MaterialArtifact {
                     )
                     .gpu
             })
-            .collect()
+            .collect::<Vec<_>>();
+        if let (Some(source), Some(publication)) =
+            (self.procedural_source.as_ref(), self.procedural_publication)
+        {
+            rows.push(
+                source
+                    .texture_row(
+                        publication.bindless_index,
+                        publication.generation,
+                        publication.semantic,
+                        publication.sampler_index,
+                    )
+                    .gpu,
+            );
+        }
+        rows
     }
 
     /// Materialize the existing runtime record ABI without inventing a second
     /// record layout. The caller owns handle allocation and revision policy.
     #[must_use]
-    pub fn material_record(&self, handle: GenerationalHandle, revision: u64) -> MaterialRecord {
-        let mut record = fallback_material_record(handle, revision);
+    pub fn material_record(
+        &self,
+        handle: GenerationalHandle,
+        revision: u64,
+    ) -> Result<MaterialRecord, MaterialArtifactError> {
+        let revision = u32::try_from(revision)
+            .map_err(|_| MaterialArtifactError::RevisionOverflow(revision))?;
+        let mut record = fallback_material_record(handle, u64::from(revision));
         record.response_plan = self.plan.clone();
         record.render_class = self.render_class;
         record.render_domain = self.render_domain;
         record.surface = self.surface.parameters;
+        record.closure_mask = closure_mask(record.surface);
+        if record.surface.emission_luminance != 0.0 {
+            record.features |= MaterialFeatureFlags::EMISSIVE;
+        }
+        if record.surface.transmission_weight != 0.0 {
+            record.features |= MaterialFeatureFlags::TRANSMISSION;
+        }
         record.textures = self.texture_rows();
-        record
+        Ok(record)
     }
+
+    /// Compile the artifact into the existing runtime record plus an optional
+    /// normalized procedural response. Every requested runtime-facing piece is
+    /// validated before the response is returned.
+    pub fn compile_runtime_response(
+        &self,
+        handle: GenerationalHandle,
+        revision: u64,
+    ) -> Result<MaterialRuntimeResponse, MaterialArtifactError> {
+        let record = self.material_record(handle, revision)?;
+        let procedural = self
+            .procedural_graph
+            .as_ref()
+            .map(MaterialGraph::normalize)
+            .transpose()
+            .map_err(MaterialArtifactError::RuntimeValidation)?;
+        Ok(MaterialRuntimeResponse { record, procedural })
+    }
+
+    /// Converts the adapted surface to the independent path-traced reference
+    /// contract, preserving non-BRDF outputs beside the OpenPBR closure.
+    pub fn reference_material(
+        &self,
+    ) -> Result<crate::ReferenceMaterial, crate::ReferenceMaterialError> {
+        crate::reference_material(&self.surface)
+    }
+
+    /// Converts the artifact's surface with explicit shade-time glint data.
+    pub fn reference_material_with_context(
+        &self,
+        context: crate::ReferenceShadeContext,
+    ) -> Result<crate::ReferenceMaterial, crate::ReferenceMaterialError> {
+        crate::reference_material_with_context(&self.surface, context)
+    }
+}
+
+fn closure_mask(surface: prism_render_material::GpuSurfaceParameters) -> u32 {
+    let mut mask = 1 << ClosureKind::Diffuse as u32;
+    if surface.emission_luminance != 0.0 {
+        mask |= 1 << ClosureKind::Emission as u32;
+    }
+    if surface.coat_weight != 0.0 {
+        mask |= 1 << ClosureKind::ClearCoat as u32;
+    }
+    if surface.fuzz_weight != 0.0 {
+        mask |= 1 << ClosureKind::Sheen as u32;
+    }
+    if surface.subsurface_weight != 0.0 {
+        mask |= 1 << ClosureKind::Subsurface as u32;
+    }
+    if surface.transmission_weight != 0.0 {
+        mask |= 1 << ClosureKind::Transmission as u32;
+    }
+    mask
+}
+
+fn qualified_texture_node(key: &TextureNodeKey) -> String {
+    format!("{}::{}", key.graph, key.node)
 }
 
 fn expected_semantic(field: &str) -> u32 {

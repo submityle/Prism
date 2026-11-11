@@ -46,6 +46,8 @@ pub enum ProceduralGraphError {
     },
     /// A graph cycle was found while lowering.
     Cycle(String),
+    /// The lowered graph would exceed the runtime node-id space.
+    NodeIdExhausted,
     /// The runtime procedural baker rejected the lowered graph.
     Bake(ProceduralVtBakeError),
 }
@@ -82,6 +84,9 @@ impl std::fmt::Display for ProceduralGraphError {
                 )
             }
             Self::Cycle(node) => write!(formatter, "procedural graph cycle at node '{node}'"),
+            Self::NodeIdExhausted => {
+                formatter.write_str("procedural graph node id space exhausted")
+            }
             Self::Bake(error) => error.fmt(formatter),
         }
     }
@@ -90,8 +95,12 @@ impl std::fmt::Display for ProceduralGraphError {
 impl std::error::Error for ProceduralGraphError {}
 
 /// Lowers one bounded MaterialX procedural graph into the runtime material IR.
+///
+/// Compound nodegraphs are expanded at this boundary. Interface values are
+/// carried as graph-node ids, so an instance override remains dynamic in the
+/// lowered graph instead of being replaced by a definition default.
 pub fn lower_procedural_graph(
-    _document: &Document,
+    document: &Document,
     graph: &NodeGraph,
 ) -> Result<MaterialGraph, ProceduralGraphError> {
     let outputs = graph
@@ -103,26 +112,17 @@ pub fn lower_procedural_graph(
         return Err(ProceduralGraphError::OutputShape);
     }
 
-    let source_ids = graph
-        .nodes
-        .iter()
-        .enumerate()
-        .map(|(index, node)| (node.name.clone(), MaterialNodeId(index as u32 + 1)))
-        .collect::<BTreeMap<_, _>>();
-    let next_synthetic = graph.nodes.len() as u32 + 1;
     let mut context = LowerContext {
-        graph,
-        source_ids,
+        document,
         nodes: BTreeMap::new(),
-        visiting: BTreeSet::new(),
-        next_synthetic,
+        active: BTreeSet::new(),
+        next_id: 1,
     };
-    let output = context.lower_connection(
-        outputs[0]
-            .connection
-            .as_ref()
-            .expect("filtered connected output"),
-    )?;
+    let output = outputs[0]
+        .connection
+        .as_ref()
+        .ok_or(ProceduralGraphError::OutputShape)
+        .and_then(|connection| context.lower_connection(graph, connection, &BTreeMap::new()))?;
     Ok(MaterialGraph {
         nodes: context.nodes,
         output: Some(output),
@@ -141,75 +141,239 @@ pub fn bake_procedural_graph(
 }
 
 struct LowerContext<'a> {
-    graph: &'a NodeGraph,
-    source_ids: BTreeMap<String, MaterialNodeId>,
+    document: &'a Document,
     nodes: BTreeMap<MaterialNodeId, MaterialNode>,
-    visiting: BTreeSet<String>,
-    next_synthetic: u32,
+    active: BTreeSet<String>,
+    next_id: u32,
 }
 
 impl<'a> LowerContext<'a> {
     fn lower_connection(
         &mut self,
+        graph: &'a NodeGraph,
         connection: &Connection,
+        interfaces: &BTreeMap<String, MaterialNodeId>,
     ) -> Result<MaterialNodeId, ProceduralGraphError> {
-        if let Some(graph) = connection.nodegraph.as_deref()
-            && graph != self.graph.name
-        {
-            return Err(ProceduralGraphError::ExternalGraph(graph.to_owned()));
-        }
+        let target = if let Some(name) = connection.nodegraph.as_deref() {
+            self.document
+                .nodegraphs
+                .iter()
+                .find(|candidate| candidate.name == name)
+                .ok_or_else(|| {
+                    ProceduralGraphError::InvalidReference(format!("nodegraph '{name}'"))
+                })?
+        } else {
+            graph
+        };
+        let target_interfaces = if target.name == graph.name {
+            interfaces
+        } else {
+            &BTreeMap::new()
+        };
         if let Some(node) = connection.node.as_deref() {
-            return self.lower_node(node);
+            return self.lower_node_output(
+                target,
+                node,
+                connection.output.as_deref(),
+                target_interfaces,
+            );
         }
         let output = connection
             .output
             .as_deref()
-            .or_else(|| {
-                (self.graph.outputs.len() == 1).then(|| self.graph.outputs[0].name.as_str())
-            })
+            .or_else(|| (target.outputs.len() == 1).then(|| target.outputs[0].name.as_str()))
             .ok_or_else(|| {
                 ProceduralGraphError::InvalidReference("graph output is ambiguous".into())
             })?;
-        let graph_output = self
-            .graph
+        self.lower_graph_output(target, output, target_interfaces)
+    }
+
+    fn lower_graph_output(
+        &mut self,
+        graph: &'a NodeGraph,
+        output: &str,
+        interfaces: &BTreeMap<String, MaterialNodeId>,
+    ) -> Result<MaterialNodeId, ProceduralGraphError> {
+        let key = format!("{}::@output::{output}", graph.name);
+        if !self.active.insert(key.clone()) {
+            return Err(ProceduralGraphError::Cycle(key));
+        }
+        let result = graph
             .outputs
             .iter()
             .find(|candidate| candidate.name == output)
             .ok_or_else(|| {
                 ProceduralGraphError::InvalidReference(format!("graph output '{output}'"))
-            })?;
-        let source = graph_output.connection.as_ref().ok_or_else(|| {
-            ProceduralGraphError::InvalidReference(format!("unconnected graph output '{output}'"))
-        })?;
-        self.lower_connection(source)
+            })
+            .and_then(|graph_output| {
+                graph_output.connection.as_ref().ok_or_else(|| {
+                    ProceduralGraphError::InvalidReference(format!(
+                        "unconnected graph output '{output}'"
+                    ))
+                })
+            })
+            .and_then(|source| self.lower_connection(graph, source, interfaces));
+        self.active.remove(&key);
+        result
     }
 
-    fn lower_node(&mut self, name: &str) -> Result<MaterialNodeId, ProceduralGraphError> {
-        let id = *self
-            .source_ids
-            .get(name)
-            .ok_or_else(|| ProceduralGraphError::InvalidReference(format!("node '{name}'")))?;
-        if self.nodes.contains_key(&id) {
-            return Ok(id);
-        }
-        if !self.visiting.insert(name.to_owned()) {
-            return Err(ProceduralGraphError::Cycle(name.to_owned()));
-        }
-        let node = self
-            .graph
+    fn lower_node_output(
+        &mut self,
+        graph: &'a NodeGraph,
+        name: &str,
+        output: Option<&str>,
+        interfaces: &BTreeMap<String, MaterialNodeId>,
+    ) -> Result<MaterialNodeId, ProceduralGraphError> {
+        let node = graph
             .nodes
             .iter()
             .find(|node| node.name == name)
-            .expect("source_ids and graph nodes are built together")
+            .ok_or_else(|| ProceduralGraphError::InvalidReference(format!("node '{name}'")))?
             .clone();
-        let lowered = self.lower_node_value(&node);
-        self.visiting.remove(name);
-        let lowered = lowered?;
-        self.nodes.insert(id, lowered);
-        Ok(id)
+        let key = format!("{}::{name}", graph.name);
+        if !self.active.insert(key.clone()) {
+            return Err(ProceduralGraphError::Cycle(key));
+        }
+        let result = if let Some(definition_name) = node.nodedef() {
+            if let Some(implementation) = self
+                .document
+                .nodegraphs
+                .iter()
+                .find(|candidate| candidate.nodedef.as_deref() == Some(definition_name))
+            {
+                self.lower_graph_instance(graph, &node, implementation, output, interfaces)
+            } else {
+                self.lower_node_value(graph, &node, interfaces)
+            }
+        } else {
+            self.lower_node_value(graph, &node, interfaces)
+        };
+        self.active.remove(&key);
+        result
     }
 
-    fn lower_node_value(&mut self, node: &Node) -> Result<MaterialNode, ProceduralGraphError> {
+    fn lower_graph_instance(
+        &mut self,
+        caller: &'a NodeGraph,
+        instance: &Node,
+        implementation: &'a NodeGraph,
+        selected_output: Option<&str>,
+        caller_interfaces: &BTreeMap<String, MaterialNodeId>,
+    ) -> Result<MaterialNodeId, ProceduralGraphError> {
+        let definition_name = implementation.nodedef.as_deref().ok_or_else(|| {
+            ProceduralGraphError::InvalidReference(format!(
+                "implementation graph '{}' has no nodedef",
+                implementation.name
+            ))
+        })?;
+        let definition = self
+            .document
+            .nodedefs
+            .iter()
+            .find(|candidate| candidate.name == definition_name)
+            .ok_or_else(|| {
+                ProceduralGraphError::InvalidReference(format!("nodedef '{definition_name}'"))
+            })?;
+        let mut bindings = BTreeMap::new();
+        for interface in &implementation.inputs {
+            let value = if let Some(override_input) = instance
+                .inputs
+                .iter()
+                .find(|input| input.name == interface.name)
+            {
+                self.lower_input_node(caller, instance, override_input, caller_interfaces)?
+            } else if interface.connection.is_some()
+                || interface.explicit_default().is_some()
+                || interface.attributes.contains_key("interfacename")
+            {
+                self.lower_interface(implementation, &interface.name, &bindings, definition)?
+            } else {
+                let declared = definition
+                    .inputs
+                    .iter()
+                    .find(|input| input.name == interface.name)
+                    .ok_or_else(|| {
+                        ProceduralGraphError::InvalidReference(format!(
+                            "interface '{}' is not declared by nodedef '{definition_name}'",
+                            interface.name
+                        ))
+                    })?;
+                let value = declared.explicit_default().ok_or_else(|| {
+                    self.invalid_input(
+                        instance,
+                        &format!("external parameter '{}' is unbound", interface.name),
+                    )
+                })?;
+                self.literal_node(instance, &interface.name, &value)?
+            };
+            bindings.insert(interface.name.clone(), value);
+        }
+        let output = selected_output
+            .or_else(|| {
+                (implementation.outputs.len() == 1).then(|| implementation.outputs[0].name.as_str())
+            })
+            .ok_or_else(|| {
+                ProceduralGraphError::InvalidReference(format!(
+                    "node '{}' has ambiguous graph output",
+                    instance.name
+                ))
+            })?;
+        self.lower_graph_output(implementation, output, &bindings)
+    }
+
+    fn lower_interface(
+        &mut self,
+        graph: &'a NodeGraph,
+        name: &str,
+        bindings: &BTreeMap<String, MaterialNodeId>,
+        definition: &crate::NodeDef,
+    ) -> Result<MaterialNodeId, ProceduralGraphError> {
+        if let Some(value) = bindings.get(name) {
+            return Ok(*value);
+        }
+        let key = format!("{}::@interface::{name}", graph.name);
+        if !self.active.insert(key.clone()) {
+            return Err(ProceduralGraphError::Cycle(key));
+        }
+        let input = graph
+            .inputs
+            .iter()
+            .find(|input| input.name == name)
+            .ok_or_else(|| ProceduralGraphError::InvalidReference(format!("interface '{name}'")));
+        let result = input.and_then(|input| {
+            if let Some(alias) = input.attributes.get("interfacename") {
+                return self.lower_interface(graph, alias, bindings, definition);
+            }
+            if let Some(connection) = input.connection.as_ref() {
+                return self.lower_connection(graph, connection, bindings);
+            }
+            if let Some(value) = input.explicit_default() {
+                return self.literal_node_from_name(name, &value);
+            }
+            let declared = definition
+                .inputs
+                .iter()
+                .find(|candidate| candidate.name == name)
+                .ok_or_else(|| {
+                    ProceduralGraphError::InvalidReference(format!("interface '{name}'"))
+                })?;
+            let value = declared.explicit_default().ok_or_else(|| {
+                ProceduralGraphError::InvalidReference(format!(
+                    "unbound external parameter '{name}'"
+                ))
+            })?;
+            self.literal_node_from_name(name, &value)
+        });
+        self.active.remove(&key);
+        result
+    }
+
+    fn lower_node_value(
+        &mut self,
+        graph: &'a NodeGraph,
+        node: &Node,
+        interfaces: &BTreeMap<String, MaterialNodeId>,
+    ) -> Result<MaterialNodeId, ProceduralGraphError> {
         match node.category.as_str() {
             "constant" => node
                 .value
@@ -218,53 +382,64 @@ impl<'a> LowerContext<'a> {
                 .and_then(|value| {
                     parse_material_value(value).map_err(|_| self.invalid_input(node, "value"))
                 })
-                .map(MaterialNode::Constant),
-            "texcoord" | "texcoord2" => Ok(MaterialNode::Uv),
+                .and_then(|value| self.insert(MaterialNode::Constant(value))),
+            "texcoord" | "texcoord2" => self.insert(MaterialNode::Uv),
             "noise" => {
                 let scale = self.literal_scalar(node, &["scale", "frequency"])?;
                 let seed = self.literal_u32(node, "seed")?;
-                Ok(MaterialNode::Noise { scale, seed })
+                self.insert(MaterialNode::Noise { scale, seed })
             }
             "curve" | "ramp" => {
                 let input = self.required_input(node, &["in", "input", "value"])?;
                 let points = node
                     .attributes
                     .get("points")
+                    .cloned()
                     .or_else(|| {
                         self.input(node, &["points"])
-                            .and_then(|input| input.value.as_ref())
-                            .map(|value| &value.value)
+                            .and_then(|input| input.explicit_default())
+                            .map(|value| value.value)
                     })
                     .ok_or_else(|| self.invalid_input(node, "points"))?;
-                Ok(MaterialNode::Curve {
-                    input: self.lower_input_node(node, input)?,
-                    points: parse_curve_points(points)
+                let input_id = self.lower_input_node(graph, node, input, interfaces)?;
+                self.insert(MaterialNode::Curve {
+                    input: input_id,
+                    points: parse_curve_points(&points)
                         .map_err(|_| self.invalid_input(node, "points"))?,
                 })
             }
             "add" | "plus" => {
                 let (a, b) = self.required_binary_inputs(node)?;
-                Ok(MaterialNode::Add(
-                    self.lower_input_node(node, a)?,
-                    self.lower_input_node(node, b)?,
-                ))
+                let a = self.lower_input_node(graph, node, a, interfaces)?;
+                let b = self.lower_input_node(graph, node, b, interfaces)?;
+                self.insert(MaterialNode::Add(a, b))
             }
             "multiply" | "mult" => {
                 let (a, b) = self.required_binary_inputs(node)?;
-                Ok(MaterialNode::Multiply(
-                    self.lower_input_node(node, a)?,
-                    self.lower_input_node(node, b)?,
-                ))
+                let a = self.lower_input_node(graph, node, a, interfaces)?;
+                let b = self.lower_input_node(graph, node, b, interfaces)?;
+                self.insert(MaterialNode::Multiply(a, b))
+            }
+            "subtract" => {
+                let (a, b) = self.required_binary_inputs(node)?;
+                let a = self.lower_input_node(graph, node, a, interfaces)?;
+                let b = self.lower_input_node(graph, node, b, interfaces)?;
+                let negative = self.insert(MaterialNode::Constant(MaterialValue::Scalar(-1.0)))?;
+                let negated = self.insert(MaterialNode::Multiply(b, negative))?;
+                self.insert(MaterialNode::Add(a, negated))
+            }
+            "convert" => {
+                let input = self.required_input(node, &["in", "input"])?;
+                self.lower_input_node(graph, node, input, interfaces)
             }
             "mix" | "blend" => {
                 let a = self.required_input(node, &["in1", "a", "left"])?;
                 let b = self.required_input(node, &["in2", "b", "right"])?;
                 let weight = self.required_input(node, &["mix", "weight", "factor"])?;
-                Ok(MaterialNode::Blend {
-                    a: self.lower_input_node(node, a)?,
-                    b: self.lower_input_node(node, b)?,
-                    weight: self.lower_input_node(node, weight)?,
-                })
+                let a = self.lower_input_node(graph, node, a, interfaces)?;
+                let b = self.lower_input_node(graph, node, b, interfaces)?;
+                let weight = self.lower_input_node(graph, node, weight, interfaces)?;
+                self.insert(MaterialNode::Blend { a, b, weight })
             }
             category => Err(ProceduralGraphError::UnsupportedCategory {
                 node: node.name.clone(),
@@ -275,22 +450,56 @@ impl<'a> LowerContext<'a> {
 
     fn lower_input_node(
         &mut self,
+        graph: &'a NodeGraph,
         node: &Node,
         input: &Input,
+        interfaces: &BTreeMap<String, MaterialNodeId>,
     ) -> Result<MaterialNodeId, ProceduralGraphError> {
         if let Some(connection) = &input.connection {
-            return self.lower_connection(connection);
+            return self.lower_connection(graph, connection, interfaces);
+        }
+        if let Some(interface) = input.attributes.get("interfacename") {
+            return interfaces
+                .get(interface)
+                .copied()
+                .ok_or_else(|| self.invalid_input(node, &input.name));
         }
         let value = input
-            .value
-            .as_ref()
+            .explicit_default()
             .ok_or_else(|| self.invalid_input(node, &input.name))?;
+        self.literal_node(node, &input.name, &value)
+    }
+
+    fn literal_node(
+        &mut self,
+        node: &Node,
+        input: &str,
+        value: &TypedValue,
+    ) -> Result<MaterialNodeId, ProceduralGraphError> {
         let material_value =
-            parse_material_value(value).map_err(|_| self.invalid_input(node, &input.name))?;
-        let id = MaterialNodeId(self.next_synthetic);
-        self.next_synthetic = self.next_synthetic.saturating_add(1);
-        self.nodes
-            .insert(id, MaterialNode::Constant(material_value));
+            parse_material_value(value).map_err(|_| self.invalid_input(node, input))?;
+        self.insert(MaterialNode::Constant(material_value))
+    }
+
+    fn literal_node_from_name(
+        &mut self,
+        name: &str,
+        value: &TypedValue,
+    ) -> Result<MaterialNodeId, ProceduralGraphError> {
+        let material_value = parse_material_value(value).map_err(|_| {
+            ProceduralGraphError::InvalidReference(format!("invalid interface '{name}'"))
+        })?;
+        self.insert(MaterialNode::Constant(material_value))
+    }
+
+    fn insert(&mut self, node: MaterialNode) -> Result<MaterialNodeId, ProceduralGraphError> {
+        let next = self
+            .next_id
+            .checked_add(1)
+            .ok_or(ProceduralGraphError::NodeIdExhausted)?;
+        let id = MaterialNodeId(self.next_id);
+        self.next_id = next;
+        self.nodes.insert(id, node);
         Ok(id)
     }
 
@@ -325,14 +534,13 @@ impl<'a> LowerContext<'a> {
     }
 
     fn literal_scalar(&self, node: &Node, names: &[&str]) -> Result<f32, ProceduralGraphError> {
-        let Some(input) = self.input(node, names) else {
-            return Ok(1.0);
-        };
+        let input = self
+            .input(node, names)
+            .ok_or_else(|| self.invalid_input(node, names[0]))?;
         let value = input
-            .value
-            .as_ref()
+            .explicit_default()
             .ok_or_else(|| self.invalid_input(node, &input.name))?;
-        let parsed = parse_numbers(value).map_err(|_| self.invalid_input(node, &input.name))?;
+        let parsed = parse_numbers(&value).map_err(|_| self.invalid_input(node, &input.name))?;
         if parsed.len() != 1 || !parsed[0].is_finite() {
             return Err(self.invalid_input(node, &input.name));
         }
@@ -340,14 +548,13 @@ impl<'a> LowerContext<'a> {
     }
 
     fn literal_u32(&self, node: &Node, name: &str) -> Result<u32, ProceduralGraphError> {
-        let Some(input) = self.input(node, &[name]) else {
-            return Ok(0);
-        };
-        let value = input
-            .value
-            .as_ref()
+        let input = self
+            .input(node, &[name])
             .ok_or_else(|| self.invalid_input(node, name))?;
-        let parsed = parse_numbers(value).map_err(|_| self.invalid_input(node, name))?;
+        let value = input
+            .explicit_default()
+            .ok_or_else(|| self.invalid_input(node, name))?;
+        let parsed = parse_numbers(&value).map_err(|_| self.invalid_input(node, name))?;
         if parsed.len() != 1
             || !parsed[0].is_finite()
             || parsed[0] < 0.0
