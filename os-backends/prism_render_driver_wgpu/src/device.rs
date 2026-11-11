@@ -107,6 +107,8 @@ impl std::error::Error for BackendError {}
 
 /// Private marker for buffer slots.
 enum BufferMarker {}
+/// Private marker for timestamp query-set slots.
+enum TimestampQuerySetMarker {}
 /// Private marker for texture slots.
 enum TextureMarker {}
 /// Private marker for texture-view slots.
@@ -130,6 +132,12 @@ enum ComputePipelineMarker {}
 struct StoredBuffer {
     /// The live wgpu buffer handle.
     buffer: wgpu::Buffer,
+}
+
+/// A live native timestamp query set.
+struct StoredTimestampQuerySet {
+    /// The wgpu query set handle.
+    query_set: wgpu::QuerySet,
 }
 
 /// A stored texture plus the metadata views and uploads need.
@@ -190,6 +198,8 @@ pub(crate) struct DeviceInner {
     caps: rhi::DeviceCapabilities,
     /// Live buffers.
     buffers: Map<BufferMarker, StoredBuffer>,
+    /// Live timestamp query sets.
+    timestamp_query_sets: Map<TimestampQuerySetMarker, StoredTimestampQuerySet>,
     /// Live textures.
     textures: Map<TextureMarker, StoredTexture>,
     /// Live texture views.
@@ -295,6 +305,7 @@ impl DeviceInner {
             device,
             caps,
             buffers: Mutex::new(rhi::GenerationalSlotMap::new()),
+            timestamp_query_sets: Mutex::new(rhi::GenerationalSlotMap::new()),
             textures: Mutex::new(rhi::GenerationalSlotMap::new()),
             texture_views: Mutex::new(rhi::GenerationalSlotMap::new()),
             samplers: Mutex::new(rhi::GenerationalSlotMap::new()),
@@ -352,6 +363,18 @@ impl DeviceInner {
         lock(&self.buffers)
             .get(convert::convert_id(id))
             .map(|stored| stored.buffer.clone())
+    }
+
+    /// Resolves a timestamp query-set id to a cloned native handle.
+    pub(crate) fn resolve_timestamp_query_set(
+        &self,
+        id: rhi::TimestampQuerySetId,
+    ) -> wgpu::QuerySet {
+        lock(&self.timestamp_query_sets)
+            .get(convert::convert_id(id))
+            .expect("stale TimestampQuerySetId in command stream")
+            .query_set
+            .clone()
     }
 
     pub(crate) fn is_lost(&self) -> bool {
@@ -902,6 +925,12 @@ impl WgpuDevice {
         self.inner.resolve_buffer(id)
     }
 
+    /// Clones the native timestamp query set stored for a live RHI id.
+    #[must_use]
+    pub fn wgpu_timestamp_query_set(&self, id: rhi::TimestampQuerySetId) -> wgpu::QuerySet {
+        self.inner.resolve_timestamp_query_set(id)
+    }
+
     /// Clones the native texture stored for a live, table-local RHI id.
     /// Panics for a removed/stale id; see [`Self`]'s native handle contract.
     #[must_use]
@@ -1286,6 +1315,34 @@ impl RenderDevice for WgpuDevice {
         convert::convert_id(id)
     }
 
+    fn create_timestamp_query_set(
+        &self,
+        descriptor: &rhi::TimestampQuerySetDescriptor,
+    ) -> rhi::TimestampQuerySetId {
+        assert!(
+            self.inner
+                .caps
+                .features
+                .contains(rhi::Features::TIMESTAMP_QUERY),
+            "timestamp query sets require Features::TIMESTAMP_QUERY"
+        );
+        assert!(
+            descriptor.count > 0,
+            "timestamp query set count must be nonzero"
+        );
+        let query_set = self
+            .inner
+            .device
+            .create_query_set(&wgpu::QuerySetDescriptor {
+                label: descriptor.label.as_deref(),
+                ty: wgpu::QueryType::Timestamp,
+                count: descriptor.count,
+            });
+        let id =
+            lock(&self.inner.timestamp_query_sets).insert(StoredTimestampQuerySet { query_set });
+        convert::convert_id(id)
+    }
+
     fn create_texture(&self, descriptor: &rhi::TextureDescriptor) -> rhi::TextureId {
         legacy(self.try_create_texture(descriptor))
     }
@@ -1507,6 +1564,10 @@ impl RenderDevice for WgpuDevice {
 
     fn destroy_buffer(&self, id: rhi::BufferId) {
         lock(&self.inner.buffers).remove(convert::convert_id(id));
+    }
+
+    fn destroy_timestamp_query_set(&self, id: rhi::TimestampQuerySetId) {
+        lock(&self.inner.timestamp_query_sets).remove(convert::convert_id(id));
     }
 
     fn destroy_texture(&self, id: rhi::TextureId) {

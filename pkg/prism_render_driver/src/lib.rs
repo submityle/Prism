@@ -59,11 +59,14 @@ pub use color::Color;
 pub use command::{
     ColorAttachment, CommandBuffer, CommandEncoder, ComputeCommand, CopyCommand, DepthLoadOp,
     DepthOperations, DepthStencilAttachment, IndexBufferBinding, LoadOp, Pass, RenderCommand,
-    RenderPassDescriptor, ScissorRect, StencilLoadOp, StencilOperations, StoreOp, Viewport,
-    DISPATCH_INDIRECT_ARGS_SIZE, DRAW_INDEXED_INDIRECT_ARGS_SIZE, DRAW_INDIRECT_ARGS_SIZE,
+    RenderPassDescriptor, ScissorRect, StencilLoadOp, StencilOperations, StoreOp, TimestampWrites,
+    Viewport, DISPATCH_INDIRECT_ARGS_SIZE, DRAW_INDEXED_INDIRECT_ARGS_SIZE,
+    DRAW_INDIRECT_ARGS_SIZE,
 };
 pub use compare::CompareFunction;
-pub use device::{ImageDataLayout, RenderDevice, RenderQueue, TextureWrite};
+pub use device::{
+    ImageDataLayout, RenderDevice, RenderQueue, TextureWrite, TimestampQuerySetDescriptor,
+};
 pub use flags::{BufferUsages, ColorWrites, ShaderStages, TextureUsages};
 pub use format::{FormatAspects, TextureFormat, TextureSampleType, VertexFormat};
 pub use frame_sync::{CompletionToken, FrameSync};
@@ -80,6 +83,7 @@ pub use readback::{BufferReadback, BufferReadbackError, BufferReadbackRange, Rea
 pub use resource::{
     BindGroupId, BindGroupLayoutId, BufferId, ComputePipelineId, PipelineLayoutId,
     RenderPipelineId, ResourceId, SamplerId, ShaderModuleId, TextureId, TextureViewId,
+    TimestampQuerySetId,
 };
 pub use sampler::{AddressMode, FilterMode, SamplerBorderColor, SamplerDescriptor};
 pub use shader::{ShaderModuleDescriptor, ShaderSource};
@@ -128,7 +132,8 @@ pub mod prelude {
         PipelineLayoutDescriptor, PrimitiveState, PrimitiveTopology, RenderCommand, RenderDevice,
         RenderPassDescriptor, RenderPipelineDescriptor, RenderQueue, SamplerDescriptor,
         ShaderStages, StoreOp, TextureDescriptor, TextureFormat, TextureId, TextureUsages,
-        TextureViewDescriptor, VertexBufferLayout, VertexFormat, VertexState,
+        TextureViewDescriptor, TimestampQuerySetDescriptor, TimestampQuerySetId,
+        VertexBufferLayout, VertexFormat, VertexState,
     };
 }
 

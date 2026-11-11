@@ -128,6 +128,9 @@ pub(crate) fn buffer_usages(usage: rhi::BufferUsages) -> wgpu::BufferUsages {
     if usage.contains(rhi::BufferUsages::INDIRECT) {
         out |= wgpu::BufferUsages::INDIRECT;
     }
+    if usage.contains(rhi::BufferUsages::QUERY_RESOLVE) {
+        out |= wgpu::BufferUsages::QUERY_RESOLVE;
+    }
     out
 }
 
@@ -914,8 +917,12 @@ pub(crate) fn limits_to_wgpu(limits: rhi::Limits) -> wgpu::Limits {
         max_texture_array_layers: limits.max_texture_array_layers,
         max_bind_groups: limits.max_bind_groups,
         max_bindings_per_bind_group: limits.max_bindings_per_bind_group,
+        max_storage_buffers_per_shader_stage: limits.max_storage_buffers_per_shader_stage,
         max_uniform_buffer_binding_size: limits.max_uniform_buffer_binding_size,
         max_storage_buffer_binding_size: limits.max_storage_buffer_binding_size,
+        max_buffer_size: limits.max_buffer_size,
+        min_uniform_buffer_offset_alignment: limits.min_uniform_buffer_offset_alignment,
+        min_storage_buffer_offset_alignment: limits.min_storage_buffer_offset_alignment,
         max_vertex_buffers: limits.max_vertex_buffers,
         max_vertex_attributes: limits.max_vertex_attributes,
         max_color_attachments: limits.max_color_attachments,
@@ -934,8 +941,12 @@ pub(crate) fn limits_from_wgpu(limits: &wgpu::Limits) -> rhi::Limits {
         max_texture_array_layers: limits.max_texture_array_layers,
         max_bind_groups: limits.max_bind_groups,
         max_bindings_per_bind_group: limits.max_bindings_per_bind_group,
+        max_storage_buffers_per_shader_stage: limits.max_storage_buffers_per_shader_stage,
         max_uniform_buffer_binding_size: limits.max_uniform_buffer_binding_size,
         max_storage_buffer_binding_size: limits.max_storage_buffer_binding_size,
+        max_buffer_size: limits.max_buffer_size,
+        min_uniform_buffer_offset_alignment: limits.min_uniform_buffer_offset_alignment,
+        min_storage_buffer_offset_alignment: limits.min_storage_buffer_offset_alignment,
         max_vertex_buffers: limits.max_vertex_buffers,
         max_vertex_attributes: limits.max_vertex_attributes,
         max_color_attachments: limits.max_color_attachments,
@@ -1011,6 +1022,46 @@ mod tests {
     fn desktop_limits_round_trip() {
         let desktop = rhi::Limits::desktop();
         assert_eq!(limits_from_wgpu(&limits_to_wgpu(desktop)), desktop);
+    }
+
+    #[test]
+    fn storage_buffer_stage_limits_map_both_ways_independently_of_group_limits() {
+        for limit in [0, 8, 10, 11, 16, 32] {
+            let requested = rhi::Limits {
+                max_storage_buffers_per_shader_stage: limit,
+                ..rhi::Limits::baseline()
+            };
+            let native = limits_to_wgpu(requested);
+            assert_eq!(native.max_storage_buffers_per_shader_stage, limit);
+            assert_eq!(limits_from_wgpu(&native), requested);
+
+            let enabled = wgpu::Limits {
+                max_storage_buffers_per_shader_stage: limit,
+                max_bindings_per_bind_group: 1000,
+                ..wgpu::Limits::default()
+            };
+            assert_eq!(
+                limits_from_wgpu(&enabled).max_storage_buffers_per_shader_stage,
+                limit
+            );
+        }
+    }
+
+    #[test]
+    fn uniform_buffer_offset_alignment_maps_both_ways() {
+        let rhi_limits = rhi::Limits {
+            min_uniform_buffer_offset_alignment: 128,
+            ..rhi::Limits::baseline()
+        };
+        let wgpu_limits = limits_to_wgpu(rhi_limits);
+        assert_eq!(wgpu_limits.min_uniform_buffer_offset_alignment, 128);
+
+        let mut adapter_limits = wgpu::Limits::default();
+        adapter_limits.min_uniform_buffer_offset_alignment = 64;
+        assert_eq!(
+            limits_from_wgpu(&adapter_limits).min_uniform_buffer_offset_alignment,
+            64
+        );
     }
 
     #[test]
@@ -1194,6 +1245,13 @@ mod tests {
         assert!(translated.contains(wgpu::BufferUsages::VERTEX));
         assert!(translated.contains(wgpu::BufferUsages::COPY_DST));
         assert!(!translated.contains(wgpu::BufferUsages::INDEX));
+    }
+
+    #[test]
+    fn query_resolve_buffer_usage_maps_without_substitution() {
+        let translated = buffer_usages(rhi::BufferUsages::QUERY_RESOLVE);
+        assert!(translated.contains(wgpu::BufferUsages::QUERY_RESOLVE));
+        assert!(!translated.contains(wgpu::BufferUsages::COPY_SRC));
     }
 
     #[test]

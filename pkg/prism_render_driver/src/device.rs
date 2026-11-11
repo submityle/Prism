@@ -24,13 +24,14 @@ use crate::pipeline::{
 };
 use crate::resource::{
     BindGroupId, BindGroupLayoutId, BufferId, ComputePipelineId, PipelineLayoutId,
-    RenderPipelineId, SamplerId, ShaderModuleId, TextureId, TextureViewId,
+    RenderPipelineId, SamplerId, ShaderModuleId, TextureId, TextureViewId, TimestampQuerySetId,
 };
 use crate::sampler::SamplerDescriptor;
 use crate::shader::ShaderModuleDescriptor;
 use crate::texture::{Extent3d, TextureDescriptor, TextureViewDescriptor};
 use crate::{BufferReadback, BufferReadbackError, BufferReadbackRange};
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 /// The byte layout of a linear image buffer used for texture uploads.
@@ -59,6 +60,23 @@ pub struct TextureWrite {
     pub size: Extent3d,
 }
 
+/// A timestamp-only query set allocated by a render device.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct TimestampQuerySetDescriptor {
+    /// A debug label surfaced in GPU tooling.
+    pub label: Option<String>,
+    /// Number of 64-bit timestamp slots in the query set.
+    pub count: u32,
+}
+
+impl TimestampQuerySetDescriptor {
+    /// Creates an unlabeled timestamp query set with `count` slots.
+    #[must_use]
+    pub const fn new(count: u32) -> Self {
+        Self { label: None, count }
+    }
+}
+
 /// A backend device: the factory for every GPU resource.
 ///
 /// Methods take borrowed descriptors (plain RHI data) and return typed,
@@ -73,6 +91,14 @@ pub trait RenderDevice {
 
     /// Creates a GPU buffer.
     fn create_buffer(&self, descriptor: &BufferDescriptor) -> BufferId;
+    /// Creates a timestamp query set.
+    fn create_timestamp_query_set(
+        &self,
+        descriptor: &TimestampQuerySetDescriptor,
+    ) -> TimestampQuerySetId {
+        let _ = descriptor;
+        panic!("this RenderDevice does not support timestamp query sets")
+    }
     /// Creates a GPU texture.
     fn create_texture(&self, descriptor: &TextureDescriptor) -> TextureId;
     /// Creates a view onto an existing texture.
@@ -185,6 +211,10 @@ pub trait RenderDevice {
 
     /// Releases a buffer. Using its id afterwards is a stale-id error.
     fn destroy_buffer(&self, id: BufferId);
+    /// Releases a timestamp query set.
+    fn destroy_timestamp_query_set(&self, id: TimestampQuerySetId) {
+        let _ = id;
+    }
     /// Releases a texture.
     fn destroy_texture(&self, id: TextureId);
     /// Releases a texture view.
@@ -217,6 +247,12 @@ pub trait RenderQueue {
     fn write_texture(&self, destination: TextureWrite, data: &[u8], layout: ImageDataLayout);
     /// Submits finished command buffers for execution in order.
     fn submit(&self, command_buffers: &[CommandBuffer]);
+
+    /// Returns the native GPU timestamp period in nanoseconds per tick when
+    /// timestamp queries are enabled on this queue.
+    fn timestamp_period_ns(&self) -> Option<f32> {
+        None
+    }
 
     /// Captures buffer ranges after preceding uploads/submissions and before
     /// subsequent queue work. The backend validates the entire request and its

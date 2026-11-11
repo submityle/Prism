@@ -29,6 +29,8 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 /// Private marker for buffer slots.
 enum BufferMarker {}
+/// Private marker for timestamp query-set slots.
+enum TimestampQuerySetMarker {}
 /// Private marker for texture slots.
 enum TextureMarker {}
 /// Private marker for texture-view slots.
@@ -78,6 +80,8 @@ pub(crate) struct DeviceInner {
     caps: rhi::DeviceCapabilities,
     /// Live buffers.
     buffers: Map<BufferMarker, Placeholder>,
+    /// Live timestamp query sets.
+    timestamp_query_sets: Map<TimestampQuerySetMarker, Placeholder>,
     /// Live textures.
     textures: Map<TextureMarker, Placeholder>,
     /// Live texture views.
@@ -104,6 +108,7 @@ impl DeviceInner {
         Self {
             caps,
             buffers: Mutex::new(rhi::GenerationalSlotMap::new()),
+            timestamp_query_sets: Mutex::new(rhi::GenerationalSlotMap::new()),
             textures: Mutex::new(rhi::GenerationalSlotMap::new()),
             texture_views: Mutex::new(rhi::GenerationalSlotMap::new()),
             samplers: Mutex::new(rhi::GenerationalSlotMap::new()),
@@ -158,6 +163,7 @@ impl NullDevice {
     #[must_use]
     pub fn live_resource_count(&self) -> usize {
         lock(&self.inner.buffers).len()
+            + lock(&self.inner.timestamp_query_sets).len()
             + lock(&self.inner.textures).len()
             + lock(&self.inner.texture_views).len()
             + lock(&self.inner.samplers).len()
@@ -177,6 +183,13 @@ impl RenderDevice for NullDevice {
 
     fn create_buffer(&self, _descriptor: &rhi::BufferDescriptor) -> rhi::BufferId {
         convert_id(lock(&self.inner.buffers).insert(Placeholder))
+    }
+
+    fn create_timestamp_query_set(
+        &self,
+        _descriptor: &rhi::TimestampQuerySetDescriptor,
+    ) -> rhi::TimestampQuerySetId {
+        convert_id(lock(&self.inner.timestamp_query_sets).insert(Placeholder))
     }
 
     fn create_texture(&self, _descriptor: &rhi::TextureDescriptor) -> rhi::TextureId {
@@ -236,6 +249,10 @@ impl RenderDevice for NullDevice {
 
     fn destroy_buffer(&self, id: rhi::BufferId) {
         lock(&self.inner.buffers).remove(convert_id(id));
+    }
+
+    fn destroy_timestamp_query_set(&self, id: rhi::TimestampQuerySetId) {
+        lock(&self.inner.timestamp_query_sets).remove(convert_id(id));
     }
 
     fn destroy_texture(&self, id: rhi::TextureId) {

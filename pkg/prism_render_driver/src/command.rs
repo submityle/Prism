@@ -4,11 +4,13 @@ use crate::color::Color;
 use crate::flags::ShaderStages;
 use crate::resource::{
     BindGroupId, BufferId, ComputePipelineId, RenderPipelineId, TextureId, TextureViewId,
+    TimestampQuerySetId,
 };
 use crate::state::IndexFormat;
 use crate::texture::Extent3d;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::num::NonZeroU64;
 use core::ops::Range;
 
 /// The byte size of one packed indirect-draw argument record, shared by
@@ -120,6 +122,21 @@ pub struct RenderPassDescriptor {
     pub depth_stencil_attachment: Option<DepthStencilAttachment>,
 }
 
+/// Query slots written at the beginning and/or end of a pass.
+///
+/// This metadata is recorded as the first command by the timestamped pass
+/// helpers below. Backends translate it to their native pass-boundary query
+/// writes; it is not a shader-visible command and must not be replayed as one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct TimestampWrites {
+    /// The timestamp query set receiving the values.
+    pub query_set: TimestampQuerySetId,
+    /// Query slot written when the pass begins, if any.
+    pub beginning_of_pass_write_index: Option<u32>,
+    /// Query slot written when the pass ends, if any.
+    pub end_of_pass_write_index: Option<u32>,
+}
+
 /// A rectangular viewport mapping clip space to framebuffer pixels.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Viewport {
@@ -159,6 +176,9 @@ pub struct IndexBufferBinding {
     pub format: IndexFormat,
     /// The byte offset into the buffer.
     pub offset: u64,
+    /// Exact binding length, or the remainder of the buffer when `None`.
+    /// Object suballocations must specify a length to isolate GPU-authored indices.
+    pub size: Option<NonZeroU64>,
 }
 
 /// A single recorded command inside a render pass.
@@ -187,6 +207,9 @@ pub enum RenderCommand {
         buffer: BufferId,
         /// The byte offset into the buffer.
         offset: u64,
+        /// Exact binding length, or the remainder of the buffer when `None`.
+        /// Object suballocations must specify a length to bound vertex fetches.
+        size: Option<NonZeroU64>,
     },
     /// Bind the index buffer.
     SetIndexBuffer(IndexBufferBinding),
@@ -280,6 +303,8 @@ pub enum RenderCommand {
         /// The constant bytes to upload.
         data: Vec<u8>,
     },
+    /// Pass-boundary timestamp metadata.
+    TimestampWrites(TimestampWrites),
 }
 
 /// A single recorded command inside a compute pass.
@@ -322,6 +347,8 @@ pub enum ComputeCommand {
         /// The constant bytes to upload.
         data: Vec<u8>,
     },
+    /// Pass-boundary timestamp metadata.
+    TimestampWrites(TimestampWrites),
 }
 
 /// A single recorded copy/transfer command inside a transfer pass.
@@ -401,6 +428,19 @@ pub enum CopyCommand {
         dst_origin: [u32; 3],
         /// The texel extent to copy.
         size: Extent3d,
+    },
+    /// Resolve timestamp query slots into a GPU buffer.
+    ResolveTimestampQueries {
+        /// The source timestamp query set.
+        query_set: TimestampQuerySetId,
+        /// The first query slot to resolve.
+        first_query: u32,
+        /// The number of consecutive query slots to resolve.
+        query_count: u32,
+        /// The destination buffer, which must have `QUERY_RESOLVE` usage.
+        destination: BufferId,
+        /// Byte offset in the destination buffer.
+        destination_offset: u64,
     },
 }
 
@@ -488,6 +528,17 @@ impl CommandEncoder {
         self
     }
 
+    /// Records a render pass with native pass-boundary timestamp writes.
+    pub fn push_timestamped_render_pass(
+        &mut self,
+        descriptor: RenderPassDescriptor,
+        timestamp_writes: TimestampWrites,
+        mut commands: Vec<RenderCommand>,
+    ) -> &mut Self {
+        commands.insert(0, RenderCommand::TimestampWrites(timestamp_writes));
+        self.push_render_pass(descriptor, commands)
+    }
+
     /// Records a compute pass from its command list.
     pub fn push_compute_pass(
         &mut self,
@@ -496,6 +547,17 @@ impl CommandEncoder {
     ) -> &mut Self {
         self.buffer.passes.push(Pass::Compute { label, commands });
         self
+    }
+
+    /// Records a compute pass with native pass-boundary timestamp writes.
+    pub fn push_timestamped_compute_pass(
+        &mut self,
+        label: Option<String>,
+        timestamp_writes: TimestampWrites,
+        mut commands: Vec<ComputeCommand>,
+    ) -> &mut Self {
+        commands.insert(0, ComputeCommand::TimestampWrites(timestamp_writes));
+        self.push_compute_pass(label, commands)
     }
 
     /// Records a transfer pass from its copy command list.
@@ -707,5 +769,51 @@ mod tests {
     fn packed_indirect_draw_and_dispatch_record_sizes_match_webgpu_abi() {
         assert_eq!(DRAW_INDIRECT_ARGS_SIZE, 4 * 4);
         assert_eq!(DISPATCH_INDIRECT_ARGS_SIZE, 3 * 4);
+    }
+
+    #[test]
+    fn timestamped_pass_and_resolve_commands_round_trip() {
+        let query_set = TimestampQuerySetId::from_parts(4, 2);
+        let destination = BufferId::from_parts(5, 3);
+        let writes = TimestampWrites {
+            query_set,
+            beginning_of_pass_write_index: Some(0),
+            end_of_pass_write_index: Some(1),
+        };
+        let mut encoder = CommandEncoder::new();
+        encoder.push_timestamped_compute_pass(
+            Some(String::from("timed")),
+            writes,
+            vec![ComputeCommand::Dispatch { x: 1, y: 1, z: 1 }],
+        );
+        encoder.push_transfer_pass(
+            Some(String::from("resolve")),
+            vec![CopyCommand::ResolveTimestampQueries {
+                query_set,
+                first_query: 0,
+                query_count: 2,
+                destination,
+                destination_offset: 0,
+            }],
+        );
+
+        let command_buffer = encoder.finish();
+        let Pass::Compute { commands, .. } = &command_buffer.passes[0] else {
+            panic!("expected a compute pass")
+        };
+        assert_eq!(commands[0], ComputeCommand::TimestampWrites(writes));
+        let Pass::Transfer { commands, .. } = &command_buffer.passes[1] else {
+            panic!("expected a transfer pass")
+        };
+        assert_eq!(
+            commands[0],
+            CopyCommand::ResolveTimestampQueries {
+                query_set,
+                first_query: 0,
+                query_count: 2,
+                destination,
+                destination_offset: 0,
+            }
+        );
     }
 }

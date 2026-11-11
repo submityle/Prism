@@ -205,6 +205,8 @@ bitflags! {
         const STORAGE = 1 << 5;
         /// Readable as the source of indirect draw/dispatch arguments.
         const INDIRECT = 1 << 6;
+        /// Destination of a timestamp-query resolve operation.
+        const QUERY_RESOLVE = 1 << 7;
     }
 }
 

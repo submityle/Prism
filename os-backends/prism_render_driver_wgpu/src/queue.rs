@@ -21,6 +21,42 @@ use alloc::sync::Arc;
 #[path = "readback.rs"]
 mod readback;
 
+/// Resolve an explicit object subrange without silently widening it or wrapping.
+/// Native validation still checks the binding-specific alignment and usage.
+fn binding_end(native_bytes: u64, offset: u64, size: Option<core::num::NonZeroU64>) -> u64 {
+    let end = size.map_or(native_bytes, |size| {
+        offset
+            .checked_add(size.get())
+            .expect("buffer binding end overflow")
+    });
+    assert!(
+        offset < end && end <= native_bytes,
+        "buffer binding exceeds its allocation"
+    );
+    end
+}
+
+/// Validate and align one synchronous buffer readback before allocating or
+/// submitting any native work.
+fn buffer_readback_copy_size(
+    requested: u64,
+    source_size: u64,
+    max_buffer_size: u64,
+) -> Result<u64, rhi::ReadbackError> {
+    if requested == 0 || requested > source_size {
+        return Err(rhi::ReadbackError::InvalidRange);
+    }
+    let copy_size = requested
+        .checked_add(u64::from(wgpu::COPY_BUFFER_ALIGNMENT - 1))
+        .ok_or(rhi::ReadbackError::InvalidRange)?
+        / u64::from(wgpu::COPY_BUFFER_ALIGNMENT)
+        * u64::from(wgpu::COPY_BUFFER_ALIGNMENT);
+    if copy_size > source_size || copy_size > max_buffer_size {
+        return Err(rhi::ReadbackError::InvalidRange);
+    }
+    Ok(copy_size)
+}
+
 /// A wgpu-backed [`rhi::RenderQueue`].
 ///
 /// Shares the device's resource tables so submitted command buffers resolve
@@ -89,23 +125,30 @@ impl WgpuQueue {
     ///
     /// Readback is an acceptance hook, so a rejected map must be surfaced
     /// instead of being turned into an apparent successful read.
-    fn map_read(&self, staging: &wgpu::Buffer) {
+    fn map_read(&self, staging: &wgpu::Buffer) -> Result<(), rhi::ReadbackError> {
         let result = StdArc::new(Mutex::new(None));
         let callback_result = StdArc::clone(&result);
         staging
             .slice(..)
             .map_async(wgpu::MapMode::Read, move |status| {
-                *callback_result.lock().expect("map callback lock") = Some(status);
+                if let Ok(mut callback_result) = callback_result.lock() {
+                    *callback_result = Some(status);
+                }
             });
-        self.inner
+        if self
+            .inner
             .device
             .poll(wgpu::PollType::wait_indefinitely())
-            .expect("device poll must complete readback mapping");
-        match result.lock().expect("map result lock").take() {
-            Some(Ok(())) => {}
-            Some(Err(error)) => panic!("GPU readback mapping failed: {error}"),
-            None => panic!("GPU readback mapping callback did not run"),
+            .is_err()
+        {
+            return Err(rhi::ReadbackError::DeviceLost);
         }
+        let status = result
+            .lock()
+            .map_err(|_| rhi::ReadbackError::MapFailed)?
+            .take()
+            .ok_or(rhi::ReadbackError::MapFailed)?;
+        status.map_err(|_| rhi::ReadbackError::MapFailed)
     }
 
     /// Wraps a ready wgpu queue sharing `inner` with its device.
@@ -255,6 +298,29 @@ impl WgpuQueue {
                     convert::extent3d(*size),
                 );
             }
+            rhi::CopyCommand::ResolveTimestampQueries {
+                query_set,
+                first_query,
+                query_count,
+                destination,
+                destination_offset,
+            } => {
+                let query_set = self.inner.resolve_timestamp_query_set(*query_set);
+                let destination = self.inner.resolve_buffer(*destination);
+                let end_query = first_query
+                    .checked_add(*query_count)
+                    .expect("timestamp query range overflow");
+                assert!(
+                    *query_count > 0,
+                    "timestamp query resolve count must be nonzero"
+                );
+                encoder.resolve_query_set(
+                    &query_set,
+                    *first_query..end_query,
+                    &destination,
+                    *destination_offset,
+                );
+            }
         }
     }
 
@@ -266,6 +332,27 @@ impl WgpuQueue {
         descriptor: &rhi::RenderPassDescriptor,
         commands: &[rhi::RenderCommand],
     ) {
+        let timestamp_writes = commands.iter().find_map(|command| match command {
+            rhi::RenderCommand::TimestampWrites(writes) => Some(*writes),
+            _ => None,
+        });
+        let timestamp_query_set =
+            timestamp_writes.map(|writes| self.inner.resolve_timestamp_query_set(writes.query_set));
+        let native_timestamp_writes = timestamp_writes.map(|writes| {
+            let query_set = timestamp_query_set
+                .as_ref()
+                .expect("timestamp query set must be resolved");
+            assert!(
+                writes.beginning_of_pass_write_index.is_some()
+                    || writes.end_of_pass_write_index.is_some(),
+                "timestamp writes must contain a beginning or end index"
+            );
+            wgpu::RenderPassTimestampWrites {
+                query_set,
+                beginning_of_pass_write_index: writes.beginning_of_pass_write_index,
+                end_of_pass_write_index: writes.end_of_pass_write_index,
+            }
+        });
         // Resolve attachment views into owned handles first so the borrowed
         // `RenderPassColorAttachment`s below outlive the resolution locks.
         let owned_colors: Vec<Option<OwnedColorAttachment>> = descriptor
@@ -316,7 +403,7 @@ impl WgpuQueue {
             label: descriptor.label.as_deref(),
             color_attachments: &color_attachments,
             depth_stencil_attachment,
-            timestamp_writes: None,
+            timestamp_writes: native_timestamp_writes,
             occlusion_query_set: None,
             multiview_mask: None,
         });
@@ -345,14 +432,17 @@ impl WgpuQueue {
                 slot,
                 buffer,
                 offset,
+                size,
             } => {
                 let buf = self.inner.resolve_buffer(*buffer);
-                pass.set_vertex_buffer(*slot, buf.slice(*offset..));
+                let end = binding_end(buf.size(), *offset, *size);
+                pass.set_vertex_buffer(*slot, buf.slice(*offset..end));
             }
             rhi::RenderCommand::SetIndexBuffer(binding) => {
                 let buf = self.inner.resolve_buffer(binding.buffer);
+                let end = binding_end(buf.size(), binding.offset, binding.size);
                 pass.set_index_buffer(
-                    buf.slice(binding.offset..),
+                    buf.slice(binding.offset..end),
                     convert::index_format(binding.format),
                 );
             }
@@ -417,6 +507,7 @@ impl WgpuQueue {
             rhi::RenderCommand::SetPushConstants { offset, data, .. } => {
                 pass.set_immediates(*offset, data);
             }
+            rhi::RenderCommand::TimestampWrites(_) => {}
         }
     }
 
@@ -428,9 +519,30 @@ impl WgpuQueue {
         label: Option<&str>,
         commands: &[rhi::ComputeCommand],
     ) {
+        let timestamp_writes = commands.iter().find_map(|command| match command {
+            rhi::ComputeCommand::TimestampWrites(writes) => Some(*writes),
+            _ => None,
+        });
+        let timestamp_query_set =
+            timestamp_writes.map(|writes| self.inner.resolve_timestamp_query_set(writes.query_set));
+        let native_timestamp_writes = timestamp_writes.map(|writes| {
+            let query_set = timestamp_query_set
+                .as_ref()
+                .expect("timestamp query set must be resolved");
+            assert!(
+                writes.beginning_of_pass_write_index.is_some()
+                    || writes.end_of_pass_write_index.is_some(),
+                "timestamp writes must contain a beginning or end index"
+            );
+            wgpu::ComputePassTimestampWrites {
+                query_set,
+                beginning_of_pass_write_index: writes.beginning_of_pass_write_index,
+                end_of_pass_write_index: writes.end_of_pass_write_index,
+            }
+        });
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label,
-            timestamp_writes: None,
+            timestamp_writes: native_timestamp_writes,
         });
         for command in commands {
             match command {
@@ -456,12 +568,21 @@ impl WgpuQueue {
                 rhi::ComputeCommand::SetPushConstants { offset, data } => {
                     pass.set_immediates(*offset, data);
                 }
+                rhi::ComputeCommand::TimestampWrites(_) => {}
             }
         }
     }
 }
 
 impl RenderQueue for WgpuQueue {
+    fn timestamp_period_ns(&self) -> Option<f32> {
+        self.inner
+            .device
+            .features()
+            .contains(wgpu::Features::TIMESTAMP_QUERY)
+            .then(|| self.queue.get_timestamp_period())
+    }
+
     fn request_buffer_readback(
         &self,
         ranges: &[rhi::BufferReadbackRange],
@@ -563,28 +684,138 @@ impl WgpuQueue {
 }
 
 impl WgpuQueue {
-    /// Reads an `Rgba8Unorm` 2D texture back into tightly-packed RGBA bytes.
+    /// Reads an `Rgba8Unorm` or `Rgba8UnormSrgb` 2D texture into RGBA bytes.
     ///
     /// Blocks the calling thread until the copy completes and returns
     /// `width * height * 4` bytes in row-major order with the GPU's row padding
-    /// stripped. The texture must be a single-mip, single-layer 2D texture in an
-    /// 8-bit-per-channel RGBA format created with [`rhi::TextureUsages::COPY_SRC`].
+    /// stripped. Reads the base mip of a single-layer, single-sampled 2D texture
+    /// created with [`rhi::TextureUsages::COPY_SRC`]. The nonempty requested
+    /// extent must fit in that mip. sRGB bytes remain encoded, not linearized.
     ///
     /// This is the backend hook golden-image and headless tests use to observe
     /// what the RHI actually rendered; it is not a hot-path API.
     #[must_use]
-    pub fn read_texture_rgba8(&self, texture: rhi::TextureId, width: u32, height: u32) -> Vec<u8> {
-        const BYTES_PER_TEXEL: u32 = 4;
-        let unpadded_bytes_per_row = width * BYTES_PER_TEXEL;
-        let padded_bytes_per_row = unpadded_bytes_per_row
-            .div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
-            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let buffer_size = u64::from(padded_bytes_per_row) * u64::from(height);
+    pub fn read_texture_rgba8(
+        &self,
+        texture: rhi::TextureId,
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<u8>, rhi::ReadbackError> {
+        self.read_texture_texels(
+            texture,
+            width,
+            height,
+            &[
+                wgpu::TextureFormat::Rgba8Unorm,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+            ],
+            4,
+        )
+    }
 
-        let texture = self.inner.resolve_texture(texture);
+    /// Reads an `R32Uint` 2D texture into tightly packed native-endian words.
+    /// This is used by native scene acceptance to inspect integer identity
+    /// attachments without routing them through a color-format decoder.
+    #[must_use]
+    pub fn read_texture_r32uint(
+        &self,
+        texture: rhi::TextureId,
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<u32>, rhi::ReadbackError> {
+        let bytes =
+            self.read_texture_texels(texture, width, height, &[wgpu::TextureFormat::R32Uint], 4)?;
+        Ok(bytes
+            .chunks_exact(4)
+            .map(|texel| u32::from_le_bytes(texel.try_into().expect("R32Uint texel")))
+            .collect())
+    }
+
+    /// Reads scene-linear `Rgba16Float` texels as row-major RGBA `f32` values.
+    ///
+    /// Preserves HDR values, negative values, subnormals and IEEE nonfinite
+    /// values without clamping, exposure or display transfer. Each channel is
+    /// decoded from the texture's binary16 representation. The extent, usage,
+    /// dimension and sample-count requirements match [`Self::read_texture_rgba8`].
+    /// A different texture format is rejected before issuing any GPU copy.
+    /// This synchronous acceptance/capture hook is not a per-frame hot-path API.
+    #[must_use]
+    pub fn read_texture_rgba16f(
+        &self,
+        texture: rhi::TextureId,
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<[f32; 4]>, rhi::ReadbackError> {
+        let bytes = self.read_texture_texels(
+            texture,
+            width,
+            height,
+            &[wgpu::TextureFormat::Rgba16Float],
+            8,
+        )?;
+        Ok(bytes
+            .chunks_exact(8)
+            .map(|texel| {
+                core::array::from_fn(|channel| {
+                    let offset = channel * 2;
+                    half::f16::from_le_bytes([texel[offset], texel[offset + 1]]).to_f32()
+                })
+            })
+            .collect())
+    }
+
+    /// Shared format-checked copy with explicit texel width and padding removal.
+    fn read_texture_texels(
+        &self,
+        texture: rhi::TextureId,
+        width: u32,
+        height: u32,
+        formats: &[wgpu::TextureFormat],
+        bytes_per_texel: u32,
+    ) -> Result<Vec<u8>, rhi::ReadbackError> {
+        if self.inner.is_lost() {
+            return Err(rhi::ReadbackError::DeviceLost);
+        }
+        let texture = self
+            .inner
+            .try_resolve_texture(texture)
+            .ok_or(rhi::ReadbackError::ResourceUnavailable)?;
+        if !formats.contains(&texture.format()) {
+            return Err(rhi::ReadbackError::UnsupportedFormat);
+        }
+        if texture.dimension() != wgpu::TextureDimension::D2
+            || texture.sample_count() != 1
+            || texture.depth_or_array_layers() != 1
+            || !texture.usage().contains(wgpu::TextureUsages::COPY_SRC)
+        {
+            return Err(rhi::ReadbackError::ResourceUnavailable);
+        }
+        if width == 0 || height == 0 || width > texture.width() || height > texture.height() {
+            return Err(rhi::ReadbackError::InvalidRange);
+        }
+        let unpadded_bytes_per_row = width
+            .checked_mul(bytes_per_texel)
+            .ok_or(rhi::ReadbackError::InvalidRange)?;
+        let padded_bytes_per_row = unpadded_bytes_per_row
+            .checked_add(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT - 1)
+            .ok_or(rhi::ReadbackError::InvalidRange)?
+            / wgpu::COPY_BYTES_PER_ROW_ALIGNMENT
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let buffer_size = u64::from(padded_bytes_per_row)
+            .checked_mul(u64::from(height))
+            .ok_or(rhi::ReadbackError::InvalidRange)?;
+        if buffer_size > self.inner.device.limits().max_buffer_size {
+            return Err(rhi::ReadbackError::InvalidRange);
+        }
+        let output_size = usize::try_from(
+            u64::from(unpadded_bytes_per_row)
+                .checked_mul(u64::from(height))
+                .ok_or(rhi::ReadbackError::InvalidRange)?,
+        )
+        .map_err(|_| rhi::ReadbackError::InvalidRange)?;
         let staging = self.inner.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("rhi-texture-readback"),
-            size: buffer_size.max(4),
+            size: buffer_size,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -617,24 +848,28 @@ impl WgpuQueue {
             },
         );
         self.queue.submit([encoder.finish()]);
-        self.inner
-            .device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .expect("device poll must complete texture readback");
-        self.map_read(&staging);
+        // Mapping waits for the preceding copy on this queue; one poll is enough.
+        self.map_read(&staging)?;
 
         let view = staging
             .slice(..)
             .get_mapped_range()
-            .expect("readback range is available after the device poll");
-        let mut out = Vec::with_capacity((unpadded_bytes_per_row * height) as usize);
+            .map_err(|_| rhi::ReadbackError::MapFailed)?;
+        let mut out = Vec::with_capacity(output_size);
         for row in 0..height {
-            let start = (row * padded_bytes_per_row) as usize;
-            out.extend_from_slice(&view[start..start + unpadded_bytes_per_row as usize]);
+            let start = usize::try_from(u64::from(row) * u64::from(padded_bytes_per_row))
+                .map_err(|_| rhi::ReadbackError::InvalidRange)?;
+            let end = start
+                .checked_add(
+                    usize::try_from(unpadded_bytes_per_row)
+                        .map_err(|_| rhi::ReadbackError::InvalidRange)?,
+                )
+                .ok_or(rhi::ReadbackError::InvalidRange)?;
+            out.extend_from_slice(view.get(start..end).ok_or(rhi::ReadbackError::MapFailed)?);
         }
         drop(view);
         staging.unmap();
-        out
+        Ok(out)
     }
 
     /// Reads `size` bytes back from a buffer into a tightly packed `Vec<u8>`.
@@ -646,13 +881,31 @@ impl WgpuQueue {
     /// observe what the RHI actually produced on the GPU (a culling result, a
     /// GPU-written draw argument record); it is not a hot-path API.
     #[must_use]
-    pub fn read_buffer(&self, buffer: rhi::BufferId, size: u64) -> Vec<u8> {
+    pub fn read_buffer(
+        &self,
+        buffer: rhi::BufferId,
+        size: u64,
+    ) -> Result<Vec<u8>, rhi::ReadbackError> {
         if size == 0 {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        // Buffer copies must be a multiple of `COPY_BUFFER_ALIGNMENT` (4).
-        let copy_size = size.next_multiple_of(4);
-        let buffer = self.inner.resolve_buffer(buffer);
+        if self.inner.is_lost() {
+            return Err(rhi::ReadbackError::DeviceLost);
+        }
+        let buffer = self
+            .inner
+            .try_resolve_buffer(buffer)
+            .ok_or(rhi::ReadbackError::ResourceUnavailable)?;
+        if !buffer.usage().contains(wgpu::BufferUsages::COPY_SRC) {
+            return Err(rhi::ReadbackError::ResourceUnavailable);
+        }
+        // Buffer copies must be a multiple of `COPY_BUFFER_ALIGNMENT` (4),
+        // and rounding may not extend beyond the source allocation.
+        let copy_size = buffer_readback_copy_size(
+            size,
+            buffer.size(),
+            self.inner.device.limits().max_buffer_size,
+        )?;
         let staging = self.inner.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("rhi-buffer-readback"),
             size: copy_size,
@@ -668,21 +921,18 @@ impl WgpuQueue {
                 });
         encoder.copy_buffer_to_buffer(&buffer, 0, &staging, 0, copy_size);
         self.queue.submit([encoder.finish()]);
-        self.inner
-            .device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .expect("device poll must complete buffer readback");
-        self.map_read(&staging);
+        self.map_read(&staging)?;
 
         let view = staging
             .slice(..)
             .get_mapped_range()
-            .expect("readback range is available after the device poll");
-        let mut out = Vec::with_capacity(size as usize);
-        out.extend_from_slice(&view[..size as usize]);
+            .map_err(|_| rhi::ReadbackError::MapFailed)?;
+        let output_size = usize::try_from(size).map_err(|_| rhi::ReadbackError::InvalidRange)?;
+        let mut out = Vec::with_capacity(output_size);
+        out.extend_from_slice(&view[..output_size]);
         drop(view);
         staging.unmap();
-        out
+        Ok(out)
     }
 }
 
@@ -712,6 +962,27 @@ mod tests {
     use crate::{WgpuDevice, WgpuInstance};
     use prism_render_driver::RenderDevice as _;
 
+    #[test]
+    fn bounded_buffer_binding_end_preserves_suballocations_and_native_tails() {
+        use core::num::NonZeroU64;
+        assert_eq!(binding_end(256, 64, NonZeroU64::new(32)), 96);
+        assert_eq!(binding_end(256, 64, None), 256);
+        assert_eq!(binding_end(256, 64, NonZeroU64::new(192)), 256);
+    }
+
+    #[test]
+    fn bounded_buffer_binding_end_rejects_empty_out_of_range_and_overflow() {
+        use core::num::NonZeroU64;
+        for (native, offset, size) in [
+            (256, 256, None),
+            (256, 257, None),
+            (256, 64, NonZeroU64::new(193)),
+            (u64::MAX, u64::MAX - 3, NonZeroU64::new(4)),
+        ] {
+            assert!(std::panic::catch_unwind(|| binding_end(native, offset, size)).is_err());
+        }
+    }
+
     /// Brings up a device/queue pair, or `None` when no GPU is available so the
     /// suite passes without hardware.
     fn device_or_skip() -> Option<(WgpuDevice, WgpuQueue)> {
@@ -728,7 +999,7 @@ mod tests {
                     !require_gpu(),
                     "PRISM_REQUIRE_GPU=1 but no wgpu adapter was found"
                 );
-                eprintln!("SKIPPED wgpu REAL HARDWARE GPU test: no adapter");
+                eprintln!("SKIP_UNVERIFIED: wgpu REAL HARDWARE GPU test has no adapter");
                 None
             }
             Err(crate::HardwareDeviceError::NonHardware(evidence)) => {
@@ -736,7 +1007,9 @@ mod tests {
                     !require_gpu(),
                     "PRISM_REQUIRE_GPU=1 requires a physical GPU; observed {evidence}"
                 );
-                eprintln!("SOFTWARE/VIRTUAL adapter; skipped physical-GPU evidence: {evidence}");
+                eprintln!(
+                    "SKIP_UNVERIFIED: software/virtual adapter; physical-GPU evidence unavailable: {evidence}"
+                );
                 None
             }
             Err(crate::HardwareDeviceError::Device(error)) => {
@@ -748,6 +1021,23 @@ mod tests {
     /// Whether a missing adapter must fail the test instead of skipping it.
     fn require_gpu() -> bool {
         crate::require_hardware_gpu()
+    }
+
+    #[test]
+    fn buffer_readback_validation_is_cpu_only_and_recoverable() {
+        assert_eq!(buffer_readback_copy_size(6, 8, 64), Ok(8));
+        assert_eq!(
+            buffer_readback_copy_size(9, 8, 64),
+            Err(rhi::ReadbackError::InvalidRange)
+        );
+        assert_eq!(
+            buffer_readback_copy_size(8, 8, 4),
+            Err(rhi::ReadbackError::InvalidRange)
+        );
+        assert_eq!(
+            buffer_readback_copy_size(u64::MAX, u64::MAX, u64::MAX),
+            Err(rhi::ReadbackError::InvalidRange)
+        );
     }
 
     #[test]
@@ -795,13 +1085,13 @@ mod tests {
         // bytes the transfer pass wrote must survive verbatim.
         assert_eq!(
             queue.read_buffer(dst, PAYLOAD.len() as u64),
-            PAYLOAD.to_vec(),
+            Ok(PAYLOAD.to_vec()),
             "the transfer pass must have copied the source bytes verbatim"
         );
         // A short read returns exactly the requested prefix.
         assert_eq!(
             queue.read_buffer(dst, 6),
-            PAYLOAD[..6].to_vec(),
+            Ok(PAYLOAD[..6].to_vec()),
             "the readback honors a partial size"
         );
 

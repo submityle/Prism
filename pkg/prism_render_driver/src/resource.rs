@@ -102,6 +102,8 @@ macro_rules! resource_kinds {
 resource_kinds! {
     /// Marker for GPU buffers.
     BufferKind => BufferId;
+    /// Marker for timestamp query sets.
+    TimestampQuerySetKind => TimestampQuerySetId;
     /// Marker for GPU textures.
     TextureKind => TextureId;
     /// Marker for texture views.
