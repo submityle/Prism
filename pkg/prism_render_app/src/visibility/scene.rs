@@ -5,7 +5,7 @@ use prism_render_architecture::gpu_scene::{
     CpuRenderScene, GeometryHandle, SceneApplyReport, SceneHandle, SceneMaterialHandle,
     SceneTransaction,
 };
-use prism_render_material::MaterialRecord;
+use prism_render_material::{MaterialExecutionTables, MaterialRecord};
 use prism_render_visibility::{
     GeometryLodChain, GpuRenderWorkItem, GpuViewRecord, ViewHandle, VisibilityDiagnostics,
 };
@@ -38,6 +38,9 @@ pub struct PrismRenderScene {
     pub(super) next_view: u32,
     pub(super) frame: u64,
     geometry_epoch: u64,
+    material_epoch: u64,
+    execution_tables: Option<MaterialExecutionTables>,
+    execution_epoch: u64,
     pub(super) capacity: u32,
     pub(super) transaction: SceneTransaction,
     pub(super) report: SceneApplyReport,
@@ -59,6 +62,9 @@ impl Default for PrismRenderScene {
             next_view: 0,
             frame: 0,
             geometry_epoch: 0,
+            material_epoch: 0,
+            execution_tables: None,
+            execution_epoch: 0,
             capacity: 1 << 20,
             transaction: SceneTransaction::default(),
             report: SceneApplyReport::default(),
@@ -91,11 +97,18 @@ impl PrismRenderScene {
     }
     /// Register or replace a material, consumed afresh by every cull.
     pub fn insert_material(&mut self, record: MaterialRecord) {
-        self.materials.insert(record.handle, record);
+        if self.materials.get(&record.handle) != Some(&record) {
+            self.materials.insert(record.handle, record);
+            self.material_epoch = self.material_epoch.wrapping_add(1).max(1);
+        }
     }
     /// Unregister material; subsequent culls report missing material.
     pub fn remove_material(&mut self, handle: SceneMaterialHandle) -> Option<MaterialRecord> {
-        self.materials.remove(&handle)
+        let removed = self.materials.remove(&handle);
+        if removed.is_some() {
+            self.material_epoch = self.material_epoch.wrapping_add(1).max(1);
+        }
+        removed
     }
     /// Maximum emitted work items per view, including zero for diagnostic use.
     pub fn set_view_capacity(&mut self, capacity: u32) {
@@ -109,9 +122,45 @@ impl PrismRenderScene {
     pub fn geometry_epoch(&self) -> u64 {
         self.geometry_epoch
     }
+
+    /// Monotonically changing material-table epoch used by render extraction.
+    pub fn material_epoch(&self) -> u64 {
+        self.material_epoch
+    }
     /// Iterate the currently registered geometry records without exposing mutation.
     pub fn geometry_records(&self) -> impl Iterator<Item = &GeometryLodChain> {
         self.geometry.values()
+    }
+
+    /// Iterate the authoritative material records for render extraction.
+    pub fn material_records(&self) -> impl Iterator<Item = &MaterialRecord> {
+        self.materials.values()
+    }
+
+    /// Publishes the verified execution table used by the native material
+    /// extraction path. The table is copied across the world boundary together
+    /// with the material records; it is never reconstructed from a plan hash.
+    pub fn set_execution_tables(&mut self, tables: MaterialExecutionTables) {
+        self.execution_tables = Some(tables);
+        self.execution_epoch = self.execution_epoch.wrapping_add(1).max(1);
+    }
+
+    /// Removes the scene-owned execution table and restores the production
+    /// builtin catalog at the render boundary.
+    pub fn clear_execution_tables(&mut self) {
+        if self.execution_tables.take().is_some() {
+            self.execution_epoch = self.execution_epoch.wrapping_add(1).max(1);
+        }
+    }
+
+    /// The verified scene-owned execution table, if one was published.
+    pub fn execution_tables(&self) -> Option<&MaterialExecutionTables> {
+        self.execution_tables.as_ref()
+    }
+
+    /// Monotonic publication epoch for the scene-owned execution table.
+    pub fn execution_epoch(&self) -> u64 {
+        self.execution_epoch
     }
     /// Number of complete renderable entities mirrored this frame.
     pub fn instance_count(&self) -> usize {

@@ -18,6 +18,7 @@ use prism_render_architecture::gpu_scene::{
     SparseBufferVec, UploadBudget, UploadPlan, UploadPlanner,
 };
 use prism_render_driver::{BufferId, BufferUsages, FrameSync, Instance, RenderDevice};
+use prism_render_material::{MaterialExecutionTables, MaterialRecord};
 use prism_render_runtime::RenderRuntime;
 
 use crate::runtime_resource::RenderRuntimeResource;
@@ -53,6 +54,28 @@ pub struct ExtractedNativeScene {
 }
 
 impl Resource for ExtractedNativeScene {}
+
+/// Main-world material records copied across the render boundary without
+/// changing their stable handle identity.
+#[derive(Clone, Debug, Default)]
+pub struct ExtractedNativeMaterials {
+    /// Material-table epoch that produced this snapshot.
+    pub material_epoch: u64,
+    /// Complete live material set when `changed` is true.
+    pub records: Vec<MaterialRecord>,
+    /// Whether the records differ from the previous extraction.
+    pub changed: bool,
+    /// The scene-owned execution table when its publication changed. `None`
+    /// with `execution_tables_changed = true` means restore the canonical
+    /// builtin table, not silently reuse the previous registered table.
+    pub execution_tables: Option<MaterialExecutionTables>,
+    /// Whether the execution-table publication changed this extraction.
+    pub execution_tables_changed: bool,
+    /// Scene execution-table publication epoch represented by this snapshot.
+    pub execution_epoch: u64,
+}
+
+impl Resource for ExtractedNativeMaterials {}
 
 /// The result of preparing all four native scene tables for one frame.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -310,8 +333,29 @@ where
             full_snapshot,
             ..ExtractedNativeScene::default()
         });
+        secondary.insert_resource(ExtractedNativeMaterials::default());
         return;
     };
+
+    let material_epoch = scene.material_epoch();
+    let execution_epoch = scene.execution_epoch();
+    let previous = secondary.get_resource::<ExtractedNativeMaterials>();
+    let material_changed =
+        previous.is_none_or(|previous| previous.material_epoch != material_epoch);
+    let execution_changed =
+        previous.is_none_or(|previous| previous.execution_epoch != execution_epoch);
+    secondary.insert_resource(ExtractedNativeMaterials {
+        material_epoch,
+        records: (material_changed || execution_changed)
+            .then(|| scene.material_records().cloned().collect())
+            .unwrap_or_default(),
+        changed: material_changed || execution_changed,
+        execution_tables: execution_changed
+            .then(|| scene.execution_tables().cloned())
+            .flatten(),
+        execution_tables_changed: execution_changed,
+        execution_epoch,
+    });
 
     let cpu = scene.scene();
     let planner = UploadPlanner::new(UploadBudget::default());
@@ -387,6 +431,7 @@ mod tests {
     };
     use prism_render_driver::Extent3d;
     use prism_render_driver_null::NullInstance;
+    use prism_render_material::{fallback_material_record, MaterialExecutionTables};
     use prism_render_runtime::RenderRuntime;
 
     fn runtime() -> RenderRuntime<NullInstance> {
@@ -665,6 +710,70 @@ mod tests {
         assert_eq!(extracted.scene_epoch, 0);
         assert!(extracted.rows.is_empty());
         assert!(extracted.full_snapshot);
+    }
+
+    #[test]
+    fn extraction_captures_material_records_and_execution_publication_as_one_snapshot() {
+        let mut main = World::new();
+        let mut secondary = World::new();
+        let mut scene = PrismRenderScene::default();
+        let handle = SceneMaterialHandle::new(1, 1);
+        scene.insert_material(fallback_material_record(handle, 1));
+        scene.set_execution_tables(MaterialExecutionTables::builtin());
+        main.insert_resource(scene);
+
+        extract_native_scene::<NullInstance>(&mut main, &mut secondary);
+        let first = secondary
+            .get_resource::<ExtractedNativeMaterials>()
+            .expect("material extraction resource");
+        assert!(first.changed);
+        assert!(first.execution_tables_changed);
+        assert_eq!(first.records.len(), 1);
+        assert!(first.execution_tables.is_some());
+        assert_ne!(first.material_epoch, 0);
+        assert_ne!(first.execution_epoch, 0);
+        let first_material_epoch = first.material_epoch;
+        let first_execution_epoch = first.execution_epoch;
+
+        extract_native_scene::<NullInstance>(&mut main, &mut secondary);
+        let stable = secondary
+            .get_resource::<ExtractedNativeMaterials>()
+            .expect("stable material extraction resource");
+        assert!(!stable.changed);
+        assert!(!stable.execution_tables_changed);
+        assert!(stable.records.is_empty());
+        assert!(stable.execution_tables.is_none());
+        assert_eq!(stable.material_epoch, first_material_epoch);
+        assert_eq!(stable.execution_epoch, first_execution_epoch);
+    }
+
+    #[test]
+    fn clearing_scene_execution_publication_is_extracted_as_builtin_restore() {
+        let mut main = World::new();
+        let mut secondary = World::new();
+        let mut scene = PrismRenderScene::default();
+        let handle = SceneMaterialHandle::new(1, 1);
+        scene.insert_material(fallback_material_record(handle, 1));
+        scene.set_execution_tables(MaterialExecutionTables::builtin());
+        main.insert_resource(scene);
+
+        extract_native_scene::<NullInstance>(&mut main, &mut secondary);
+        let published_epoch = secondary
+            .get_resource::<ExtractedNativeMaterials>()
+            .expect("published material extraction resource")
+            .execution_epoch;
+
+        main.resource_mut::<PrismRenderScene>()
+            .clear_execution_tables();
+        extract_native_scene::<NullInstance>(&mut main, &mut secondary);
+        let cleared = secondary
+            .get_resource::<ExtractedNativeMaterials>()
+            .expect("cleared material extraction resource");
+        assert!(cleared.changed);
+        assert!(cleared.execution_tables_changed);
+        assert!(cleared.execution_tables.is_none());
+        assert_eq!(cleared.records.len(), 1);
+        assert!(cleared.execution_epoch > published_epoch);
     }
 
     #[test]

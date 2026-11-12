@@ -9,13 +9,16 @@ use prism_ecs::prelude::{Res, ResMut, Resource};
 use prism_image::Image;
 use prism_render_driver::{FrameSync, Instance, RenderDevice, RenderQueue};
 use prism_render_material::{
-    MaterialRecord, MaterialRegistry, MaterialRegistryError, MaterialSnapshot,
+    MaterialExecutionBinding, MaterialExecutionTables, MaterialRecord, MaterialRegistry,
+    MaterialRegistryError, MaterialSnapshot, ShadingPlan,
 };
+use prism_render_architecture::gpu_scene::GpuCompletionValue;
 
 /// The index of the permanent fallback material (slot zero).
 pub const FALLBACK_MATERIAL_INDEX: u32 = 0;
 
 use crate::runtime_resource::RenderRuntimeResource;
+use crate::{ExtractedNativeMaterials, SceneRegistry};
 
 use super::binding::NativeMaterialTextureBindings;
 use super::buffers::{
@@ -75,6 +78,10 @@ struct HeldTexture {
 /// to be implemented on a type local to this crate.
 pub struct RenderMaterials {
     registry: MaterialRegistry,
+    /// Canonical builtin execution catalog used when extracted records carry
+    /// a builtin response plan. Registered plans still require explicit
+    /// validated publication and never alias this catalog.
+    builtin_execution: Option<MaterialExecutionTables>,
     /// The bindless slot space this registry assigns material textures from.
     textures: TextureSlotHeap,
     /// The images each material currently holds a slot reference for, so a
@@ -91,6 +98,27 @@ impl RenderMaterials {
     pub fn new(capacity: u32) -> Self {
         Self {
             registry: MaterialRegistry::new(capacity),
+            builtin_execution: None,
+            textures: TextureSlotHeap::default(),
+            held: BTreeMap::new(),
+            texture_binding_version: 0,
+        }
+    }
+
+    /// Creates the production Native material registry with the canonical
+    /// builtin response catalog already installed. This removes the old test
+    /// requirement to write SceneRegistry, material rows, and execution tables
+    /// independently before the first extracted frame.
+    #[must_use]
+    pub fn new_with_builtin_execution(capacity: u32) -> Self {
+        let mut registry = MaterialRegistry::new(capacity);
+        let builtin_execution = MaterialExecutionTables::builtin();
+        registry
+            .install_execution_tables(&builtin_execution)
+            .expect("canonical builtin execution catalog must validate");
+        Self {
+            registry,
+            builtin_execution: Some(builtin_execution),
             textures: TextureSlotHeap::default(),
             held: BTreeMap::new(),
             texture_binding_version: 0,
@@ -321,6 +349,26 @@ impl RenderMaterials {
         &mut self.registry
     }
 
+    /// Resolves only builtin plans from the production catalog. A missing
+    /// result is intentional for registered or malformed plans and must remain
+    /// fail-closed at queue admission.
+    #[must_use]
+    pub fn builtin_execution_binding(
+        &self,
+        plan: &ShadingPlan,
+    ) -> Option<MaterialExecutionBinding> {
+        self.registry
+            .execution_tables()
+            .and_then(|tables| tables.binding_for_plan(plan))
+    }
+
+    /// Returns the canonical builtin table used when the scene has no custom
+    /// execution publication. A scene-owned table is never silently merged into
+    /// this catalog; its plan indices and registered link are one generation.
+    fn builtin_execution_tables(&self) -> Option<&MaterialExecutionTables> {
+        self.builtin_execution.as_ref()
+    }
+
     /// Publication number for the current authored texture heap state.
     #[must_use]
     pub const fn texture_binding_version(&self) -> u64 {
@@ -329,6 +377,132 @@ impl RenderMaterials {
 }
 
 impl Resource for RenderMaterials {}
+
+/// Reconciles the authoritative main-world material snapshot into both render
+/// registries before queue and material upload admission. Stable handles are
+/// adopted verbatim; a generation replacement is retired and remains
+/// unavailable until the old GPU references have completed.
+pub(crate) fn reconcile_native_materials<I>(
+    extracted: Res<ExtractedNativeMaterials>,
+    mut materials: ResMut<RenderMaterials>,
+    mut scene_registry: ResMut<SceneRegistry>,
+    runtime: Res<RenderRuntimeResource<I>>,
+) where
+    I: Instance + Send + Sync + 'static,
+    I::Adapter: Send + Sync + 'static,
+    I::Device: Send + Sync + 'static,
+    I::Queue: Send + Sync + FrameSync + 'static,
+    I::Surface: Send + Sync + 'static,
+{
+    if !extracted.changed && !extracted.execution_tables_changed {
+        return;
+    }
+
+    if extracted.execution_tables_changed {
+        let handles: Vec<_> = (1..materials.registry().capacity())
+            .filter_map(|index| materials.registry().record_at(index).map(|record| record.handle))
+            .collect();
+        for handle in handles {
+            materials
+                .registry_mut()
+                .clear_execution_binding(handle)
+                .unwrap_or_else(|error| panic!("native execution binding clear failed: {error:?}"));
+        }
+        let tables = extracted
+            .execution_tables
+            .clone()
+            .or_else(|| materials.builtin_execution_tables().cloned())
+            .unwrap_or_else(|| {
+                panic!(
+                    "native material execution tables changed without a verified replacement"
+                )
+            });
+        materials
+            .registry_mut()
+            .install_execution_tables(&tables)
+            .unwrap_or_else(|error| panic!("native execution table install failed: {error:?}"));
+    }
+
+    let incoming: BTreeMap<_, _> = extracted
+        .records
+        .iter()
+        .map(|record| (record.handle.index, record))
+        .collect();
+    let completed = GpuCompletionValue(runtime.runtime().completed_value());
+    materials.registry_mut().reclaim_completed(completed);
+
+    // Retire rows absent from the authoritative snapshot, or rows whose stable
+    // generation changed. Never replace a live generation in place.
+    let current: Vec<_> = (1..materials.registry().capacity())
+        .filter_map(|index| materials.registry().record_at(index).cloned())
+        .collect();
+    let mut retired = BTreeSet::new();
+    for record in current {
+        let replacement = incoming.get(&record.handle.index);
+        if replacement.is_some_and(|next| next.handle == record.handle) {
+            continue;
+        }
+        materials.release_textures(record.handle.index);
+        materials
+            .registry_mut()
+            .retire(
+                record.handle,
+                GpuCompletionValue(runtime.runtime().next_completion_value()),
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "native material retirement failed for {:?}: {error:?}",
+                    record.handle
+                )
+            });
+        retired.insert(record.handle.index);
+        scene_registry.remove_material(record.handle);
+    }
+
+    // Publish only records whose exact handle can be admitted this frame. A
+    // generation replacement that is still retiring stays fail-closed until a
+    // later extraction observes completed GPU work.
+    for record in extracted.records.iter().cloned() {
+        if retired.contains(&record.handle.index) {
+            continue;
+        }
+        match materials.registry().get(record.handle) {
+            Some(current) if current == &record => {}
+            Some(current) if record.revision > current.revision => {
+                materials
+                    .publish(record.clone())
+                    .unwrap_or_else(|error| panic!("native material republish failed: {error:?}"));
+            }
+            Some(current) => panic!(
+                "native material revision did not advance for {:?}: current={}, incoming={}",
+                record.handle,
+                current.revision,
+                record.revision
+            ),
+            None => {
+                if materials.registry().record_at(record.handle.index).is_some() {
+                    continue;
+                }
+                materials
+                    .registry_mut()
+                    .adopt_and_publish(record.clone())
+                    .unwrap_or_else(|error| panic!("native material adoption failed: {error:?}"));
+            }
+        }
+        if let Some(binding) = materials.builtin_execution_binding(&record.response_plan) {
+            materials
+                .registry_mut()
+                .set_execution_binding(record.handle, binding)
+                .unwrap_or_else(|error| panic!("builtin execution binding failed: {error:?}"));
+        } else {
+            materials
+                .registry_mut()
+                .clear_execution_binding(record.handle)
+                .unwrap_or_else(|error| panic!("native execution binding clear failed: {error:?}"));
+        }
+        scene_registry.insert_material(record);
+    }
+}
 
 /// Publishes the bindless authored-image arrays after GPU images and material
 /// rows have been prepared. Non-bindless devices intentionally publish no
