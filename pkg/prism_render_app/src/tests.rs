@@ -88,6 +88,7 @@ fn evaluate_principled_gpu_oracle(
     albedo: [f32; 3],
     directionals: &[LightingDirectionalInput],
     punctuals: &[LightingPunctualInput],
+    areas: &[LightingAreaInput],
 ) -> [f32; 3] {
     fn dot(left: [f32; 3], right: [f32; 3]) -> f32 {
         left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
@@ -119,6 +120,77 @@ fn evaluate_principled_gpu_oracle(
     }
     fn add(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
         [left[0] + right[0], left[1] + right[1], left[2] + right[2]]
+    }
+    fn basis_tangent(direction: [f32; 3]) -> [f32; 3] {
+        let n = normalize(direction, [0.0, 1.0, 0.0]);
+        let reference = if n[1].abs() > 0.9 {
+            [1.0, 0.0, 0.0]
+        } else {
+            [0.0, 1.0, 0.0]
+        };
+        normalize(cross(reference, n), [1.0, 0.0, 0.0])
+    }
+    fn basis_bitangent(direction: [f32; 3]) -> [f32; 3] {
+        let n = normalize(direction, [0.0, 1.0, 0.0]);
+        normalize(cross(n, basis_tangent(n)), [0.0, 0.0, 1.0])
+    }
+    fn area_sample(light: &LightingAreaInput, sample_index: usize) -> [f32; 3] {
+        let origin = [light.origin[0], light.origin[1], light.origin[2]];
+        let vector_a = [light.vector_a[0], light.vector_a[1], light.vector_a[2]];
+        if light.shape_kind[0] == 0 {
+            let uv = [
+                [-0.57735026, -0.57735026],
+                [0.57735026, -0.57735026],
+                [-0.57735026, 0.57735026],
+                [0.57735026, 0.57735026],
+            ][sample_index];
+            return add(
+                add(
+                    origin,
+                    scale(
+                        [light.vector_b[0], light.vector_b[1], light.vector_b[2]],
+                        light.shape[0] * uv[0],
+                    ),
+                ),
+                scale(
+                    [light.vector_c[0], light.vector_c[1], light.vector_c[2]],
+                    light.shape[1] * uv[1],
+                ),
+            );
+        }
+        if light.shape_kind[0] == 1 {
+            let offset = [[0.5, 0.0], [-0.5, 0.0], [0.0, 0.5], [0.0, -0.5]][sample_index];
+            return add(
+                add(
+                    origin,
+                    scale(basis_tangent(vector_a), light.shape[0] * offset[0]),
+                ),
+                scale(basis_bitangent(vector_a), light.shape[0] * offset[1]),
+            );
+        }
+        let axis = normalize(sub(vector_a, origin), [0.0, 1.0, 0.0]);
+        let t = [0.125, 0.375, 0.625, 0.875][sample_index];
+        let angle: f32 = [0.0, 1.5707963, 3.1415927, 4.712389][sample_index];
+        let center = add(origin, scale(sub(vector_a, origin), t));
+        let radial = add(
+            scale(basis_tangent(axis), angle.cos()),
+            scale(basis_bitangent(axis), angle.sin()),
+        );
+        add(center, scale(radial, light.shape[0]))
+    }
+    fn area_measure(light: &LightingAreaInput) -> f32 {
+        if light.shape_kind[0] == 0 {
+            4.0 * light.shape[0] * light.shape[1]
+        } else if light.shape_kind[0] == 1 {
+            core::f32::consts::PI * light.shape[0] * light.shape[0]
+        } else {
+            let origin = [light.origin[0], light.origin[1], light.origin[2]];
+            let endpoint = [light.vector_a[0], light.vector_a[1], light.vector_a[2]];
+            let segment = sub(endpoint, origin);
+            let length = dot(segment, segment).sqrt();
+            2.0 * core::f32::consts::PI * light.shape[0] * length
+                + 4.0 * core::f32::consts::PI * light.shape[0] * light.shape[0]
+        }
     }
 
     let normal = normalize(normal, [0.0, 1.0, 0.0]);
@@ -189,6 +261,53 @@ fn evaluate_principled_gpu_oracle(
                 },
             ),
         );
+    }
+    for light in areas {
+        let measure = area_measure(light);
+        if !measure.is_finite() || measure <= 0.0 {
+            continue;
+        }
+        for sample_index in 0..4 {
+            let point = area_sample(light, sample_index);
+            let to_light = sub(point, position);
+            let distance_squared = dot(to_light, to_light);
+            if !distance_squared.is_finite() || distance_squared <= 1.0e-8 {
+                continue;
+            }
+            let direction = scale(to_light, distance_squared.sqrt().recip());
+            let source_cosine = if light.shape_kind[0] == 0 || light.shape_kind[0] == 1 {
+                dot(
+                    normalize(
+                        [light.vector_a[0], light.vector_a[1], light.vector_a[2]],
+                        [0.0, -1.0, 0.0],
+                    ),
+                    scale(direction, -1.0),
+                )
+                .max(0.0)
+            } else {
+                let origin = [light.origin[0], light.origin[1], light.origin[2]];
+                let endpoint = [light.vector_a[0], light.vector_a[1], light.vector_a[2]];
+                let axis = normalize(sub(endpoint, origin), [0.0, 1.0, 0.0]);
+                let center = scale(add(origin, endpoint), 0.5);
+                let radial = normalize(sub(point, center), basis_tangent(axis));
+                dot(radial, scale(direction, -1.0)).max(0.0)
+            };
+            radiance = add(
+                radiance,
+                evaluate_principled_direct(
+                    surface,
+                    frame,
+                    DirectLightSample {
+                        direction,
+                        illuminance: scale(
+                            [light.radiance[0], light.radiance[1], light.radiance[2]],
+                            measure * 0.25 * source_cosine / distance_squared,
+                        ),
+                        visibility: (light.shape_kind[1] as f32).clamp(0.0, 1.0),
+                    },
+                ),
+            );
+        }
     }
     radiance
 }
@@ -2193,6 +2312,23 @@ fn install_native_builtin_scene_material(app: &mut App, program_kind: BuiltinPro
         .expect("native scene fixture binding installs");
 }
 
+/// The native execution-table upload is completion-published. Warm it once so
+/// the frame assertions below cover scene recording rather than cold-start
+/// admission failure.
+fn warm_native_execution_tables(app: &mut App) {
+    app.update();
+    let render = app.sub_app_mut(RenderApp).expect("the render sub-app");
+    assert!(
+        render
+            .world
+            .resource::<RenderRuntimeResource<prism_render_driver_wgpu::WgpuInstance>>()
+            .runtime()
+            .wait_idle(),
+        "native execution-table upload completes"
+    );
+    render.world.insert_resource(RenderFrameStats::default());
+}
+
 #[test]
 fn lighting_extraction_does_not_create_a_missing_canonical_scene() {
     let mut app = app_on_null_backend(RenderAppConfig::new(EXTENT));
@@ -2410,12 +2546,26 @@ pub(super) fn dispatch_lighting_test_composite<I>(
             * core::mem::size_of::<prism_render_material::GpuMaterialHeader>() as u64,
         parameters: Some(material_snapshot.parameters()),
         parameters_size_bytes: u64::from(material_snapshot.parameter_capacity_words()) * 4,
+        texture_rows: Some(material_snapshot.textures()),
+        texture_rows_size_bytes: u64::from(material_snapshot.texture_capacity_rows())
+            * core::mem::size_of::<prism_render_material::GpuMaterialTexture>() as u64,
         execution_plans: Some(execution_snapshot.plan_buffer()),
         execution_plans_size_bytes: execution_snapshot.plan_rows().len() as u64
             * (prism_render_material::EXECUTION_PLAN_ROW_WORDS * 4) as u64,
         execution_programs: Some(execution_snapshot.program_buffer()),
         execution_programs_size_bytes: execution_snapshot.program_rows().len() as u64 * 20,
+        material_version: material_snapshot.execution_table_version(),
+        execution_version: execution_snapshot.version(),
+        material_epoch: material_snapshot.material_epoch(),
+        vt_publication_generation: 1,
+        texture_binding_version: 1,
+        texture_image_version: 1,
     };
+    lighting.set_composite_material_resources(Some(test_composite_material_resources(
+        runtime,
+        &material_snapshot,
+        &execution_snapshot,
+    )));
     let pass = lighting
         .target_pass(plan, target, runtime, [0.0; 3], material_bindings, None)
         .expect("prepared lighting plan binds to the real GBuffer target and material tables");
@@ -2493,6 +2643,66 @@ pub(super) fn dispatch_lighting_test_composite<I>(
     ));
 }
 
+fn test_composite_material_resources<I>(
+    runtime: &RenderRuntime<I>,
+    material: &crate::material::MaterialBufferSnapshot,
+    execution: &crate::material::NativeExecutionTableSnapshot,
+) -> crate::lighting_gpu::LightingCompositeMaterialResourceIds
+where
+    I: prism_render_driver::Instance + 'static,
+    I::Device: Send + Sync + 'static,
+{
+    let device = runtime.device();
+    let vt_page_table = device.create_buffer(&prism_render_driver::BufferDescriptor::new(
+        16,
+        prism_render_driver::BufferUsages::STORAGE,
+    ));
+    let vt_config = device.create_buffer(&prism_render_driver::BufferDescriptor::new(
+        32,
+        prism_render_driver::BufferUsages::STORAGE,
+    ));
+    let atlas = device.create_texture(&prism_render_driver::TextureDescriptor {
+        label: Some("test-composite-vt-atlas".into()),
+        size: prism_render_driver::Extent3d::new_2d(1, 1),
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: prism_render_driver::TextureDimension::D2,
+        format: prism_render_driver::TextureFormat::Rgba8Unorm,
+        usage: prism_render_driver::TextureUsages::TEXTURE_BINDING,
+    });
+    let atlas_view = device.create_texture_view(
+        atlas,
+        &prism_render_driver::TextureViewDescriptor {
+            dimension: prism_render_driver::TextureViewDimension::D2Array,
+            ..Default::default()
+        },
+    );
+    let sampler = device.create_sampler(&prism_render_driver::SamplerDescriptor::default());
+    crate::lighting_gpu::LightingCompositeMaterialResourceIds {
+        headers: material.headers(),
+        parameters: material.parameters(),
+        execution_plans: execution.plan_buffer(),
+        execution_programs: execution.program_buffer(),
+        texture_rows: material.textures(),
+        texture_rows_size_bytes: u64::from(material.texture_capacity_rows())
+            * core::mem::size_of::<prism_render_material::GpuMaterialTexture>() as u64,
+        vt_page_table,
+        vt_page_table_size_bytes: 16,
+        vt_config,
+        vt_config_size_bytes: 32,
+        vt_atlas_view: atlas_view,
+        vt_sampler: sampler,
+        device_generation: runtime.device_generation(),
+        publication_generation: 1,
+        material_version: material.execution_table_version(),
+        execution_version: execution.version(),
+        material_epoch: material.material_epoch(),
+        vt_publication_generation: 1,
+        texture_binding_version: 1,
+        texture_image_version: 1,
+    }
+}
+
 /// Captures one completion-published canonical material generation for tests
 /// that record the production lighting graph directly.
 fn lighting_test_material_bindings<I>(
@@ -2501,6 +2711,7 @@ fn lighting_test_material_bindings<I>(
     crate::lighting_gpu::LightingCompositeMaterialBuffers,
     crate::material::MaterialBufferSnapshot,
     crate::material::NativeExecutionTableSnapshot,
+    crate::lighting_gpu::LightingCompositeMaterialResourceIds,
 )
 where
     I: prism_render_driver::Instance + 'static,
@@ -2536,13 +2747,24 @@ where
             * core::mem::size_of::<prism_render_material::GpuMaterialHeader>() as u64,
         parameters: Some(material_snapshot.parameters()),
         parameters_size_bytes: u64::from(material_snapshot.parameter_capacity_words()) * 4,
+        texture_rows: Some(material_snapshot.textures()),
+        texture_rows_size_bytes: u64::from(material_snapshot.texture_capacity_rows())
+            * core::mem::size_of::<prism_render_material::GpuMaterialTexture>() as u64,
         execution_plans: Some(execution_snapshot.plan_buffer()),
         execution_plans_size_bytes: execution_snapshot.plan_rows().len() as u64
             * (prism_render_material::EXECUTION_PLAN_ROW_WORDS * 4) as u64,
         execution_programs: Some(execution_snapshot.program_buffer()),
         execution_programs_size_bytes: execution_snapshot.program_rows().len() as u64 * 20,
+        material_version: material_snapshot.execution_table_version(),
+        execution_version: execution_snapshot.version(),
+        material_epoch: material_snapshot.material_epoch(),
+        vt_publication_generation: 1,
+        texture_binding_version: 1,
+        texture_image_version: 1,
     };
-    (bindings, material_snapshot, execution_snapshot)
+    let resources =
+        test_composite_material_resources(runtime, &material_snapshot, &execution_snapshot);
+    (bindings, material_snapshot, execution_snapshot, resources)
 }
 
 /// The render schedule runs every frame, the extract feeds it, and the runtime
@@ -2951,7 +3173,8 @@ fn lighting_candidate_plugin_source_switches_keep_plan_debug_and_graph_in_the_sa
     {
         let inputs = app.world_mut().resource_mut::<LightingSceneInputs>();
         inputs.surfaces = vec![LightingSurfaceInput::default()];
-        inputs.surface_material_indices = vec![0];
+        // queue_scene_fixture's visible raster work uses the canonical slot 2.
+        inputs.surface_material_indices = vec![2];
         inputs.gi_candidates = vec![Vec::new()];
     }
     let mut trace_dispatches = 0;
@@ -4344,6 +4567,7 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
         gbuffer_surface.albedo,
         &directionals,
         &punctuals,
+        &[],
     );
     dispatch_lighting_test_composite(lighting, &plan.plan, &target, runtime.runtime());
     let hdr_pixels = runtime
@@ -4479,9 +4703,11 @@ fn physical_gpu_area_direct_light_matches_cpu_oracle_for_rect_disk_and_capsule()
     }
 
     let mut inputs = ExtractedLightingInputs::default();
-    // Direct is evaluated from the bound per-pixel GBuffer. The host GI
-    // surface list is deliberately empty so this guards direct-only admission
-    // against an accidental dependency on GI/oracle staging data.
+    // The shared prepared bundle currently derives its dispatch width from a
+    // non-empty surface batch. Keep that admission row deliberately separate
+    // from the GBuffer sample below: direct lighting must not consume it, and
+    // this fixture provides no GI candidates or surface/material mapping.
+    inputs.surfaces = vec![LightingSurfaceInput::default()];
     inputs.areas = areas.clone();
     inputs.area_handles = area_handles.to_vec();
     let plan = LightingPlan {
@@ -4501,11 +4727,18 @@ fn physical_gpu_area_direct_light_matches_cpu_oracle_for_rect_disk_and_capsule()
         .expect("direct area pass must not require host GI surfaces");
     assert!(pass.run_direct);
     assert!(!pass.run_gi);
-    assert_eq!(pass.candidate_surface_count, 0);
+    assert_eq!(pass.candidate_surface_count, 1);
     let target = RenderTarget::new(runtime.device(), extent);
     let gbuffer_surface =
         write_lighting_test_gbuffer_pixel(runtime.queue(), &target, 0, 0, surface, 1);
-    let expected = evaluate_deterministic_direct(gbuffer_surface, &[], &[], &areas);
+    let expected = evaluate_principled_gpu_oracle(
+        gbuffer_surface.position,
+        gbuffer_surface.normal,
+        gbuffer_surface.albedo,
+        &[],
+        &[],
+        &areas,
+    );
     dispatch_lighting_test_composite(&lighting, &plan, &target, &runtime);
     let hdr = runtime
         .queue()
@@ -4513,10 +4746,21 @@ fn physical_gpu_area_direct_light_matches_cpu_oracle_for_rect_disk_and_capsule()
         .expect("area-light HDR readback must complete");
     assert_eq!(hdr.len(), 1);
     for channel in 0..3 {
+        let expected_bits =
+            prism_render_architecture::particle::half_float_f16::f32_to_f16_bits(expected[channel]);
+        let expected_quantized =
+            prism_render_architecture::particle::half_float_f16::f16_bits_to_f32(expected_bits);
+        let exponent = (expected_bits >> 10) & 0x1f;
+        let half_ulp = if exponent == 0 {
+            2.0_f32.powi(-24)
+        } else {
+            2.0_f32.powi(exponent as i32 - 25)
+        };
         assert!(
-            (hdr[0][channel] - expected[channel]).abs() <= 2.0e-3,
-            "area composite HDR channel {channel}: GPU {} != CPU {}",
+            (hdr[0][channel] - expected_quantized).abs() <= half_ulp + 1.0e-6,
+            "area composite HDR channel {channel}: GPU {} != CPU {} (unquantized {})",
             hdr[0][channel],
+            expected_quantized,
             expected[channel]
         );
     }
@@ -5254,7 +5498,9 @@ fn lighting_plan_records_compute_pipeline_bind_group_and_dispatch() {
     );
     let mut extracted = ExtractedLightingInputs::default();
     extracted.surfaces = vec![LightingSurfaceInput::default()];
-    extracted.surface_material_indices = vec![0];
+    // Slot zero is the reserved fallback row. The production identity and
+    // GI paths require a published, executable material row instead.
+    extracted.surface_material_indices = vec![1];
     extracted.gi_candidates = vec![Vec::new()];
     lighting
         .prepare(&plan, &extracted, 0, &runtime)
@@ -5262,8 +5508,9 @@ fn lighting_plan_records_compute_pipeline_bind_group_and_dispatch() {
     let target = RenderTarget::new(runtime.device(), extent);
     let queues = RenderQueues::new();
     let functions = DrawFunctions::new();
-    let (material_bindings, material_snapshot, execution_snapshot) =
+    let (material_bindings, material_snapshot, execution_snapshot, resources) =
         lighting_test_material_bindings(&runtime);
+    lighting.set_composite_material_resources(Some(resources));
     let lighting_pass = lighting
         .target_pass(&plan, &target, &runtime, [0.0; 3], material_bindings, None)
         .expect("prepared lighting plan binds canonical material tables");
@@ -5430,8 +5677,9 @@ fn frame_graph_records_optional_trace_between_scene_and_gi() {
     let target = RenderTarget::new(runtime.device(), extent);
     let queues = RenderQueues::new();
     let functions = DrawFunctions::new();
-    let (material_bindings, material_snapshot, execution_snapshot) =
+    let (material_bindings, material_snapshot, execution_snapshot, resources) =
         lighting_test_material_bindings(&runtime);
+    lighting.set_composite_material_resources(Some(resources));
 
     // The no-trace path must use an admitted host producer; a software-BVH
     // plan cannot be recorded without its trace/candidate-build passes.
@@ -5571,10 +5819,24 @@ fn physical_gpu_offscreen_host_graph_traces_builds_gi_and_composites() {
     }
 
     let triangle = Triangle::new([-1.0, -1.0, -1.0], [1.0, -1.0, -1.0], [0.0, 1.0, -1.0], 73);
+    let mut material_registry = lighting_test_material_registry();
+    let material_record = material_registry
+        .record_at(1)
+        .expect("lighting fixture publishes the scene material");
+    let material_identity = RayHitIdentity::new(11, 73, material_record.handle.generation)
+        .with_material_proof(
+            material_record.handle.index,
+            material_record.revision,
+            material_registry.snapshot().epoch,
+            material_registry
+                .execution_binding_at(material_record.handle.index)
+                .expect("lighting fixture installs execution proof")
+                .to_words(),
+        );
     let bvh = Arc::new(
         GpuBvhBuffers::from_bvh(&Bvh::build(&[triangle]))
             .with_hit_attributes(vec![RayHitAttributeRecord::new(
-                RayHitIdentity::new(11, 73, 1),
+                material_identity,
                 [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
                 [[0.0, 0.0, 1.0]; 3],
             )])
@@ -5634,14 +5896,11 @@ fn physical_gpu_offscreen_host_graph_traces_builds_gi_and_composites() {
         .prepare(&plan, &extracted, FRAME_INDEX, &runtime)
         .expect("lighting tables prepare");
     let target = RenderTarget::new(runtime.device(), extent);
-    let mut material_registry = prism_render_material::MaterialRegistry::new(1);
-    material_registry
-        .install_execution_tables(&prism_render_material::MaterialExecutionTables::new())
-        .expect("empty canonical execution tables are valid for fallback material");
     let device = runtime.device_handle();
     let mut material_buffers =
-        MaterialParameterBuffers::new_owned(device.clone(), 1, 1, 1, BufferUsages::NONE);
-    material_buffers.sync_registry(runtime.device(), runtime.queue(), &material_registry, [0]);
+        MaterialParameterBuffers::new_owned(device.clone(), 2, 1, 1, BufferUsages::NONE);
+    let dirty = material_registry.take_dirty();
+    material_buffers.sync_registry(runtime.device(), runtime.queue(), &material_registry, dirty);
     let mut execution_buffers = crate::material::NativeExecutionTableBuffers::new();
     execution_buffers
         .sync_registry(device, runtime.queue(), &material_registry)
@@ -5657,17 +5916,31 @@ fn physical_gpu_offscreen_host_graph_traces_builds_gi_and_composites() {
             * core::mem::size_of::<prism_render_material::GpuMaterialHeader>() as u64,
         parameters: Some(material_snapshot.parameters()),
         parameters_size_bytes: u64::from(material_snapshot.parameter_capacity_words()) * 4,
+        texture_rows: Some(material_snapshot.textures()),
+        texture_rows_size_bytes: u64::from(material_snapshot.texture_capacity_rows())
+            * core::mem::size_of::<prism_render_material::GpuMaterialTexture>() as u64,
         execution_plans: Some(execution_snapshot.plan_buffer()),
         execution_plans_size_bytes: execution_snapshot.plan_rows().len() as u64
             * (prism_render_material::EXECUTION_PLAN_ROW_WORDS * 4) as u64,
         execution_programs: Some(execution_snapshot.program_buffer()),
         execution_programs_size_bytes: execution_snapshot.program_rows().len() as u64 * 20,
+        material_version: material_snapshot.execution_table_version(),
+        execution_version: execution_snapshot.version(),
+        material_epoch: material_snapshot.material_epoch(),
+        vt_publication_generation: 1,
+        texture_binding_version: 1,
+        texture_image_version: 1,
     };
+    lighting.set_composite_material_resources(Some(test_composite_material_resources(
+        &runtime,
+        &material_snapshot,
+        &execution_snapshot,
+    )));
     let lighting_pass = lighting
         .target_pass(&plan, &target, &runtime, [0.0; 3], material_bindings, None)
         .expect("GI surface admits its target-aware recipe");
     let hit_output = runtime.device().create_buffer(&BufferDescriptor::new(
-        (core::mem::size_of::<u32>() * 16) as u64,
+        (core::mem::size_of::<u32>() * 32) as u64,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC,
     ));
     let mut trace = LightingTraceGpu::new(runtime.device_handle());
@@ -5677,7 +5950,7 @@ fn physical_gpu_offscreen_host_graph_traces_builds_gi_and_composites() {
             &BorrowedPackedTraceScene::from(&packed_scene),
             &rays,
             hit_output,
-            (core::mem::size_of::<u32>() * 16) as u64,
+            (core::mem::size_of::<u32>() * 32) as u64,
             Some(lighting_pass.gi_candidate_target()),
         )
         .expect("valid scene, rays, radiance table, and GI targets prepare");
@@ -5708,8 +5981,8 @@ fn physical_gpu_offscreen_host_graph_traces_builds_gi_and_composites() {
     assert_eq!(stages.composite_passes, 1);
     assert_eq!(
         graph.pass_count(),
-        5,
-        "clear, trace, candidate, GI, composite"
+        7,
+        "host graph includes clear, trace, candidate, direct lighting, GI, and composite stages"
     );
     let recorded = graph
         .execute(runtime.device(), runtime.queue())
@@ -5852,8 +6125,9 @@ fn lighting_graph_skips_direct_when_only_world_restir_is_admitted() {
         .expect("lighting tables prepare");
 
     let target = RenderTarget::new(runtime.device(), extent);
-    let (material_bindings, material_snapshot, execution_snapshot) =
+    let (material_bindings, material_snapshot, execution_snapshot, resources) =
         lighting_test_material_bindings(&runtime);
+    lighting.set_composite_material_resources(Some(resources));
     let lighting_pass = lighting
         .target_pass(&plan, &target, &runtime, [0.0; 3], material_bindings, None)
         .expect("GI-only lighting pass binds canonical material tables");
@@ -5957,8 +6231,8 @@ fn lighting_empty_surface_batch_clears_outputs_without_dispatching() {
         .prepare(&plan, &extracted, 0, &runtime)
         .expect("lighting tables prepare");
     assert!(
-        lighting.pass(&plan).is_none(),
-        "empty batches have no lighting pass"
+        lighting.pass(&plan).is_some(),
+        "empty batches still need the native response/composite pass"
     );
 
     let target = RenderTarget::new(runtime.device(), extent);
@@ -7853,7 +8127,9 @@ fn native_scene_mesh_draws_the_visible_set_on_a_gpu() {
         RenderAppConfig::new(extent),
     ));
     queue_scene_fixture(&mut app);
+    install_native_builtin_scene_material(&mut app, BuiltinProgram::Unlit);
 
+    warm_native_execution_tables(&mut app);
     app.update();
 
     let render = app.get_sub_app(RenderApp).expect("the render sub-app");
@@ -7967,12 +8243,16 @@ fn native_scene_mesh_reaches_composite_hdr_on_a_gpu() {
         inputs.mark_changed(1, ChangeFields::LIGHTING);
     }
 
+    warm_native_execution_tables(&mut app);
     app.update();
 
     let render = app.get_sub_app(RenderApp).expect("the render sub-app");
     let stats = render.world.resource::<RenderFrameStats>();
     assert_eq!(stats.draws_queued, 1);
-    assert_eq!(stats.draws_recorded, 1);
+    assert_eq!(
+        stats.draws_recorded, 1,
+        "native material frame recorded no draw: {stats:?}"
+    );
     assert!(
         stats.lighting_gpu_passes_recorded > 0,
         "the production frame did not record its identity/composite dispatch"

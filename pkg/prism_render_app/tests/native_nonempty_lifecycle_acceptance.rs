@@ -24,16 +24,24 @@ use prism_render_app::{
     NativeFrameExecution, NativeFramePhase, PrismRenderPlugin, RenderApp, RenderAppConfig,
     RenderFrameStats, RenderMaterials, RenderRuntimeResource, SceneRegistry, VisibilityWorkList,
 };
+use prism_render_architecture::abi::{AbiHash, AbiVersion};
 use prism_render_architecture::geometry::{
     GeometryLodRecord, GeometryPrimitiveKind, GeometryRecord,
 };
 use prism_render_architecture::gpu_scene::SceneHandle;
+use prism_render_architecture::shader_package::{
+    ArtifactDigest, ExecutionFamily, ManifestExpectation, ModuleId, PermutationSpace,
+    ShaderPackageId, ShaderPackageManifest, ShaderPackageRegistry, ShaderPackageVariantManifest,
+};
 use prism_render_driver as rhi;
 use prism_render_driver::{Adapter, FrameSync, Instance, PrimitiveTopology, RenderQueue};
 use prism_render_driver_wgpu::{
     require_hardware_gpu, WgpuAdapter, WgpuDevice, WgpuInstance, WgpuQueue, WgpuSurface,
 };
-use prism_render_material::{fallback_material_record, BuiltinProgram, ShadingPlan};
+use prism_render_material::{
+    fallback_material_record, BuiltinProgram, ChannelMask, CompiledEntry, MaterialExecutionBinding,
+    MaterialExecutionTables, ProgramRef, ShadingPlan,
+};
 use prism_render_visibility::{
     GeometryLod, GeometryLodChain, GpuRenderWorkItem, RenderPassMask, VisibilityStageMask,
     WorkSortKey,
@@ -54,6 +62,10 @@ struct CompletionGate {
 impl CompletionGate {
     fn is_released(&self) -> bool {
         self.released.load(Ordering::Acquire)
+    }
+
+    fn block(&self) {
+        self.released.store(false, Ordering::Release);
     }
 
     fn release(&self, queue: &WgpuQueue) {
@@ -242,6 +254,66 @@ struct SceneFixture {
     camera: Entity,
 }
 
+fn builtin_unlit_execution_tables() -> (MaterialExecutionTables, MaterialExecutionBinding) {
+    let permutations = PermutationSpace::new([1]);
+    let manifest = ShaderPackageManifest {
+        id: ShaderPackageId::new("native-nonempty-lifecycle-unlit"),
+        source_revision: "1".into(),
+        entry_point: "main".into(),
+        abi_version: AbiVersion::from_parts(1, 0),
+        abi_hash: AbiHash::from_bytes(
+            prism_render_material::response_source::RESPONSE_FUNCTION_ABI.as_bytes(),
+        ),
+        variants: ShaderPackageVariantManifest::from_digests(
+            &permutations,
+            [ArtifactDigest([1; 32])],
+        )
+        .expect("the lifecycle fixture variant manifest is valid"),
+    };
+    let compiled = CompiledEntry::from_response_wgsl(
+        manifest.clone(),
+        vec!["var response: RegisteredResponse; return response;".into()],
+    )
+    .expect("the lifecycle fixture response source is valid");
+    let mut packages = ShaderPackageRegistry::new();
+    packages
+        .register_verified(compiled.artifact().clone())
+        .expect("the lifecycle fixture artifact registers");
+    packages
+        .validate(
+            &manifest.id,
+            &ManifestExpectation::new(manifest.abi_version, manifest.abi_hash),
+        )
+        .expect("the lifecycle fixture artifact validates");
+
+    let mut tables = MaterialExecutionTables::new();
+    let package = tables
+        .register_package(&compiled, &packages)
+        .expect("the lifecycle fixture package registers");
+    let program = tables
+        .register_program(
+            ProgramRef::Builtin(BuiltinProgram::Unlit),
+            &compiled,
+            package,
+            ModuleId(0),
+            permutations,
+        )
+        .expect("the lifecycle fixture program registers");
+    let plan = tables
+        .register_plan(
+            ShadingPlan::single_builtin(BuiltinProgram::Unlit),
+            program,
+            None,
+            ExecutionFamily::SplitResponse,
+            ChannelMask::default(),
+        )
+        .expect("the lifecycle fixture plan registers");
+    let binding = tables
+        .bind_raw(plan.get(), program.get(), package.get(), 0)
+        .expect("the lifecycle fixture binding validates");
+    (tables, binding)
+}
+
 fn broad_frustum() -> PrismFrustum {
     PrismFrustum(Frustum::from_planes([
         Plane::new(Vec3::X, 10.0),
@@ -364,11 +436,19 @@ fn scene_fixture(app: &mut App) -> SceneFixture {
         .world
         .resource_mut::<SceneRegistry>()
         .bind_geometry_mesh(geometry, mesh_id);
-    render
-        .world
-        .resource_mut::<RenderMaterials>()
+    let (tables, binding) = builtin_unlit_execution_tables();
+    let materials = render.world.resource_mut::<RenderMaterials>();
+    materials
+        .registry_mut()
+        .install_execution_tables(&tables)
+        .expect("the lifecycle fixture execution tables install");
+    materials
         .publish(record)
         .expect("the native material publishes into the canonical registry");
+    materials
+        .registry_mut()
+        .set_execution_binding(material, binding)
+        .expect("the lifecycle fixture execution binding installs");
     render
         .world
         .resource_mut::<VisibilityWorkList>()
@@ -411,9 +491,18 @@ fn assert_mesh_readback(
     let albedo = queue
         .read_texture_rgba8(target.albedo_texture(), width, height)
         .expect("native resized albedo readback must complete");
+    let hdr = queue
+        .read_texture_rgba16f(target.texture(), width, height)
+        .expect("native composite HDR readback must complete");
     let center = ((height / 2) * width + width / 2) as usize;
     assert_eq!(normals[center], [0.0, 0.0, 1.0, 1.0]);
     assert_eq!(&albedo[center * 4..center * 4 + 4], &[255, 255, 255, 255]);
+    for (channel, value) in hdr[center].into_iter().enumerate() {
+        assert!(
+            (value - 1.0).abs() <= 0.002,
+            "native composite HDR channel {channel}: expected 1.0, got {value}"
+        );
+    }
 }
 
 fn require_adapter() -> Option<(Arc<CompletionGate>, DelayedInstance)> {
@@ -454,6 +543,39 @@ fn native_nonempty_resize_preserves_old_target_until_completion_then_reclaims_it
     ));
     app.add_plugins(PrismVisibilityPlugin);
     let fixture = scene_fixture(&mut app);
+
+    // The execution-table upload is a real queue publication. Warm that cold
+    // material generation once with completion open, then close the gate so
+    // the frame under test still exercises deferred submission retirement.
+    {
+        let render = app.get_sub_app(RenderApp).expect("native render sub-app");
+        let queue = render
+            .world
+            .resource::<RenderRuntimeResource<DelayedInstance>>()
+            .runtime()
+            .queue();
+        gate.release(&queue.inner);
+    }
+    app.update();
+    {
+        let render = app.sub_app_mut(RenderApp).expect("native render sub-app");
+        assert!(
+            render
+                .world
+                .resource::<RenderRuntimeResource<DelayedInstance>>()
+                .runtime()
+                .wait_idle(),
+            "the cold execution-table upload must complete before the deferred frame"
+        );
+    }
+    gate.block();
+    {
+        let render = app.sub_app_mut(RenderApp).expect("native render sub-app");
+        render.world.insert_resource(RenderFrameStats::default());
+        render
+            .world
+            .insert_resource(NativeFrameExecution::default());
+    }
 
     app.update();
     let (old_key, old_target) = target_snapshot(&app);
@@ -543,7 +665,9 @@ fn native_nonempty_resize_preserves_old_target_until_completion_then_reclaims_it
     let final_stats = final_render.world.resource::<RenderFrameStats>();
     assert_eq!(final_stats.frames_submitted, 2);
     assert_eq!(final_stats.frames_failed, 1);
-    assert_eq!(final_stats.draws_queued, 2);
+    // The rejected resize attempt still reaches queue admission, so it is
+    // counted here even though graph recording remains fail-closed.
+    assert_eq!(final_stats.draws_queued, 3);
     assert_eq!(final_stats.draws_recorded, 2);
     assert!(matches!(
         final_render

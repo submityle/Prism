@@ -6112,20 +6112,20 @@ where
     #[must_use]
     pub(crate) fn pass(&self, plan: &LightingPlan) -> Option<LightingGpuPass> {
         let run_direct = plan.recipes.contains(&RecipeId::SpecializedDeterministic);
-        let run_gi = plan.recipes.contains(&RecipeId::WorldRestir)
+        let requested_gi = plan.recipes.contains(&RecipeId::WorldRestir)
             && plan.candidate_source != GiCandidateSource::Disabled;
-        if !run_direct && !run_gi {
-            return None;
-        }
         let prepared = self
             .prepared
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let prepared_bundle = prepared.bundle.as_ref()?;
         let surface_count = prepared.surface_count;
-        if surface_count == 0 {
-            return None;
-        }
+        // The composite is also the native response consumer for Unlit and
+        // other zero-light frames. It must remain admitted after a successful
+        // prepare even when no direct/GI recipe was selected or when the CPU
+        // lighting surface list is empty. GI still requires a non-empty
+        // surface mapping and is disabled independently below.
+        let run_gi = requested_gi && surface_count != 0;
         let bundle = self.bundle.current();
         if !Arc::ptr_eq(prepared_bundle, &bundle)
             || prepared.candidate_source != plan.candidate_source
@@ -7017,7 +7017,7 @@ mod prepare_tests {
             assert_eq!(state.prepared.lock().unwrap().surface_count, count as u32);
             assert_eq!(
                 state.pass(&plan).map(|pass| pass.candidate_surface_count),
-                (count != 0).then_some(count as u32)
+                Some(count as u32)
             );
         }
         assert_rejected_atomically(

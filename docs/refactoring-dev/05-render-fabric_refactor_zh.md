@@ -2,7 +2,7 @@
 
 > **2026-11-09 目标边界（当前权威）**：当前目标只走 Prism 原生 prism_render_app、Prism RHI 与 prism_render_graph/RenderGraph。Bevy、Bevy RenderApp、prism_render_scene 的 Bevy 集成路径、SceneRhi 与 legacy-bevy 均为历史/排除项；它们不能作为当前 Fabric 实现或验收前提。原生全场景统一 recorder 与完整验收仍未闭合。
 
-## 当前审计结论（2026-11-11，native Prism）
+## 当前审计结论（2026-11-12，native Prism）
 
 本篇的 Render Fabric 完成度必须按 native Prism 单独记账；Bevy/SceneRhi/`legacy-bevy` 的 owner、recorder、fixture、CPU compiler 或历史 GPU 记录不计入当前目标。
 
@@ -10,7 +10,7 @@
 
 **当前硬失败与空 fixture**：Metal native 的基础直接 draw 与非空场景 GBuffer 最小验收均已通过；`tests::native_scene_mesh_draws_the_visible_set_on_a_gpu` 确认 queued/recorded 各为 1，并从实际 camera-local graph target 读到正确 normal/albedo。该结果只关闭 Native Surface 的最小视觉切片，不等于 Render Fabric 全场景输出。`pkg/prism_render_app/tests/native_full_frame_acceptance.rs` 使用 `DeferredInstance`、Null backend 和无 renderable object 的相机；它验证的是空/null 提交、未完成 submission、失败和恢复，不是全帧视觉验收。
 
-**仍未完成**：native 的 response/composition 到最终 HDR 的完整链路；统一全场景 recorder、真实 31-pass 等价入口、Surface/Particle/Water/Volume/Hair/Decal 等域的同帧资源导入与多视图 fan-out；设备丢失/resize/资源退休；第二 physical adapter；全帧图像 parity、资源峰值/队列等待/吞吐及 P50/P95/P99。2026-11-12 的 native target admission 修复只保证 completion 未确认时不替换旧资源、不提交半成品 graph，不能扩大为 Render Fabric 全场景完成。后文的局部契约和历史切片必须保持“局部/历史/排除”标签，不得表述为整个 Render Fabric 或重构系统已完成。
+**仍未完成**：native 的多 response program 与 response/composition 到最终 HDR 的完整链路；统一全场景 recorder、真实 31-pass 等价入口、Surface/Particle/Water/Volume/Hair/Decal 等域的同帧资源导入与多视图 fan-out；设备丢失/resize/资源退休全矩阵；第二 physical adapter；全帧图像 parity、资源峰值/队列等待/吞吐及 P50/P95/P99。2026-11-12 的 native target admission 修复和 Metal 非空 Unlit vertical slice 只保证 execution-table completion、旧 target 保留/新 target 延迟提交以及固定单域输出正确，不能扩大为 Render Fabric 全场景完成。后文的局部契约和历史切片必须保持“局部/历史/排除”标签，不得表述为整个 Render Fabric 或重构系统已完成。
 
 2026-11-12 的 `native_particle_full_frame_acceptance` 关闭了 Particle 从应用更新到 native submission/completion 的调度 seam：测试通过真实 `App::update()` 观察 snapshot、prepared payload、Fabric frame、camera queue、graph receipt 和 completion receipt。该证据限定为 deferred Null RHI 的生产生命周期，不包含 shader 执行、HDR readback、多域合并或 physical-GPU parity，因此不改变上面的全场景未完成结论。
 

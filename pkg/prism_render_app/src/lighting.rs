@@ -20,6 +20,7 @@ use prism_render_shading::{
     classify_material_header_with_execution, evaluate_unlit_response,
     surface_sample_from_parameters, ClassificationError,
 };
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::config::RenderAppConfig;
@@ -269,6 +270,93 @@ impl Default for LightingSurfaceInput {
     }
 }
 
+/// The material slots that actually entered the current visible raster work.
+///
+/// GI surface mappings are only meaningful when they name this same snapshot;
+/// a separately authored list can otherwise point at a material that did not
+/// produce any raster identity in the frame.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VisibleMaterialSnapshot {
+    /// Main-world visibility transaction epoch that produced the work list.
+    pub frame_epoch: u64,
+    /// Stable material-slot indices present in visible raster work.
+    pub material_indices: Vec<u32>,
+}
+
+impl VisibleMaterialSnapshot {
+    fn from_scene(scene: &crate::visibility::PrismRenderScene) -> Self {
+        let mut material_indices = BTreeSet::new();
+        for (_, view) in scene.view_results() {
+            material_indices.extend(view.work.iter().map(|item| item.material.index));
+        }
+        Self {
+            frame_epoch: scene.last_transaction().frame_epoch,
+            material_indices: material_indices.into_iter().collect(),
+        }
+    }
+}
+
+/// Why a GI surface-to-material mapping was rejected before extraction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SurfaceMaterialMappingRejection {
+    /// A surface batch was published without a complete mapping.
+    MissingMapping { surfaces: usize },
+    /// The mapping length does not match the surface batch.
+    LengthMismatch { surfaces: usize, mappings: usize },
+    /// There was no visible raster material snapshot to validate against.
+    MissingVisibleSnapshot,
+    /// The producer supplied a mapping epoch from another visible frame.
+    FrameEpochMismatch { expected: u64, actual: u64 },
+    /// The mapping names a material that did not produce visible raster work.
+    MaterialNotVisible { material_index: u32 },
+    /// The same material slot was assigned to more than one GI surface.
+    DuplicateMaterial { material_index: u32 },
+}
+
+fn admit_surface_material_mapping(
+    surfaces: usize,
+    mapping: &[u32],
+    mapping_epoch: u64,
+    visible: &VisibleMaterialSnapshot,
+) -> Result<Vec<u32>, SurfaceMaterialMappingRejection> {
+    if surfaces == 0 && mapping.is_empty() {
+        return Ok(Vec::new());
+    }
+    if mapping.is_empty() {
+        return Err(SurfaceMaterialMappingRejection::MissingMapping { surfaces });
+    }
+    if mapping.len() != surfaces {
+        return Err(SurfaceMaterialMappingRejection::LengthMismatch {
+            surfaces,
+            mappings: mapping.len(),
+        });
+    }
+    if visible.frame_epoch == 0 || visible.material_indices.is_empty() {
+        return Err(SurfaceMaterialMappingRejection::MissingVisibleSnapshot);
+    }
+    if mapping_epoch != 0 && mapping_epoch != visible.frame_epoch {
+        return Err(SurfaceMaterialMappingRejection::FrameEpochMismatch {
+            expected: visible.frame_epoch,
+            actual: mapping_epoch,
+        });
+    }
+
+    let mut seen = BTreeSet::new();
+    for &material_index in mapping {
+        if visible
+            .material_indices
+            .binary_search(&material_index)
+            .is_err()
+        {
+            return Err(SurfaceMaterialMappingRejection::MaterialNotVisible { material_index });
+        }
+        if !seen.insert(material_index) {
+            return Err(SurfaceMaterialMappingRejection::DuplicateMaterial { material_index });
+        }
+    }
+    Ok(mapping.to_vec())
+}
+
 /// Non-light main-world inputs: budget metadata, invalidation records, surface
 /// samples, and GI proposals. Analytic lights are owned only by
 /// [`crate::lighting_scene::LightingLightScene`].
@@ -286,6 +374,10 @@ pub struct LightingSceneInputs {
     /// GBuffer material slot as a GI-array index. A material slot may occur at
     /// most once in this list. Missing or duplicate mappings fail closed.
     pub surface_material_indices: Vec<u32>,
+    /// Optional visibility transaction epoch for `surface_material_indices`.
+    /// Zero means the current visible snapshot supplies the epoch; a non-zero
+    /// value is checked explicitly during extraction.
+    pub surface_material_snapshot_epoch: u64,
     /// Frame-level controls for the builtin NPR response. These controls are
     /// copied with the lighting snapshot so the Native composite and its CPU
     /// reference never observe different stylized policies.
@@ -811,6 +903,7 @@ impl LightingSceneInputs {
             gi_candidates: Vec::new(),
             surfaces: Vec::new(),
             surface_material_indices: Vec::new(),
+            surface_material_snapshot_epoch: 0,
             stylized: NativeStylizedParams::default(),
         }
     }
@@ -824,6 +917,7 @@ impl Default for LightingSceneInputs {
             gi_candidates: Vec::new(),
             surfaces: Vec::new(),
             surface_material_indices: Vec::new(),
+            surface_material_snapshot_epoch: 0,
             stylized: NativeStylizedParams::default(),
         }
     }
@@ -869,6 +963,12 @@ pub struct ExtractedLightingInputs {
     /// reused by many world surfaces, so no positional or material-slot
     /// inference is safe here.
     pub surface_material_indices: Vec<u32>,
+    /// Visible raster snapshot used to admit `surface_material_indices`.
+    pub visible_material_snapshot: VisibleMaterialSnapshot,
+    /// Effective visibility epoch paired with the admitted mapping.
+    pub surface_material_snapshot_epoch: u64,
+    /// Mapping rejection retained for fail-closed plan diagnostics.
+    pub surface_material_mapping_rejection: Option<SurfaceMaterialMappingRejection>,
     /// Frame-level NPR controls paired with the light snapshot.
     pub stylized: NativeStylizedParams,
     /// Optional packed scene used to generate and trace this frame's GI rays.
@@ -891,6 +991,9 @@ impl ExtractedLightingInputs {
         use GiCandidateAvailability::{HostProvided, Missing, Rejected, SoftwareBvhGpu};
         use GiCandidateRejection::{DeviceLimits, InvalidInputs, TraceBackendUnavailable};
 
+        if self.surface_material_mapping_rejection.is_some() {
+            return Rejected(InvalidInputs);
+        }
         if self.surfaces.is_empty() {
             return Missing;
         }
@@ -1041,6 +1144,36 @@ pub(crate) fn extract_lighting_inputs(main: &mut World, render: &mut World) {
         .get_resource::<LightingSceneInputs>()
         .cloned()
         .unwrap_or_default();
+    let visible_material_snapshot = main
+        .get_resource::<crate::visibility::PrismRenderScene>()
+        .map(VisibleMaterialSnapshot::from_scene)
+        .unwrap_or_default();
+    // Pure lighting/trace producers may legitimately have no raster work in
+    // this frame. In that case there is no identity mapping to consume; keep
+    // the producer's candidate batch independent of raster admission. Once a
+    // visible material exists, every mapping is checked against that exact
+    // snapshot before it can reach the render world.
+    let mapping_admission = if visible_material_snapshot.material_indices.is_empty() {
+        Ok(inputs.surface_material_indices.clone())
+    } else {
+        admit_surface_material_mapping(
+            inputs.surfaces.len(),
+            &inputs.surface_material_indices,
+            inputs.surface_material_snapshot_epoch,
+            &visible_material_snapshot,
+        )
+    };
+    let (surface_material_indices, surface_material_mapping_rejection) = match mapping_admission {
+        Ok(indices) => (indices, None),
+        Err(rejection) => (Vec::new(), Some(rejection)),
+    };
+    let surface_material_snapshot_epoch = if surface_material_mapping_rejection.is_none()
+        && !visible_material_snapshot.material_indices.is_empty()
+    {
+        visible_material_snapshot.frame_epoch
+    } else {
+        inputs.surface_material_snapshot_epoch
+    };
     // The canonical scene is an explicit main-world input. Extraction must not
     // create or mutate it: doing so would turn a missing producer into an
     // implicit lighting authority. A temporary empty snapshot keeps the
@@ -1101,7 +1234,10 @@ pub(crate) fn extract_lighting_inputs(main: &mut World, render: &mut World) {
         }
         extracted.gi_candidates = inputs.gi_candidates;
         extracted.surfaces = inputs.surfaces;
-        extracted.surface_material_indices = inputs.surface_material_indices;
+        extracted.surface_material_indices = surface_material_indices;
+        extracted.visible_material_snapshot = visible_material_snapshot;
+        extracted.surface_material_snapshot_epoch = surface_material_snapshot_epoch;
+        extracted.surface_material_mapping_rejection = surface_material_mapping_rejection;
         extracted.stylized = inputs.stylized;
         extracted.trace_scene = trace_scene;
     } else {
@@ -1152,7 +1288,10 @@ pub(crate) fn extract_lighting_inputs(main: &mut World, render: &mut World) {
             light_scene_error,
             gi_candidates: inputs.gi_candidates,
             surfaces: inputs.surfaces,
-            surface_material_indices: inputs.surface_material_indices,
+            surface_material_indices,
+            visible_material_snapshot,
+            surface_material_snapshot_epoch,
+            surface_material_mapping_rejection,
             stylized: inputs.stylized,
             trace_scene,
         });
@@ -1536,6 +1675,45 @@ mod lighting_input_defaults_tests {
             .surfaces
             .is_empty());
     }
+
+    #[test]
+    fn matching_visible_material_mapping_is_admitted() {
+        let visible = VisibleMaterialSnapshot {
+            frame_epoch: 17,
+            material_indices: vec![2, 7],
+        };
+        assert_eq!(
+            admit_surface_material_mapping(2, &[2, 7], 17, &visible),
+            Ok(vec![2, 7])
+        );
+        // A zero producer epoch is bound to the same visible snapshot during
+        // extraction; it is not a second, independently versioned source.
+        assert_eq!(
+            admit_surface_material_mapping(2, &[2, 7], 0, &visible),
+            Ok(vec![2, 7])
+        );
+    }
+
+    #[test]
+    fn stale_or_invisible_material_mapping_is_rejected() {
+        let visible = VisibleMaterialSnapshot {
+            frame_epoch: 17,
+            material_indices: vec![2, 7],
+        };
+        assert_eq!(
+            admit_surface_material_mapping(2, &[2, 7], 16, &visible),
+            Err(SurfaceMaterialMappingRejection::FrameEpochMismatch {
+                expected: 17,
+                actual: 16,
+            })
+        );
+        assert_eq!(
+            admit_surface_material_mapping(1, &[9], 17, &visible),
+            Err(SurfaceMaterialMappingRejection::MaterialNotVisible {
+                material_index: 9,
+            })
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1727,15 +1905,6 @@ mod radiance_tests {
 
     #[test]
     fn authoritative_unlit_materials_feed_trace_and_candidate_radiance() {
-        let bvh = packed_bvh_with_hit_attributes(Bvh::build(&[
-            Triangle::new(
-                [-2.0, -1.0, -1.0],
-                [-1.0, -1.0, -1.0],
-                [-1.5, 1.0, -1.0],
-                73,
-            ),
-            Triangle::new([1.0, -1.0, -1.0], [2.0, -1.0, -1.0], [1.5, 1.0, -1.0], 11),
-        ]));
         let (tables, binding) = execution_fixture(ProgramRef::Builtin(BuiltinProgram::Unlit));
         let material_11 = material(
             7,
@@ -1754,6 +1923,42 @@ mod radiance_tests {
             [0.7, 0.3, 0.1],
             [0.4, 0.2, 0.1],
             0.5,
+        );
+        let packed = GpuBvhBuffers::from_bvh(&Bvh::build(&[
+            Triangle::new(
+                [-2.0, -1.0, -1.0],
+                [-1.0, -1.0, -1.0],
+                [-1.5, 1.0, -1.0],
+                73,
+            ),
+            Triangle::new([1.0, -1.0, -1.0], [2.0, -1.0, -1.0], [1.5, 1.0, -1.0], 11),
+        ]));
+        let attributes = packed
+            .triangles
+            .chunks_exact(TRIANGLE_WORDS)
+            .map(|triangle| {
+                let material = if triangle[9] == 11 {
+                    &material_11
+                } else {
+                    &material_73
+                };
+                RayHitAttributeRecord::new(
+                    RayHitIdentity::new(1, triangle[9], material.handle.generation)
+                        .with_material_proof(
+                            material.handle.index,
+                            material.revision,
+                            41,
+                            binding.to_words(),
+                        ),
+                    [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+                    [[0.0, 0.0, 1.0]; 3],
+                )
+            })
+            .collect();
+        let bvh = Arc::new(
+            packed
+                .with_hit_attributes(attributes)
+                .expect("one proof-bearing hit-attribute record is required per triangle"),
         );
         let input = LightingTraceSceneInput::from_untextured_unlit_materials(
             Arc::clone(&bvh),

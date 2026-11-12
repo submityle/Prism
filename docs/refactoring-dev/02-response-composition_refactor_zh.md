@@ -2,9 +2,9 @@
 
 > **2026-11-09 目标边界（当前权威）**：响应与组合的目标实现/验收只走 Prism 原生 prism_render_app、Prism RHI 与 prism_render_graph。Bevy、Bevy RenderApp、prism_render_scene 的 Bevy 集成路径、SceneRhi 与 legacy-bevy 是历史/排除项，不是当前 composition recorder、TAA/history 或 GPU parity 的前提。局部历史 harness 不能替代原生全帧证据。
 
-## 当前审计结论（2026-11-11，native Prism）
+## 当前审计结论（2026-11-12，native Prism）
 
-**已确认**：native response/composition 的 `ShadingPlan`、MaskBlend identity、output contract、lobe-budget ABI 和 composite pipeline 有源码/契约证据；非空场景 GBuffer 及 GBuffer → composite Metal readback 已通过。另有单一 `Unlit` 原生垂直切片经 identity、GBuffer、composite 写入 HDR，中心 readback 为 `[1,1,1,1]`。composite group-2 只消费 canonical header/parameter，Surface encode 解析的纹理/VT 结果通过 GBuffer material planes 进入 composite，已满足 Metal storage-buffer 限制。
+**已确认**：native response/composition 的 `ShadingPlan`、MaskBlend identity、output contract、lobe-budget ABI 和 composite pipeline 有源码/契约证据；非空场景 GBuffer 及 GBuffer → composite Metal readback 已通过。2026-11-12 严格 Metal 复验了单一 `Unlit` 原生垂直切片：真实 mesh/material 经 identity、GBuffer、composite 写入 HDR，中心 readback 为 `[1,1,1,1]`；同日 lifecycle 用例确认 execution-table 冷启动和 resize completion admission fail-closed。composite group-2 绑定同代 canonical headers/parameters、texture rows、VT page/config 与 atlas/sampler，Surface encode 解析的纹理/VT 结果通过 GBuffer material planes 进入 composite，并受 Metal storage-buffer 限制约束。
 
 **仍未完成**：真实非空 native 材质已经能通过最小 Scene GBuffer 验收，独立 composite contract 也能在 Metal readback；但从多种 response program、material/mesh binding、PSO 到最终 HDR 输出的统一全帧尚未闭合。`native_scene_mesh_draws_the_visible_set_on_a_gpu` 验证的是实际 camera-local target 的 normal/albedo 与透明 HDR clear，composite contract 测试验证的是固定 GBuffer consumer，不证明完整材质场景已经产出最终可见画面。`native_full_frame_acceptance.rs` 使用 `NullAdapter`/`NullDevice`/`NullQueue` 的 `DeferredInstance`，相机没有 renderable object，并明确断言 queued/recorded draw 均为 0；这只是空/null lifecycle fixture。
 

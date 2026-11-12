@@ -2,11 +2,11 @@
 
 > **2026-11-09 目标边界（当前权威）**：Surface ABI 的目标消费者是 Prism 原生 prism_render_app、Prism RHI 与 prism_render_graph。Bevy、Bevy RenderApp、prism_render_scene 的 Bevy 集成路径、SceneRhi 与 legacy-bevy 只作为历史/排除项保留；它们不作为 ABI 实现、资源提供者或验收前提。当前未完成项必须按原生提取、绑定、RenderGraph 编译/录制/提交和 GPU 证据重新列出。
 
-## 当前审计结论（2026-11-11，native Prism）
+## 当前审计结论（2026-11-12，native Prism）
 
 **已完成的范围**：`surface.toml` → Rust/WESL codegen、Surface mirror、header dense execution binding、lobe/slot/word 校验和 native lobe-budget 32-byte uniform ABI 有当前源码与定向契约证据。当前 Native composite 的 group 2 已接入同代 canonical headers/parameters、texture rows、VT page/config/atlas/sampler；bindless 变体还接入 direct texture/sampler arrays 与 generation table。Surface encode 仍写 compact sampled planes，composite 在 shade time 重新 fold 完整 `SampledMaterial`，避免字段截断；这有 CPU/source contract 证据，但不等于完整主帧 GPU parity。
 
-**尚未完成的范围**：ABI 对齐不等于完整帧材质输出。2026-11-11 严格 Metal 已通过 `tests::native_scene_mesh_draws_the_visible_set_on_a_gpu` 的非空场景 GBuffer 验收（queued/recorded 各为 1，中心 normal/albedo 正确），因此最小 Scene queue → mesh/material binding → PSO → bind group → GBuffer 消费链已取得真实证据。2026-11-12 又收口了 canonical material/VT queue 的冷启动与 target completion admission 语义：只有可能替换 live GPU allocation 时才等待，未确认时不发布新 target；这仍未完成 response/composition、全帧资源绑定与 device-loss 语义。`native_full_frame_acceptance.rs` 使用 `DeferredInstance` 和 Null backend，并且是无 renderable object 的空相机 fixture（`draws_queued == 0`、`draws_recorded == 0`），不能作为 ABI 的全帧硬件证据。
+**尚未完成的范围**：ABI 对齐不等于完整帧材质输出。2026-11-11 严格 Metal 已通过 `tests::native_scene_mesh_draws_the_visible_set_on_a_gpu` 的非空场景 GBuffer 验收（queued/recorded 各为 1，中心 normal/albedo 正确），2026-11-12 又通过 Unlit identity → composite → HDR readback 与非空 resize/completion lifecycle；因此最小 Scene queue → mesh/material binding → PSO → bind group → GBuffer → composite 垂直切片已有真实证据。execution-table 冷启动仍按 completion-published 处理，未确认时 fail-closed；这仍未完成多材质 response/composition、全帧资源绑定与 device-loss 语义。`native_full_frame_acceptance.rs` 使用 `DeferredInstance` 和 Null backend，并且是无 renderable object 的空相机 fixture（`draws_queued == 0`、`draws_recorded == 0`），不能作为 ABI 的全帧硬件证据。
 
 本篇后文的 schema、layout、CPU mirror、null/contract 测试继续作为局部证据记录；不得把它们或 Bevy/SceneRhi 路径写成 native full-frame、跨适配器或图像 parity 完成。剩余项包括完整多材质 response/composition ABI 消费、全帧资源绑定和 completion/resize/device-loss 语义，以及第二 physical adapter 与性能分位数。
 
