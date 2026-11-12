@@ -8,14 +8,51 @@
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
+use std::process::Command as ProcessCommand;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+use prism_app::App;
+use prism_asset::{AssetId, Assets};
+use prism_math::{Aabb3, Frustum, Mat4, Plane, Vec3};
+use prism_mesh::{Indices, Mesh, MeshVertexAttribute, VertexAttributeValues};
+use prism_render_app::prelude::{PrismRenderPlugin, RenderApp, RenderAppConfig};
+use prism_render_app::visibility::{
+    sync_scene, GeometryHandle, LocalBounds, PrismCamera, PrismFrustum, PrismRenderScene,
+    PrismRenderable, PrismVisibilityPlugin,
+};
+use prism_render_app::{RenderMaterials, RenderRuntimeResource, SceneRegistry, VisibilityWorkList};
+use prism_render_architecture::geometry::{
+    GeometryLodRecord, GeometryPrimitiveKind, GeometryRecord,
+};
+use prism_render_architecture::gpu_scene::SceneHandle;
+use prism_render_driver as rhi;
+use prism_render_driver::{
+    Adapter, BufferReadbackRange, BufferUsages, CommandEncoder, CopyCommand, DeviceDescriptor,
+    Features, FrameSync, Instance, Pass, RenderCommand, RenderDevice, RenderQueue,
+    RequestAdapterOptions, TimestampQuerySetDescriptor, TimestampWrites,
+};
+use prism_render_driver_wgpu::{AdapterEvidence, WgpuAdapter, WgpuDevice, WgpuInstance, WgpuQueue};
+use prism_render_material::{fallback_material_record, BuiltinProgram, ShadingPlan};
+use prism_render_visibility::{
+    GeometryLod, GeometryLodChain, GpuRenderWorkItem, RenderPassMask, VisibilityStageMask,
+    WorkSortKey,
+};
+use prism_transform::GlobalTransform;
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 const SCHEMA: &str = "prism-material-perf-v2";
-const REQUIRED_FIELDS: [&str; 10] = [
+const CONTENT: &str = "native_unlit_quad_v1";
+const FRAME_WIDTH: u32 = 64;
+const FRAME_HEIGHT: u32 = 64;
+const REQUIRED_FIELDS: [&str; 11] = [
     "schema",
     "commit",
     "scene",
+    "content",
     "capture_scope",
     "producer",
     "backend",
@@ -26,6 +63,392 @@ const REQUIRED_FIELDS: [&str; 10] = [
 ];
 const PRODUCTION_SCOPE: &str = "production_native_material_frame";
 const PRODUCTION_PRODUCER: &str = "prism_native_material_frame_capture_v1";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Upload {
+    buffer: rhi::BufferId,
+    bytes: u64,
+}
+
+#[derive(Debug)]
+struct PendingGpuFrame {
+    query_set: rhi::TimestampQuerySetId,
+    resolve_buffer: rhi::BufferId,
+    uploads: Vec<Upload>,
+}
+
+#[derive(Default, Debug)]
+struct QueueCaptureState {
+    uploads: Vec<Upload>,
+    frames: Vec<PendingGpuFrame>,
+}
+
+/// A queue wrapper that instruments the real production submission.
+///
+/// The Native frame command buffers are not replaced or replayed. They are
+/// submitted in their original order between two timestamped RHI passes, and
+/// the query resolve is appended to that same queue submission.
+#[derive(Clone)]
+struct MaterialPerfQueue {
+    device: WgpuDevice,
+    queue: WgpuQueue,
+    captures: Arc<Mutex<QueueCaptureState>>,
+}
+
+impl MaterialPerfQueue {
+    fn new(device: WgpuDevice, queue: WgpuQueue) -> Self {
+        Self {
+            device,
+            queue,
+            captures: Arc::new(Mutex::new(QueueCaptureState::default())),
+        }
+    }
+
+    fn capture_count(&self) -> usize {
+        self.captures
+            .lock()
+            .expect("material performance capture lock")
+            .frames
+            .len()
+    }
+
+    fn submit_instrumented(&self, command_buffers: &[rhi::CommandBuffer]) -> bool {
+        command_buffers.iter().any(|command_buffer| {
+            command_buffer.passes.iter().any(|pass| match pass {
+                Pass::Render { commands, .. } => commands.iter().any(|command| {
+                    matches!(
+                        command,
+                        RenderCommand::Draw { .. }
+                            | RenderCommand::DrawIndexed { .. }
+                            | RenderCommand::DrawIndirect { .. }
+                            | RenderCommand::DrawIndexedIndirect { .. }
+                            | RenderCommand::MultiDrawIndirect { .. }
+                    )
+                }),
+                Pass::Compute { .. } | Pass::Transfer { .. } => false,
+            })
+        })
+    }
+
+    fn timestamp_boundary(
+        query_set: rhi::TimestampQuerySetId,
+        index: u32,
+        label: &'static str,
+        beginning: bool,
+    ) -> rhi::CommandBuffer {
+        let mut encoder = CommandEncoder::labeled(label);
+        encoder.push_timestamped_compute_pass(
+            Some(label.into()),
+            TimestampWrites {
+                query_set,
+                beginning_of_pass_write_index: beginning.then_some(index),
+                end_of_pass_write_index: (!beginning).then_some(index),
+            },
+            Vec::new(),
+        );
+        encoder.finish()
+    }
+
+    fn resolve_timestamp(
+        query_set: rhi::TimestampQuerySetId,
+        resolve_buffer: rhi::BufferId,
+    ) -> rhi::CommandBuffer {
+        let mut encoder = CommandEncoder::labeled("prism-material-perf-resolve");
+        encoder.push_transfer_pass(
+            Some("prism-material-perf-resolve".into()),
+            vec![CopyCommand::ResolveTimestampQueries {
+                query_set,
+                first_query: 0,
+                query_count: 2,
+                destination: resolve_buffer,
+                destination_offset: 0,
+            }],
+        );
+        encoder.finish()
+    }
+
+    fn drain_samples(&self, material_buffers: &[rhi::BufferId]) -> Result<Vec<Sample>, String> {
+        if !self.queue.wait_idle() {
+            return Err("GPU queue did not reach idle while collecting material samples".into());
+        }
+        let frames = std::mem::take(
+            &mut self
+                .captures
+                .lock()
+                .expect("material performance capture lock")
+                .frames,
+        );
+        let period_ns = self
+            .queue
+            .timestamp_period_ns()
+            .filter(|period| period.is_finite() && *period > 0.0)
+            .ok_or_else(|| "production queue did not expose a valid timestamp period".to_owned())?;
+        let mut samples = Vec::with_capacity(frames.len());
+        for (index, frame) in frames.into_iter().enumerate() {
+            let mut readback = self
+                .queue
+                .request_buffer_readback(
+                    &[BufferReadbackRange {
+                        buffer: frame.resolve_buffer,
+                        offset: 0,
+                        size: 16,
+                    }],
+                    16,
+                )
+                .map_err(|error| format!("timestamp resolve readback failed: {error:?}"))?;
+            let ranges = loop {
+                if let Some(ranges) = readback
+                    .try_complete()
+                    .map_err(|error| format!("timestamp readback failed: {error:?}"))?
+                {
+                    break ranges;
+                }
+                if !self.device.poll_wait() {
+                    return Err("GPU device was lost while mapping timestamp readback".into());
+                }
+            };
+            let bytes = ranges
+                .into_iter()
+                .next()
+                .ok_or_else(|| "timestamp readback returned no range".to_owned())?;
+            let begin = u64::from_ne_bytes(
+                bytes
+                    .get(0..8)
+                    .ok_or_else(|| "timestamp readback is shorter than two queries".to_owned())?
+                    .try_into()
+                    .expect("eight-byte timestamp chunk"),
+            );
+            let end = u64::from_ne_bytes(
+                bytes
+                    .get(8..16)
+                    .ok_or_else(|| "timestamp readback is shorter than two queries".to_owned())?
+                    .try_into()
+                    .expect("eight-byte timestamp chunk"),
+            );
+            if begin == 0 || end <= begin {
+                return Err(format!(
+                    "production frame {index} returned invalid GPU timestamps: begin={begin} end={end}"
+                ));
+            }
+            let gpu_timestamp_ns = ((end - begin) as f64 * f64::from(period_ns)).round();
+            if !gpu_timestamp_ns.is_finite()
+                || gpu_timestamp_ns <= 0.0
+                || gpu_timestamp_ns > u64::MAX as f64
+            {
+                return Err(format!(
+                    "production frame {index} returned invalid GPU duration: {gpu_timestamp_ns} ns"
+                ));
+            }
+            let material_upload_bytes = frame
+                .uploads
+                .iter()
+                .filter(|upload| material_buffers.contains(&upload.buffer))
+                .map(|upload| upload.bytes)
+                .sum();
+            samples.push(Sample {
+                index: index as u64,
+                cpu_wall_ns: 0,
+                gpu_timestamp_ns: gpu_timestamp_ns as u64,
+                material_upload_bytes,
+            });
+            self.device.destroy_buffer(frame.resolve_buffer);
+            self.device.destroy_timestamp_query_set(frame.query_set);
+        }
+        Ok(samples)
+    }
+}
+
+impl RenderQueue for MaterialPerfQueue {
+    fn write_buffer(&self, buffer: rhi::BufferId, offset: u64, data: &[u8]) {
+        self.captures
+            .lock()
+            .expect("material performance capture lock")
+            .uploads
+            .push(Upload {
+                buffer,
+                bytes: data.len() as u64,
+            });
+        self.queue.write_buffer(buffer, offset, data);
+    }
+
+    fn write_texture(
+        &self,
+        destination: rhi::TextureWrite,
+        data: &[u8],
+        layout: rhi::ImageDataLayout,
+    ) {
+        self.queue.write_texture(destination, data, layout);
+    }
+
+    fn submit(&self, command_buffers: &[rhi::CommandBuffer]) {
+        self.queue.submit(command_buffers);
+    }
+
+    fn timestamp_period_ns(&self) -> Option<f32> {
+        self.queue.timestamp_period_ns()
+    }
+
+    fn request_buffer_readback(
+        &self,
+        ranges: &[BufferReadbackRange],
+        max_bytes: u64,
+    ) -> Result<Box<dyn rhi::BufferReadback>, rhi::BufferReadbackError> {
+        self.queue.request_buffer_readback(ranges, max_bytes)
+    }
+}
+
+impl FrameSync for MaterialPerfQueue {
+    fn submit_tracked(&self, command_buffers: &[rhi::CommandBuffer]) -> rhi::CompletionToken {
+        if !self.submit_instrumented(command_buffers) {
+            return Box::new(self.queue.submit_tracked(command_buffers));
+        }
+
+        let query_set = self
+            .device
+            .create_timestamp_query_set(&TimestampQuerySetDescriptor::new(2));
+        let resolve_buffer = self.device.create_buffer(&rhi::BufferDescriptor {
+            label: Some("prism-material-perf-timestamp-resolve".into()),
+            size: 16,
+            usage: BufferUsages::QUERY_RESOLVE.union(BufferUsages::COPY_SRC),
+            mapped_at_creation: false,
+        });
+        let mut instrumented = Vec::with_capacity(command_buffers.len() + 3);
+        instrumented.push(Self::timestamp_boundary(
+            query_set,
+            0,
+            "prism-material-perf-begin",
+            true,
+        ));
+        instrumented.extend_from_slice(command_buffers);
+        instrumented.push(Self::timestamp_boundary(
+            query_set,
+            1,
+            "prism-material-perf-end",
+            false,
+        ));
+        instrumented.push(Self::resolve_timestamp(query_set, resolve_buffer));
+
+        let token = Box::new(self.queue.submit_tracked(&instrumented));
+        let uploads = std::mem::take(
+            &mut self
+                .captures
+                .lock()
+                .expect("material performance capture lock")
+                .uploads,
+        );
+        self.captures
+            .lock()
+            .expect("material performance capture lock")
+            .frames
+            .push(PendingGpuFrame {
+                query_set,
+                resolve_buffer,
+                uploads,
+            });
+        token
+    }
+
+    fn wait_for(&self, token: &(dyn core::any::Any + Send + Sync)) -> bool {
+        self.queue.wait_for_submission_erased(token)
+    }
+
+    fn wait_idle(&self) -> bool {
+        self.queue.wait_idle()
+    }
+
+    fn on_submitted_work_done(&self, callback: Box<dyn FnOnce() + Send + 'static>) {
+        self.queue.on_submitted_work_done(callback);
+    }
+}
+
+struct MaterialPerfInstance {
+    inner: WgpuInstance,
+}
+
+impl MaterialPerfInstance {
+    fn new() -> Self {
+        Self {
+            inner: WgpuInstance::new(),
+        }
+    }
+
+    fn timestamp_capable_hardware(&self) -> Option<AdapterEvidence> {
+        self.enumerate_adapters().into_iter().find_map(|adapter| {
+            let evidence = AdapterEvidence::from_info(adapter.info());
+            (evidence.is_hardware()
+                && adapter
+                    .capabilities()
+                    .features
+                    .contains(Features::TIMESTAMP_QUERY))
+            .then_some(evidence)
+        })
+    }
+}
+
+impl Instance for MaterialPerfInstance {
+    type Adapter = WgpuAdapter;
+    type Device = WgpuDevice;
+    type Queue = MaterialPerfQueue;
+    type Surface = prism_render_driver_wgpu::WgpuSurface;
+
+    fn enumerate_adapters(&self) -> Vec<Self::Adapter> {
+        <WgpuInstance as Instance>::enumerate_adapters(&self.inner)
+    }
+
+    fn request_adapter(&self, _options: &RequestAdapterOptions) -> Option<Self::Adapter> {
+        self.enumerate_adapters().into_iter().find(|adapter| {
+            matches!(
+                adapter.info().device_type,
+                rhi::DeviceType::IntegratedGpu | rhi::DeviceType::DiscreteGpu
+            ) && adapter
+                .capabilities()
+                .features
+                .contains(Features::TIMESTAMP_QUERY)
+        })
+    }
+
+    fn request_adapter_for_surface(
+        &self,
+        options: &RequestAdapterOptions,
+        _surface: &Self::Surface,
+    ) -> Option<Self::Adapter> {
+        self.request_adapter(options)
+    }
+
+    fn create_device(
+        &self,
+        adapter: &Self::Adapter,
+        descriptor: &DeviceDescriptor,
+    ) -> Result<(Self::Device, Self::Queue), rhi::DeviceError> {
+        if !adapter
+            .capabilities()
+            .features
+            .contains(Features::TIMESTAMP_QUERY)
+        {
+            return Err(rhi::DeviceError::Request(
+                "production material sampler requires TIMESTAMP_QUERY".into(),
+            ));
+        }
+        let mut descriptor = descriptor.clone();
+        descriptor.required_features |= Features::TIMESTAMP_QUERY;
+        let (device, queue) =
+            <WgpuInstance as Instance>::create_device(&self.inner, adapter, &descriptor)?;
+        let queue = MaterialPerfQueue::new(device.clone(), queue);
+        Ok((device, queue))
+    }
+
+    fn create_surface<W>(
+        &self,
+        _window: Arc<W>,
+        _device: &Self::Device,
+        _queue: &Self::Queue,
+    ) -> Result<Self::Surface, rhi::SurfaceError>
+    where
+        W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
+    {
+        Err(rhi::SurfaceError::Unsupported)
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 struct Evidence {
@@ -130,6 +553,11 @@ fn validate(evidence: &Evidence) -> Result<(), String> {
     }
     if field("scene")? != "default_native_material_frame" {
         return Err("scene must identify the default native material frame".into());
+    }
+    if field("content")? != CONTENT {
+        return Err(format!(
+            "content must identify the fixed production content: {CONTENT}"
+        ));
     }
     if field("capture_scope")? != PRODUCTION_SCOPE {
         return Err("capture_scope must identify a production native material frame".into());
@@ -283,6 +711,7 @@ fn complete_artifact() -> String {
         "schema,prism-material-perf-v2\n\
          commit,0123456789abcdef0123456789abcdef01234567\n\
          scene,default_native_material_frame\n\
+         content,native_unlit_quad_v1\n\
          capture_scope,production_native_material_frame\n\
          producer,prism_native_material_frame_capture_v1\n\
          backend,metal\n\
@@ -353,6 +782,335 @@ fn generic_rhi_timestamp_probe_cannot_pass_as_material_frame_evidence() {
         );
     let error = parse(&probe).expect_err("generic RHI work must not pass material gate");
     assert!(error.contains("capture_scope"), "unexpected error: {error}");
+}
+
+fn broad_frustum() -> PrismFrustum {
+    PrismFrustum(Frustum::from_planes([
+        Plane::new(Vec3::X, 10.0),
+        Plane::new(-Vec3::X, 10.0),
+        Plane::new(Vec3::Y, 10.0),
+        Plane::new(-Vec3::Y, 10.0),
+        Plane::new(Vec3::Z, 10.0),
+        Plane::new(-Vec3::Z, 10.0),
+    ]))
+}
+
+fn production_scene_fixture(app: &mut App) {
+    let mesh = Mesh::new(rhi::PrimitiveTopology::TriangleList)
+        .with_attribute(
+            MeshVertexAttribute::new("Vertex_Position", rhi::VertexFormat::Float32x3, 0),
+            VertexAttributeValues::Float32x3(vec![
+                [-0.5, -0.5, 0.0],
+                [0.5, -0.5, 0.0],
+                [0.5, 0.5, 0.0],
+                [-0.5, 0.5, 0.0],
+            ]),
+        )
+        .expect("positions fit")
+        .with_attribute(
+            MeshVertexAttribute::new("Vertex_Normal", rhi::VertexFormat::Float32x3, 1),
+            VertexAttributeValues::Float32x3(vec![[0.0, 0.0, 1.0]; 4]),
+        )
+        .expect("normals fit")
+        .with_attribute(
+            MeshVertexAttribute::new("Vertex_Uv", rhi::VertexFormat::Float32x2, 2),
+            VertexAttributeValues::Float32x2(vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]),
+        )
+        .expect("UVs fit")
+        .indexed(Indices::Uint16(vec![0, 1, 2, 0, 2, 3]));
+    let mut meshes = Assets::new();
+    let mesh_id: AssetId<Mesh> = meshes.insert(mesh).id();
+    app.world_mut().insert_resource(meshes);
+
+    let geometry = GeometryHandle::new(1, 1);
+    let material = app
+        .sub_app_mut(RenderApp)
+        .expect("native render sub-app")
+        .world
+        .resource_mut::<RenderMaterials>()
+        .registry_mut()
+        .allocate()
+        .expect("the native material fixture allocates a stable handle");
+    let mut material_record = fallback_material_record(material, 1);
+    material_record.response_plan = ShadingPlan::single_builtin(BuiltinProgram::Unlit);
+    material_record.surface.base_color = [1.0; 4];
+
+    {
+        let scene = app.world_mut().resource_mut::<PrismRenderScene>();
+        scene.insert_geometry(GeometryLodChain {
+            geometry,
+            lods: vec![GeometryLod {
+                level: 0,
+                screen_error: 0.0,
+                resident: true,
+                fallback: true,
+            }],
+        });
+        scene.insert_material(material_record.clone());
+    }
+
+    let camera = app.world_mut().spawn((
+        PrismCamera::new(Mat4::IDENTITY, [0, 0, FRAME_WIDTH, FRAME_HEIGHT]),
+        broad_frustum(),
+        GlobalTransform::IDENTITY,
+    ));
+    let instance = app.world_mut().spawn((
+        PrismRenderable::new(geometry, material),
+        LocalBounds(Aabb3::from_center_half_extents(
+            Vec3::ZERO,
+            Vec3::splat(0.5),
+        )),
+        GlobalTransform::IDENTITY,
+        prism_render_app::visibility::PrismViewVisibility::default(),
+    ));
+    sync_scene(app.world_mut());
+    let scene_handle = app
+        .world()
+        .resource::<PrismRenderScene>()
+        .handle_for(instance)
+        .expect("the production renderable receives a stable scene identity");
+    assert_eq!(scene_handle, SceneHandle::new(1, 1));
+
+    let render = app.sub_app_mut(RenderApp).expect("native render sub-app");
+    render
+        .world
+        .resource_mut::<SceneRegistry>()
+        .insert_geometry(GeometryRecord {
+            handle: geometry,
+            revision: 1,
+            vertex_buffer_class: 5,
+            index_buffer_class: 0,
+            primitive_start: 0,
+            primitive_count: 1,
+            lods: vec![GeometryLodRecord {
+                level: 0,
+                primitive_kind: GeometryPrimitiveKind::Indexed,
+                element_count: 6,
+                first_element: 0,
+                base_vertex: 0,
+                vertex_count: 4,
+                screen_error: 0.0,
+                resident: true,
+                fallback: false,
+            }],
+        });
+    render
+        .world
+        .resource_mut::<SceneRegistry>()
+        .insert_material(material_record.clone());
+    render
+        .world
+        .resource_mut::<SceneRegistry>()
+        .bind_geometry_mesh(geometry, mesh_id);
+    render
+        .world
+        .resource_mut::<RenderMaterials>()
+        .publish(material_record)
+        .expect("the native material publishes into the canonical registry");
+    render
+        .world
+        .resource_mut::<VisibilityWorkList>()
+        .set(vec![GpuRenderWorkItem {
+            scene: scene_handle,
+            geometry,
+            material,
+            lod_or_cluster: 0,
+            pass_mask: RenderPassMask::OPAQUE,
+            visibility_stages: VisibilityStageMask::EARLY,
+            sort_key: WorkSortKey::new(0, 0, 0, 0, 3),
+        }]);
+
+    let _ = camera;
+}
+
+fn current_commit() -> String {
+    let output = ProcessCommand::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("git must be available to stamp a production artifact");
+    assert!(
+        output.status.success(),
+        "git rev-parse HEAD failed while stamping the production artifact"
+    );
+    let commit = String::from_utf8(output.stdout)
+        .expect("git revision must be UTF-8")
+        .trim()
+        .to_owned();
+    assert!(
+        (7..=64).contains(&commit.len()) && commit.chars().all(|c| c.is_ascii_hexdigit()),
+        "git returned an invalid HEAD revision: {commit:?}"
+    );
+    commit
+}
+
+fn csv_field(value: &str) -> String {
+    value.replace(',', "%2C").replace('\n', "%0A")
+}
+
+fn production_material_buffer_ids(app: &App) -> Vec<rhi::BufferId> {
+    let render = app.get_sub_app(RenderApp).expect("native render sub-app");
+    let buffers = render
+        .world
+        .resource::<prism_render_app::prelude::MaterialParameterBuffers>();
+    [buffers.headers(), buffers.parameters(), buffers.textures()]
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+fn write_production_artifact(
+    path: &Path,
+    commit: &str,
+    adapter: &AdapterEvidence,
+    samples: &[Sample],
+    warmup: u64,
+) -> Result<(), String> {
+    let mut output = String::new();
+    writeln!(output, "schema,{SCHEMA}").unwrap();
+    writeln!(output, "commit,{commit}").unwrap();
+    writeln!(output, "scene,default_native_material_frame").unwrap();
+    writeln!(output, "content,{CONTENT}").unwrap();
+    writeln!(output, "capture_scope,{PRODUCTION_SCOPE}").unwrap();
+    writeln!(output, "producer,{PRODUCTION_PRODUCER}").unwrap();
+    writeln!(output, "backend,{:?}", adapter.info.backend).unwrap();
+    writeln!(output, "adapter,{}", csv_field(&adapter.info.name)).unwrap();
+    writeln!(output, "resolution,{FRAME_WIDTH}x{FRAME_HEIGHT}").unwrap();
+    writeln!(output, "warmup,{warmup}").unwrap();
+    writeln!(output, "samples,{}", samples.len()).unwrap();
+    writeln!(output, "timestamp_source,gpu_timestamp_query").unwrap();
+    writeln!(output, "timestamp_unit,ns").unwrap();
+    for sample in samples {
+        writeln!(
+            output,
+            "sample,{},{},{},{}",
+            sample.index, sample.cpu_wall_ns, sample.gpu_timestamp_ns, sample.material_upload_bytes
+        )
+        .unwrap();
+    }
+    fs::write(path, output).map_err(|error| format!("write {}: {error}", path.display()))
+}
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .unwrap_or_else(|_| panic!("{name} must be an unsigned integer"))
+        })
+        .unwrap_or(default)
+}
+
+/// Runs the actual production app graph and writes the raw material evidence
+/// consumed by `material_gpu_performance_evidence_gate`.
+///
+/// This test is intentionally separate from the generic RHI timestamp probe:
+/// every retained sample must come from a submitted command buffer containing
+/// a production Native draw, and the timestamps bracket that same submission.
+#[test]
+#[ignore = "requires PRISM_REQUIRE_GPU=1 and a physical timestamp-capable GPU"]
+fn write_real_production_native_material_artifact() {
+    assert_eq!(
+        std::env::var("PRISM_REQUIRE_GPU").as_deref(),
+        Ok("1"),
+        "the production material sampler requires PRISM_REQUIRE_GPU=1"
+    );
+    let path = std::env::var_os("PRISM_MATERIAL_PERF_EVIDENCE")
+        .expect("set PRISM_MATERIAL_PERF_EVIDENCE to an output artifact path");
+    let path = Path::new(&path);
+    let expected_commit = std::env::var("PRISM_MATERIAL_EXPECTED_COMMIT")
+        .expect("set PRISM_MATERIAL_EXPECTED_COMMIT to the tested HEAD revision");
+    let commit = current_commit();
+    assert_eq!(
+        commit, expected_commit,
+        "the sampler refuses to write an artifact for a different HEAD"
+    );
+    let warmup = env_u64("PRISM_MATERIAL_PERF_WARMUP", 5);
+    let sample_count = env_u64("PRISM_MATERIAL_PERF_SAMPLES", 30);
+    assert!(warmup > 0, "warmup must be positive");
+    assert!(sample_count >= 30, "samples must be at least 30");
+
+    let instance = MaterialPerfInstance::new();
+    let expected_adapter = instance
+        .timestamp_capable_hardware()
+        .expect("no physical timestamp-capable adapter is available");
+    let mut app = App::new();
+    let config = RenderAppConfig::new(rhi::Extent3d::new_2d(FRAME_WIDTH, FRAME_HEIGHT))
+        .with_max_frames_in_flight(1)
+        .with_material_capacity(8)
+        .with_material_parameter_words(256)
+        .with_material_texture_rows(16);
+    app.add_plugins(PrismRenderPlugin::with_config(instance, config));
+    app.add_plugins(PrismVisibilityPlugin);
+    production_scene_fixture(&mut app);
+
+    let render = app.get_sub_app(RenderApp).expect("native render sub-app");
+    let runtime = render
+        .world
+        .resource::<RenderRuntimeResource<MaterialPerfInstance>>();
+    assert_eq!(runtime.runtime().adapter_info(), &expected_adapter.info);
+    let adapter = AdapterEvidence::from_info(runtime.runtime().adapter_info());
+    assert!(
+        adapter.is_hardware(),
+        "the production sampler selected non-GPU hardware"
+    );
+    let queue = runtime.runtime().queue().clone();
+    let mut cpu_samples = Vec::with_capacity((warmup + sample_count) as usize);
+    for frame_index in 0..(warmup + sample_count) {
+        let captures_before = queue.capture_count();
+        let cpu_started = Instant::now();
+        app.update();
+        let cpu_wall_ns = u64::try_from(cpu_started.elapsed().as_nanos())
+            .expect("CPU wall duration must fit in u64 nanoseconds");
+        assert_eq!(
+            queue.capture_count(),
+            captures_before + 1,
+            "production frame {frame_index} did not submit exactly one Native draw workload"
+        );
+        let stats = app
+            .get_sub_app(RenderApp)
+            .expect("native render sub-app")
+            .world
+            .resource::<prism_render_app::prelude::RenderFrameStats>();
+        assert_eq!(
+            stats.draws_queued, 1,
+            "the fixed content did not queue one draw"
+        );
+        assert_eq!(
+            stats.draws_recorded, 1,
+            "the fixed content did not record one draw"
+        );
+        cpu_samples.push(cpu_wall_ns);
+    }
+
+    let material_buffers = production_material_buffer_ids(&app);
+    assert_eq!(
+        material_buffers.len(),
+        3,
+        "canonical material buffers are incomplete"
+    );
+    let mut samples = queue
+        .drain_samples(&material_buffers)
+        .unwrap_or_else(|error| panic!("collect production material samples: {error}"));
+    assert_eq!(samples.len(), (warmup + sample_count) as usize);
+    for (sample, cpu_wall_ns) in samples.iter_mut().zip(cpu_samples).skip(warmup as usize) {
+        sample.cpu_wall_ns = cpu_wall_ns;
+    }
+    samples.drain(..warmup as usize);
+    for (index, sample) in samples.iter_mut().enumerate() {
+        sample.index = index as u64;
+        assert!(sample.cpu_wall_ns > 0);
+        assert!(sample.gpu_timestamp_ns > 0);
+    }
+    write_production_artifact(path, &commit, &adapter, &samples, warmup)
+        .unwrap_or_else(|error| panic!("write production material artifact: {error}"));
+    eprintln!(
+        "wrote REAL production native-material evidence: adapter={}, backend={:?}, samples={}, path={}",
+        adapter.info.name,
+        adapter.info.backend,
+        samples.len(),
+        path.display()
+    );
 }
 
 /// Run with a real production-native-material artifact, for example:
