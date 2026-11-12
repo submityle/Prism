@@ -3453,12 +3453,42 @@ fn native_registered_evaluator_shader_source(response_link: &str, bindless: bool
             "/native_gi_material_evaluator.wgsl"
         ))
     };
-    let generated = remove_wgsl_function(generated, "prism_native_registered_evaluate")
-        .expect("native evaluator must contain the fail-closed registered entrypoint");
     let linked = response_link
         .strip_prefix(prism_render_material::response_source::RESPONSE_FUNCTION_ABI)
-        .unwrap_or(response_link);
-    format!("{generated}\n{linked}")
+        .unwrap_or_else(|| {
+            panic!("registered response link must use the validated response ABI prefix")
+        });
+    let linked_evaluator_body = wgsl_function_body(linked, "prism_native_registered_evaluate")
+        .expect("registered response link must contain its evaluator entrypoint");
+    let linked_variants = remove_wgsl_function(linked, "prism_native_registered_evaluate")
+        .expect("registered response link must contain a removable evaluator entrypoint");
+    let generated = replace_wgsl_function_body(
+        generated,
+        "prism_native_registered_evaluate",
+        linked_evaluator_body,
+    )
+    .expect("native evaluator must contain the fail-closed registered entrypoint");
+    format!("{generated}\n{linked_variants}")
+}
+
+fn wgsl_function_body<'a>(source: &'a str, name: &str) -> Option<&'a str> {
+    let marker = format!("fn {name}(");
+    let start = source.find(&marker)?;
+    let body_start = source[start..].find('{')? + start;
+    let mut depth = 0usize;
+    for (offset, byte) in source.as_bytes()[body_start..].iter().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return source.get(body_start + 1..body_start + offset);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn remove_wgsl_function(source: &str, name: &str) -> Option<String> {
@@ -3484,6 +3514,33 @@ fn remove_wgsl_function(source: &str, name: &str) -> Option<String> {
     let mut output = String::with_capacity(source.len() - (end - start));
     output.push_str(&source[..start]);
     output.push_str(&source[end..]);
+    Some(output)
+}
+
+fn replace_wgsl_function_body(source: &str, name: &str, body: &str) -> Option<String> {
+    let marker = format!("fn {name}(");
+    let start = source.find(&marker)?;
+    let body_start = source[start..].find('{')? + start;
+    let mut depth = 0usize;
+    let mut end = None;
+    for (offset, byte) in source.as_bytes()[body_start..].iter().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    end = Some(body_start + offset + 1);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let end = end?;
+    let mut output = String::with_capacity(source.len() + body.len());
+    output.push_str(&source[..body_start + 1]);
+    output.push_str(body);
+    output.push_str(&source[end - 1..]);
     Some(output)
 }
 
@@ -3649,10 +3706,9 @@ mod tests {
             "the evaluator must validate the selected texture binding path"
         );
         assert!(
-            source.contains("evaluator_config.texture_slot_count == 0u")
-                && source.contains(
-                    "evaluator_config.texture_slot_count != arrayLength(&material_texture_generation_table)"
-                ),
+            source.contains(
+                "material_texture_generation_table_matches(evaluator_config.texture_slot_count)"
+            ) && source.contains("material_texture_record_is_valid(row)"),
             "bindless evaluation must require an in-range dense heap"
         );
         assert!(
@@ -3661,7 +3717,7 @@ mod tests {
         );
         assert!(
             source.contains(
-                "evaluator_config.vt_page_table_word_count > arrayLength(&material_vt_page_table)"
+                "evaluator_config.vt_page_table_word_count > material_vt_config.entry_count * 4u"
             ),
             "VT evaluation must validate the published page-table range"
         );
@@ -3694,6 +3750,77 @@ mod tests {
                 "missing evaluator hardening: {required}"
             );
         }
+    }
+
+    #[test]
+    fn native_material_evaluator_consumes_only_validated_registered_link_sources() {
+        let body = "return RegisteredResponse(vec3<f32>(0.25, 0.5, 0.75), vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), 1.0);";
+        let linked = prism_render_material::response_source::linked_registered_response_wgsl(&[
+            prism_render_material::response_source::RegisteredResponseSource::new(
+                17,
+                vec![body.into()],
+            ),
+        ]);
+        let source = native_registered_evaluator_shader_source(&linked, false);
+        assert!(source.contains("fn prism_native_registered_p17_v0"));
+        assert!(source.contains("fn prism_native_registered_evaluate"));
+        assert!(source.contains("RegisteredSurfaceData"));
+        assert!(source.contains("return native_registered_response("));
+        assert!(source.contains("switch program_id"));
+        assert!(!source.contains(
+            "fn prism_native_registered_evaluate(\n    surface: NativeRegisteredSurfaceData"
+        ));
+
+        let no_source =
+            prism_render_material::response_source::linked_registered_response_wgsl(&[]);
+        let no_source_shader = native_registered_evaluator_shader_source(&no_source, false);
+        assert!(!no_source_shader.contains("fn prism_native_registered_p17_v0"));
+        assert!(no_source_shader.contains("let response"));
+        assert!(no_source_shader.contains("prism_native_registered_evaluate("));
+        assert!(no_source_shader.contains("invalid.direct"));
+        assert!(no_source_shader.contains("return invalid"));
+    }
+
+    #[test]
+    fn hardware_native_registered_response_link_compiles_in_production_evaluator() {
+        let (device, _) = match WgpuInstance::new().request_default_hardware_device() {
+            Ok(pair) => pair,
+            Err(HardwareDeviceError::NoAdapter) => {
+                assert!(
+                    !require_hardware_gpu(),
+                    "PRISM_REQUIRE_GPU=1 but no physical adapter was found"
+                );
+                eprintln!("SKIPPED registered evaluator link compile: no adapter");
+                return;
+            }
+            Err(HardwareDeviceError::NonHardware(evidence)) => {
+                assert!(
+                    !require_hardware_gpu(),
+                    "PRISM_REQUIRE_GPU=1 requires physical GPU: {evidence}"
+                );
+                eprintln!("SKIPPED registered evaluator link compile: {evidence}");
+                return;
+            }
+            Err(HardwareDeviceError::Device(error)) => {
+                panic!("hardware GPU device creation failed: {error}")
+            }
+        };
+        let device = Arc::new(device);
+        let link = prism_render_material::response_source::linked_registered_response_wgsl(&[
+            prism_render_material::response_source::RegisteredResponseSource::new(
+                23,
+                vec![
+                    "return RegisteredResponse(vec3<f32>(0.25, 0.5, 0.75), vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), 1.0);".into(),
+                ],
+            ),
+        ]);
+        let trace_device: Arc<dyn RenderDevice + Send + Sync> = device.clone();
+        let mut pass = LightingTraceGpu::new(trace_device);
+        pass.ensure_evaluator_pipeline(&link);
+        assert_eq!(pass.evaluator_link_source.as_ref(), link);
+        assert!(pass
+            .evaluator_link_source
+            .contains("prism_native_registered_p23_v0"));
     }
 
     #[test]

@@ -12,6 +12,8 @@ import prism_render_material::shaders::material_unpack::{
 import prism_render_material::shaders::material_sample::{
     SampledMaterial,
     fold_material_texel,
+    material_texture_record_is_valid,
+    material_texture_generation_table_matches,
     sample_texture_slot,
     sampled_material_defaults,
 };
@@ -244,6 +246,27 @@ struct RegisteredView {
 };
 struct RegisteredCustomData { header: RegisteredHeader, permutation_low: u32, permutation_high: u32 };
 
+fn prism_native_registered_evaluate(
+    surface: RegisteredSurfaceData,
+    lighting: RegisteredLightingContext,
+    view: RegisteredView,
+    custom: RegisteredCustomData,
+    program_id: u32,
+    permutation_low: u32,
+    permutation_high: u32,
+) -> RegisteredResponse {
+    // Replaced by the exact validated link section when a registered program
+    // is present. The static body is deliberately invalid, never a fallback.
+    var invalid: RegisteredResponse;
+    invalid.direct = vec3<f32>(bitcast<f32>(0x7fc00000u), 0.0, 0.0);
+    invalid.indirect_diffuse = vec3<f32>(0.0);
+    invalid.reflection = vec3<f32>(0.0);
+    invalid.transmission = vec3<f32>(0.0);
+    invalid.emission = vec3<f32>(0.0);
+    invalid.alpha = bitcast<f32>(0x7fc00000u);
+    return invalid;
+}
+
 @group(0) @binding(0) var<storage, read> trace_hits: array<u32>;
 @group(0) @binding(1) var<uniform> evaluator_config: NativeGiMaterialEvaluatorConfig;
 @group(0) @binding(2) var<storage, read_write> evaluations: array<NativeGiMaterialEvaluationRecord>;
@@ -343,7 +366,7 @@ fn invalid_native_response() -> NativeResponse {
     out.value = vec4<f32>(0.0);
     if row.generation == 0u
         || evaluator_config.vt_page_table_word_count == 0u
-        || evaluator_config.vt_page_table_word_count > arrayLength(&material_vt_page_table)
+        || evaluator_config.vt_page_table_word_count > material_vt_config.entry_count * 4u
         || !(evaluator_config.vt_generation_low != 0u
             || evaluator_config.vt_generation_high != 0u)
         || material_vt_config.enabled == 0u
@@ -456,10 +479,9 @@ fn invalid_native_response() -> NativeResponse {
 
 fn native_texture_binding_contract_is_valid() -> bool {
     @if(MATERIAL_BINDLESS) {
-        // The generation table is the runtime-sized proof for both binding
-        // arrays; the host must publish the same dense capacity in the config.
-        if evaluator_config.texture_slot_count == 0u
-            || evaluator_config.texture_slot_count != arrayLength(&material_texture_generation_table) {
+        // Require the host to publish a dense generation table covering the
+        // advertised heap before any row can be consumed.
+        if !material_texture_generation_table_matches(evaluator_config.texture_slot_count) {
             return false;
         }
     }
@@ -480,10 +502,7 @@ fn native_texture_row_binding_is_valid(row: PrismMaterialTexture) -> bool {
     @if(MATERIAL_BINDLESS) {
         if row.index >= evaluator_config.texture_slot_count
             || row.sampler_index >= evaluator_config.texture_slot_count
-            || row.index >= arrayLength(&material_texture_generation_table)
-            || row.sampler_index >= arrayLength(&material_texture_generation_table)
-            || material_texture_generation_table[row.index] != row.generation
-            || material_texture_generation_table[row.sampler_index] != row.generation {
+            || !material_texture_record_is_valid(row) {
             return false;
         }
     }
@@ -499,27 +518,6 @@ fn native_texture_row_binding_is_valid(row: PrismMaterialTexture) -> bool {
         }
     }
     return true;
-}
-
-fn prism_native_registered_evaluate(
-    surface: RegisteredSurfaceData,
-    lighting: RegisteredLightingContext,
-    view: RegisteredView,
-    custom: RegisteredCustomData,
-    program_id: u32,
-    permutation_low: u32,
-    permutation_high: u32,
-) -> RegisteredResponse {
-    // Replaced by the exact validated link section when a registered program
-    // is present. The static body is deliberately invalid, never a fallback.
-    var invalid: RegisteredResponse;
-    invalid.direct = vec3<f32>(bitcast<f32>(0x7fc00000u), 0.0, 0.0);
-    invalid.indirect_diffuse = vec3<f32>(0.0);
-    invalid.reflection = vec3<f32>(0.0);
-    invalid.transmission = vec3<f32>(0.0);
-    invalid.emission = vec3<f32>(0.0);
-    invalid.alpha = bitcast<f32>(0x7fc00000u);
-    return invalid;
 }
 
 fn native_registered_light_count(lighting: RegisteredLightingContext) -> u32 {
@@ -660,13 +658,15 @@ fn native_registered_response(
         frame_input.normal, frame_input.view, frame_input.tangent, frame_input.bitangent,
     );
     let geometry = RegisteredGeometry(
-        vec3<f32>(0.0), frame_input.normal, frame_input.tangent, frame_input.bitangent, uv, 0u,
+        vec3<f32>(0.0), frame_input.normal, frame_input.tangent,
+        frame_input.bitangent, uv, 0u,
     );
     let environment = RegisteredEnvironment(
         vec3<f32>(0.0), 1u,
         array<vec4<f32>, 9>(vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0)),
         0u, 0u, 1.0, 0u,
-        RegisteredStylizedParams(1u, 0.0, 0.0, 0.5, 0.1, 0.0, 0.5, 0.1, vec3<f32>(1.0), 0.0, vec3<f32>(1.0), 1.0),
+        RegisteredStylizedParams(1u, 0.0, 0.0, 0.5, 0.1, 0.0, 0.5, 0.1,
+            vec3<f32>(1.0), 0.0, vec3<f32>(1.0), 1.0),
     );
     let lighting = RegisteredLightingContext(
         environment, frame, vec3<f32>(0.0), 1u, 0u, 0u, 0u, 0u,
@@ -958,6 +958,7 @@ fn native_execution_arm_is_valid(
 
 fn native_arm_response(
     parameters: PrismSurfaceParameters,
+    sampled: SampledMaterial,
     sampled_surface: SurfaceSample,
     header: PrismMaterialHeader,
     program: ExecutionProgramRow,
@@ -969,7 +970,7 @@ fn native_arm_response(
 ) -> NativeResponse {
     if program.response_kind == RESPONSE_PROGRAM_KIND_CUSTOM {
         return native_registered_response(
-            parameters, sampled_surface, frame, header, uv, program.program_id,
+            parameters, sampled, frame, header, uv, program.program_id,
             permutation_low, permutation_high,
         );
     }
@@ -1022,8 +1023,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 || evaluator_config.vt_generation_high != 0u)
         || (evaluator_config.vt_page_table_word_count != 0u
             && (evaluator_config.vt_page_table_word_count < 4u
-                || (evaluator_config.vt_page_table_word_count & 3u) != 0u
-                || evaluator_config.vt_page_table_word_count > arrayLength(&material_vt_page_table)))
+                || (evaluator_config.vt_page_table_word_count & 3u) != 0u))
         || evaluator_config.flags != 0u
         || any(evaluator_config.padding != vec2<u32>(0u))) {
         evaluations[ray_index] = result;
@@ -1257,7 +1257,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let sampled_surface = native_surface_sample(surface, sampled, sampled_frame);
     let alpha = clamp(sampled.base_alpha * surface.geometry_opacity, 0.0, 1.0);
     let left = native_arm_response(
-        surface, sampled_surface, header, left_program, sampled_frame, uv, alpha,
+        surface, sampled, sampled_surface, header, left_program, sampled_frame, uv, alpha,
         permutation_low, permutation_high,
     );
     if !left.valid {
@@ -1268,7 +1268,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if plan.right_program != INVALID {
         let right_program = execution_program_at(plan.right_program);
         let right = native_arm_response(
-            surface, sampled_surface, header, right_program, sampled_frame, uv, alpha,
+            surface, sampled, sampled_surface, header, right_program, sampled_frame, uv, alpha,
             permutation_low, permutation_high,
         );
         let mask = native_mask_value(header, plan.mask_index);

@@ -120,6 +120,13 @@ const NORMAL_EPSILON: f32 = 1e-12;
     }
 }
 
+// The host publishes the advertised heap size together with this dense table.
+// Keep the check in the module that owns the binding so linked consumers do
+// not depend on an unqualified global name after WESL namespace mangling.
+@if(MATERIAL_BINDLESS) fn material_texture_generation_table_matches(slot_count: u32) -> bool {
+    return slot_count != 0u && slot_count == arrayLength(&material_texture_generation_table);
+}
+
 // Material-VT production ABI. Bindings 5-8 deliberately extend the existing
 // material group without moving the bindless arrays: the parent integration
 // supplies these resources, including valid dummy resources when disabled.
