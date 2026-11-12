@@ -453,6 +453,11 @@ pub(crate) fn execute_frame<I>(
             .as_ref()
             .map(|(_, _, resources)| *resources),
     );
+    lighting_gpu.set_composite_texture_owner(
+        material_admission
+            .as_ref()
+            .and_then(|_| execution.material_texture_bindings.snapshot()),
+    );
     let material_admitted = material_admission.is_some();
     let material_binding = material_admission.map(|(bindings, owner, _)| (bindings, owner));
     let direct_texture_owner = execution.material_texture_bindings.snapshot();
@@ -625,7 +630,11 @@ pub(crate) fn execute_frame<I>(
         stats.surface_view_error = Some(crate::stats::SurfaceViewExecutionError::Target(error));
         stats.frames_failed += 1;
         stats.execution_trace.outcome = FrameExecutionOutcome::Failed;
-        native_frame.failed_with("surface view target reconciliation failed");
+        // Target reconciliation is part of surface-view admission. If a
+        // completion barrier is unconfirmed, no graph was built or submitted;
+        // preserve the admission-failure phase so callers can retry without
+        // mistaking this for a post-recording GPU failure.
+        native_frame.admission_failed_with("surface view target reconciliation failed");
         return;
     }
     if let Err(error) = lighting_gpu.prepare(&plan.plan, &inputs, record.frame_index, runtime) {
@@ -754,7 +763,10 @@ pub(crate) fn execute_frame<I>(
             crate::TaaOutput::Texture(handle.route_id()),
         ) {
             Ok(prepared) => prepared,
-            Err(_) => {
+            Err(error) => {
+                if let frame::SurfaceViewGraphError::FabricIdentity(fabric_error) = error {
+                    stats.fabric_frame_error = Some(fabric_error);
+                }
                 texture_targets.publish_receipt(crate::target::TextureTargetReceipt {
                     handle,
                     frame_index: record.frame_index,
@@ -1120,7 +1132,10 @@ pub(crate) fn execute_frame<I>(
         crate::TaaOutput::Texture(0),
     ) {
         Ok(prepared) => prepared,
-        Err(_) => {
+        Err(error) => {
+            if let frame::SurfaceViewGraphError::FabricIdentity(fabric_error) = error {
+                stats.fabric_frame_error = Some(fabric_error);
+            }
             stats.surface_view_error =
                 Some(crate::stats::SurfaceViewExecutionError::GraphAdmission);
             stats.frames_failed += 1;

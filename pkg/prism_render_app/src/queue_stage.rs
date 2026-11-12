@@ -9,6 +9,7 @@ use prism_ecs::prelude::{Commands, Res, ResMut};
 use prism_render_driver::{BindGroupLayoutId, FrameSync, Instance, RenderDevice, RenderQueue};
 
 use crate::draw::canonical;
+use crate::forward_lit::surface_uv1_layout;
 use crate::material::virtual_texture::{NativeMaterialVt, NativeVtScheduler, NativeVtSources};
 use crate::material::MaterialParameterBuffers;
 use crate::mesh_pipeline::{MeshPipelineProvider, MeshPipelineSpecializer};
@@ -21,6 +22,10 @@ use crate::stats::{RenderFrameStats, ViewQueueAdmissionRejection};
 use crate::surface_view_frame::{SurfaceViewQueue, SurfaceViewQueueError, SurfaceViewQueues};
 use crate::surface_views::ExtractedSurfaceViews;
 use crate::visibility_bridge::{ExtractedVisibilityView, ExtractedVisibilityViews};
+
+mod clst_draw;
+
+pub(crate) use clst_draw::ClstDrawSubmissions;
 
 use crate::frame::RENDER_DEPTH_FORMAT;
 use crate::mesh::RenderMesh;
@@ -45,15 +50,33 @@ use crate::mesh::RenderMesh;
 /// skipped: the queue and the frame agree on what is drawable, rather than the
 /// frame drawing with a class nothing declared.
 pub(crate) fn fill_queues<I>(
-    visibility_views: Res<ExtractedVisibilityViews>,
-    mut registry: ResMut<SceneRegistry>,
-    meshes: Res<RenderAssets<RenderMesh>>,
-    mut specializer: ResMut<MeshPipelineSpecializer>,
-    pipelines: Res<MeshPipelines>,
-    mut commands: Commands,
-    mut canonical_material: ResMut<CanonicalMaterialBindings>,
-    material_buffers: Res<MaterialParameterBuffers>,
-    surface_views: Res<ExtractedSurfaceViews>,
+    (
+        visibility_views,
+        mut registry,
+        meshes,
+        mut specializer,
+        pipelines,
+        mut commands,
+        mut canonical_material,
+        mut draw_functions,
+        mut clst_submissions,
+        mut frame_texture_imports,
+        material_buffers,
+        surface_views,
+    ): (
+        Res<ExtractedVisibilityViews>,
+        ResMut<SceneRegistry>,
+        Res<RenderAssets<RenderMesh>>,
+        ResMut<MeshPipelineSpecializer>,
+        Res<MeshPipelines>,
+        Commands,
+        ResMut<CanonicalMaterialBindings>,
+        ResMut<crate::DrawFunctions>,
+        Option<ResMut<clst_draw::ClstDrawSubmissions>>,
+        ResMut<crate::frame::FrameGraphTextureImports>,
+        Res<MaterialParameterBuffers>,
+        Res<ExtractedSurfaceViews>,
+    ),
     (mut stats, runtime, mut transforms, record): (
         ResMut<RenderFrameStats>,
         Res<RenderRuntimeResource<I>>,
@@ -105,10 +128,32 @@ pub(crate) fn fill_queues<I>(
         stats.view_queue_rejection = Some(ViewQueueAdmissionRejection::MissingVisibilityView);
     }
     let surface_layout = pipelines.surface_bind_group_layout();
-    // The arena may destroy old allocations during layout/capacity preflight.
-    // Drain previous submissions once, never inside the per-camera loop. This
-    // conservative barrier can later be replaced by an owner retirement fence.
-    if !runtime.wait_idle() {
+    let vt_layout = pipelines.surface_vt_bind_group_layout();
+    let uses_surface_uv1 = pipelines.uses_surface_uv1_fallback();
+    let vt_snapshot = match vt_owner.as_deref() {
+        Some(owner) => match owner.active_binding(runtime) {
+            Ok(snapshot) => snapshot,
+            Err(_) => {
+                frame.fail(SurfaceViewQueueError::MaterialBuffers);
+                publish_frame(&mut commands, frame);
+                return;
+            }
+        },
+        None => None,
+    };
+    // Drain only when preparation is about to retire a live allocation or
+    // bind group. A cold owner has no in-flight resource to protect, so an
+    // unconditional wait would reject a valid first frame on delayed queues.
+    if canonical_material.requires_completion_before_batch(
+        runtime.device(),
+        runtime.device_generation(),
+        surface_layout,
+        vt_layout,
+        &material_buffers,
+        views.len(),
+        vt_snapshot.as_ref(),
+    ) && !runtime.wait_idle()
+    {
         frame.fail(SurfaceViewQueueError::CompletionUnconfirmed);
         publish_frame(&mut commands, frame);
         return;
@@ -119,6 +164,7 @@ pub(crate) fn fill_queues<I>(
         runtime.queue(),
         runtime.device_generation(),
         surface_layout,
+        vt_layout,
         &material_buffers,
         &views,
     ) {
@@ -126,6 +172,30 @@ pub(crate) fn fill_queues<I>(
         publish_frame(&mut commands, frame);
         return;
     }
+    let previous_vt_view = canonical_material.vt_import_view();
+    if let Some(previous) = previous_vt_view {
+        frame_texture_imports.remove(previous);
+    }
+    if !canonical_material.ensure_vt_layout(
+        runtime.device(),
+        runtime.device_generation(),
+        vt_layout,
+    ) {
+        frame.fail(SurfaceViewQueueError::Layout);
+        publish_frame(&mut commands, frame);
+        return;
+    }
+    if let Some(snapshot) = vt_snapshot.as_ref() {
+        if snapshot.device_generation() != runtime.device_generation() {
+            frame.fail(SurfaceViewQueueError::MaterialBuffers);
+            publish_frame(&mut commands, frame);
+            return;
+        }
+        frame_texture_imports.set(snapshot.atlas_import());
+    }
+    let clst_draw = clst_submissions
+        .as_deref_mut()
+        .map(|submissions| clst_draw::ensure_draw_function(&mut draw_functions, submissions));
     let mut camera_queues = Vec::with_capacity(views.len());
     let mut queued = 0;
     for (slot, view) in views.iter().enumerate() {
@@ -205,6 +275,12 @@ pub(crate) fn fill_queues<I>(
             for (mut request, external) in requests {
                 let resident_draw = external.is_some();
                 let default_mesh_draw = request.draw == canonical::MESH;
+                if default_mesh_draw && surface_layout.is_some() && uses_surface_uv1 {
+                    request.layout = match surface_uv1_layout(&request.layout) {
+                        Ok(layout) => layout,
+                        Err(_) => continue,
+                    };
+                }
                 let transformed = if resident_draw {
                     // The producer emitted world positions. Source/proxy
                     // transforms must never add another transform stream.
@@ -215,27 +291,96 @@ pub(crate) fn fill_queues<I>(
                     };
                     transformed
                 };
-                let pipeline = specializer
-                    .specialize_with(
-                        runtime.device(),
-                        request.variant,
-                        &request.layout,
-                        |variant| {
-                            if transformed {
-                                pipelines
-                                    .transformed_descriptor(variant)
-                                    .expect("validated transform stream provider")
-                            } else {
-                                pipelines.descriptor(variant)
-                            }
-                        },
-                    )
-                    .id();
+                let descriptor = |variant: &crate::MeshPipelineKey| {
+                    if transformed {
+                        pipelines
+                            .transformed_descriptor(variant)
+                            .expect("validated transform stream provider")
+                    } else {
+                        pipelines.descriptor(variant)
+                    }
+                };
+                let pass = registry
+                    .pass_for_draw(request.material, request.variant, request.phase)
+                    .unwrap_or_else(|()| {
+                        panic!(
+                            "material pass table has ambiguous matching provenance: material {:?}, variant {:?}, phase {:?}",
+                            request.material, request.variant, request.phase
+                        )
+                    });
+                let pipeline = if let Some(pass) = pass.filter(|pass| pass.shader_package.is_some())
+                {
+                    specializer
+                        .specialize_frozen_pass(
+                            runtime.device(),
+                            &pass,
+                            request.variant,
+                            &request.layout,
+                            descriptor,
+                        )
+                        .unwrap_or_else(|error| {
+                            panic!("frozen direct pipeline identity rejected: {error:?}")
+                        })
+                        .id()
+                } else {
+                    if registry.material_is_frozen(request.material) {
+                        panic!(
+                            "frozen material draw lost its shader package provenance: material {:?}, variant {:?}, phase {:?}",
+                            request.material, request.variant, request.phase
+                        );
+                    }
+                    specializer
+                        .specialize_with(
+                            runtime.device(),
+                            request.variant,
+                            &request.layout,
+                            descriptor,
+                        )
+                        .id()
+                };
                 let draw = if default_mesh_draw && surface_layout.is_none() {
                     canonical::MESH_UNBOUND
                 } else {
                     request.draw
                 };
+                if default_mesh_draw && surface_layout.is_some() {
+                    let secondary_descriptor = |variant: &crate::MeshPipelineKey| {
+                        if transformed {
+                            pipelines
+                                .transformed_secondary_descriptor(variant)
+                                .expect("validated secondary surface provider")
+                        } else {
+                            pipelines
+                                .secondary_descriptor(variant)
+                                .expect("validated secondary surface provider")
+                        }
+                    };
+                    let secondary =
+                        if let Some(pass) = pass.filter(|pass| pass.shader_package.is_some()) {
+                            specializer
+                                .specialize_frozen_pass(
+                                    runtime.device(),
+                                    &pass,
+                                    request.variant,
+                                    &request.layout,
+                                    secondary_descriptor,
+                                )
+                                .unwrap_or_else(|error| {
+                                    panic!("frozen secondary pipeline identity rejected: {error:?}")
+                                })
+                                .id()
+                        } else {
+                            specializer
+                                .specialize_with(
+                                    runtime.device(),
+                                    request.variant,
+                                    &request.layout,
+                                    secondary_descriptor,
+                                )
+                                .id()
+                        };
+                    queues.register_secondary_pipeline(pipeline, secondary);
+                }
                 let bind_groups = if default_mesh_draw || resident_draw {
                     let Some(record) = registry.material(request.material) else {
                         #[cfg(feature = "physics-resident")]
@@ -262,7 +407,15 @@ pub(crate) fn fill_queues<I>(
                             }
                             continue;
                         };
-                        alloc::vec![binding]
+                        let Some(snapshot) = vt_snapshot.as_ref() else {
+                            continue;
+                        };
+                        let Some(vt_binding) =
+                            canonical_material.vt_binding(runtime.device(), snapshot)
+                        else {
+                            continue;
+                        };
+                        alloc::vec![binding, vt_binding]
                     } else {
                         alloc::vec::Vec::new()
                     }
@@ -294,6 +447,15 @@ pub(crate) fn fill_queues<I>(
                 queued += 1;
             }
         }
+        if let (Some(submissions), Some(clst_draw)) = (clst_submissions.as_deref_mut(), clst_draw) {
+            queued += clst_draw::admit_for_view(
+                submissions,
+                view.camera,
+                runtime.device_generation(),
+                clst_draw,
+                &mut queues,
+            );
+        }
         queues.sort();
         camera_queues.push(SurfaceViewQueue {
             surface: view.surface,
@@ -318,11 +480,15 @@ fn prepare_view_bindings(
     queue: &dyn RenderQueue,
     device_generation: u64,
     layout: Option<BindGroupLayoutId>,
+    vt_layout: Option<BindGroupLayoutId>,
     materials: &MaterialParameterBuffers,
     views: &[&ExtractedVisibilityView],
 ) -> Result<(), SurfaceViewQueueError> {
     let frame_slots = checked_frame_slots(views.len())?;
     if !arena.ensure_layout(device, device_generation, layout) {
+        return Err(SurfaceViewQueueError::Layout);
+    }
+    if !arena.ensure_vt_layout(device, device_generation, vt_layout) {
         return Err(SurfaceViewQueueError::Layout);
     }
     if layout.is_none() {
