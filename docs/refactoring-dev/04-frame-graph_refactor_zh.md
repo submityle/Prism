@@ -10,6 +10,8 @@
 
 因此，文中 8 + 23 = 31 的 inventory、CPU graph tests、Bevy/SceneRhi 记录和 null fixture 不得写成 native 31-pass GPU 全帧完成。当前仍缺统一 native 非空场景的完整 pass 调度、所有资源导入与绑定、真实输出/readback、全域 fan-out、completion-gated retirement、第二 physical adapter、图像 parity 与 P50/P95/P99。
 
+2026-11-12 新增的 `native_particle_full_frame_acceptance` 已补上一个 native 应用级调度证据：`App::update()` 通过生产 RenderApp schedule 完成 Particle snapshot、prepare、Fabric finalize、queue、graph record、submit，并在 deferred queue completion 后完成回收。它使用 Null RHI，不能提升为 physical-GPU 全帧或 31-pass 证据；Surface/Particle/其它域的统一真实输出仍未闭合。
+
 > 文档口径：以当前源码、测试和已合入历史为准的实现审计。本文描述统一编译内核、shading graph 拓扑、生成式后处理清单和调度边界。
 > 上层导航：[`00-overview_refactor_zh.md`](00-overview_refactor_zh.md)
 > 相关文档：[`02-response-composition_refactor_zh.md`](02-response-composition_refactor_zh.md)、[`03-shader-package_refactor_zh.md`](03-shader-package_refactor_zh.md)

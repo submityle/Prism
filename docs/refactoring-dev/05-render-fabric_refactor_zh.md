@@ -12,6 +12,8 @@
 
 **仍未完成**：native 的 response/composition 到最终 HDR 的完整链路；统一全场景 recorder、真实 31-pass 等价入口、Surface/Particle/Water/Volume/Hair/Decal 等域的同帧资源导入与多视图 fan-out；设备丢失/resize/资源退休；第二 physical adapter；全帧图像 parity、资源峰值/队列等待/吞吐及 P50/P95/P99。2026-11-12 的 native target admission 修复只保证 completion 未确认时不替换旧资源、不提交半成品 graph，不能扩大为 Render Fabric 全场景完成。后文的局部契约和历史切片必须保持“局部/历史/排除”标签，不得表述为整个 Render Fabric 或重构系统已完成。
 
+2026-11-12 的 `native_particle_full_frame_acceptance` 关闭了 Particle 从应用更新到 native submission/completion 的调度 seam：测试通过真实 `App::update()` 观察 snapshot、prepared payload、Fabric frame、camera queue、graph receipt 和 completion receipt。该证据限定为 deferred Null RHI 的生产生命周期，不包含 shader 执行、HDR readback、多域合并或 physical-GPU parity，因此不改变上面的全场景未完成结论。
+
 > 状态：Render Fabric 目标规范与实现证据审计（允许破坏性重构，不保留旧 API）；2026-11-09：Bevy RenderApp/SceneFabric/SceneRhi 接线已归档为历史/排除项，不再作为目标实现或验收前提；当前只以 Prism 原生 prism_render_app、Prism RHI 与 prism_render_graph/RenderGraph 判断，原生全场景统一 recorder 与完整验收仍未闭合
 > 上层导航：[`00-overview_refactor_zh.md`](00-overview_refactor_zh.md)
 > 范围：六层渲染装配与四个权威的职责切分、三个正交轴的术语收敛（`RenderDomain` / `ResponseProgram` / `ExecutionFamily`）、特性的三层声明（`FeatureDefinition` / `FeatureVariant` / `PassTemplate`）、变体的确定性选择规则、语义 ID 与帧图 ID 的分离（`ResourceKey` / `ResourceId`）、`ResourceUse` 的完整访问描述、服务依赖的两层模型与服务提供者校验、`FeatureCatalog`、`FrameRenderItem` 与域负载、三份并行服务集与两份 `ShadingFrontend` 的删除、跨子系统回边的一帧延迟契约
