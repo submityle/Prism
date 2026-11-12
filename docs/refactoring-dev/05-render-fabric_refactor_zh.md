@@ -8,7 +8,7 @@
 
 **当前已确认的 native 范围**：Prism 原生 RenderApp、RHI、RenderGraph 的资源/帧生命周期与失败关闭语义存在；Surface/response/composite 的 ABI 与契约有源码证据，非空 Metal GBuffer 及固定 composite readback 已通过，composite material ABI 已满足 8-storage-buffer 的 Metal 限制。它们是局部基础，不是 Render Fabric 全场景完成。
 
-**当前硬失败与空 fixture**：Metal native 的基础直接 draw 与非空场景 GBuffer 最小验收均已通过；`tests::native_scene_mesh_draws_the_visible_set_on_a_gpu` 确认 queued/recorded 各为 1，并从实际 camera-local graph target 读到正确 normal/albedo。该结果只关闭 Native Surface 的最小视觉切片，不等于 Render Fabric 全场景输出。`pkg/prism_render_app/tests/native_full_frame_acceptance.rs` 使用 `DeferredInstance`、Null backend 和无 renderable object 的相机；它验证的是空/null 提交、未完成 submission、失败和恢复，不是全帧视觉验收。
+**当前硬失败与空 fixture**：Metal native 的基础直接 draw 与非空场景 GBuffer 最小验收均已通过；`tests::native_scene_mesh_draws_the_visible_set_on_a_gpu` 确认 queued/recorded 各为 1，并从实际 camera-local graph target 读到正确 normal/albedo；固定单材质 Lit 也已通过 response/composite HDR oracle parity。该结果只关闭 Native Surface 的最小视觉切片，不等于 Render Fabric 全场景输出。`pkg/prism_render_app/tests/native_full_frame_acceptance.rs` 使用 `DeferredInstance`、Null backend 和无 renderable object 的相机；它验证的是空/null 提交、未完成 submission、失败和恢复，不是全帧视觉验收。
 
 **仍未完成**：native 的多 response program 与 response/composition 到最终 HDR 的完整链路；统一全场景 recorder、真实 31-pass 等价入口、Surface/Particle/Water/Volume/Hair/Decal 等域的同帧资源导入与多视图 fan-out；设备丢失/resize/资源退休全矩阵；第二 physical adapter；全帧图像 parity、资源峰值/队列等待/吞吐及 P50/P95/P99。2026-11-12 的 native target admission 修复和 Metal 非空 Unlit vertical slice 只保证 execution-table completion、旧 target 保留/新 target 延迟提交以及固定单域输出正确，不能扩大为 Render Fabric 全场景完成。后文的局部契约和历史切片必须保持“局部/历史/排除”标签，不得表述为整个 Render Fabric 或重构系统已完成。
 

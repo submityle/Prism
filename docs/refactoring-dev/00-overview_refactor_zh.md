@@ -13,13 +13,13 @@
 - Surface/schema、Rust/WESL mirror、`ShadingPlan`、execution binding 以及 native lobe-budget ABI 有源码和定向契约测试；`lighting_gpu::composite_contract_tests::lobe_budget_native_uniform_matches_the_wesl_eight_word_abi` 已通过。
 - 非空场景 Surface GBuffer 以及 GBuffer → composite readback 已在同一 Prism RHI/Metal 路径通过；composite group-2 使用同代 canonical headers、parameters、texture rows、VT page/config 与 atlas/sampler 资源，布局受 Metal 的 storage-buffer 限制约束。
 - native RenderApp 的 prepare/graph record/submit/completion 及失败关闭语义有实现和生命周期测试；非空 Surface GBuffer 最小视觉验收也已在 Metal 通过，但这仍不是完整帧验收。
-- 原生 Unlit 垂直切片已通过 Metal：真实场景 mesh/material 经 identity、GBuffer、composite 到 HDR readback，`native_scene_mesh_reaches_composite_hdr_on_a_gpu` 的中心像素为 `[1,1,1,1]`。这只证明单一内建响应和固定 fixture 的端到端切片。
+- 原生 Unlit 垂直切片已通过 Metal：真实场景 mesh/material 经 identity、GBuffer、composite 到 HDR readback，`native_scene_mesh_reaches_composite_hdr_on_a_gpu` 的中心像素为 `[1,1,1,1]`。随后固定单材质 Lit 也通过同一 native Metal vertical slice，并与 CPU lighting oracle 对拍；这两项仍只覆盖固定 fixture 和单一材质。
 - 2026-11-12 已在 Apple M2/Metal 收口 native 生命周期与冷启动语义：execution-table 首次上传完成后，非空 mesh 首帧真实 draw/composite 成功；resize 在 target completion 未确认时保持旧 target、拒绝 graph admission，并保留 `AdmissionFailed` receipt，completion 释放后新 target 提交且旧 target 回收。`native_nonempty_lifecycle_acceptance` 严格物理 GPU 用例通过。
 - 2026-11-12 新增并通过 `native_particle_full_frame_acceptance`：真实 `App::update()` 驱动 Particle snapshot → GPU prepare → Render Fabric finalize → queue → graph → record → submit；显式触发 queue completion 后，native receipt 与 `NativeFrameExecution` 均进入 `Completed`。该测试使用 deferred Null RHI，证明生产调度和 completion 所有权，不证明 Particle shader 的 physical-GPU 像素结果。
 
 **当前明确未完成/未证实**：
 
-- 多种 response program、MaskBlend/split response、材质变体和真实多对象场景尚未形成统一的 native response → composition → HDR 全帧验收；当前已通过的 Unlit 测试不能外推到 Lit/NPR/Registered 或完整混合材质。
+- NPR、Registered、MaskBlend/split response、材质变体和真实多对象场景尚未形成统一的 native response → composition → HDR 全帧验收；当前已通过的固定单材质 Unlit/Lit 测试不能外推到这些路径。
 - `pkg/prism_render_app/tests/native_full_frame_acceptance.rs` 的 `native_app_update_drives_full_frame_and_fail_closed_recovery` 使用 `DeferredInstance`、`NullAdapter`/`NullDevice`/`NullQueue`，只生成没有可渲染对象的相机；源码明确断言 `draws_queued == 0`、`draws_recorded == 0`。它只证明空/null fixture 的提交、失败和恢复语义。
 - 因而 native 统一全帧/31-pass 等价入口、多域 fan-out、Water/Volume/Hair/Decal 的 native 生产接线、设备丢失/resize/退休的完整链路、第二 physical adapter、图像 parity 及 P50/P95/P99 性能仍未完成。Bevy、SceneRhi、CPU 或 null 证据均不计入这些条目。
 
