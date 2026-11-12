@@ -1783,7 +1783,7 @@ schema **只声明布局 + 元数据 + 契约**（在哪、多宽、谁消费、
 
 ### 仍未完成
 
-- 默认 Native 主 render pass 的完整 material extraction → Surface encode → response/composite → HDR 输出 GPU readback，以及与 CPU golden 的全帧 parity；`481580ed0` 只修正了 Unlit fixture，不等于主链 parity 已完成。
+- 默认 Native 主 render pass 的完整 material extraction → Surface encode → response/composite → HDR 输出 GPU readback，以及与 CPU golden 的全帧 parity；当前 Unlit 与 builtin Lit fixture 已有真实 Metal 纵向切片，但仍不等于完整主链 parity。
 - 完整 Lit/registered/MaskBlend/channel/domain 组合、完整 texture semantic/VT resolver、真实动态通道和真实材质提取/打包；UV1 的主帧全链路 parity 仍未验收。
 - GI evaluator 的生产 dispatch 调度已接线；仍缺真实硬件 dispatch/readback 与 CPU oracle parity，以及其对完整材质响应的覆盖。
 - realtime GPU 与 path-traced reference 的图像级 parity、真实场景级生产 integrator 组合、GPU/backend/cross-adapter parity；当前 Native composite 受限纵向切片已有成功硬件 readback，但受限 realtime↔reference parity fixture 仍未闭合。P2-h 的独立 reference closure、adapter 和固定多 bounce CPU golden 已实现，不再列为占位。
@@ -1952,3 +1952,25 @@ P50/P95/P99 仍是硬门禁。
 - 真实 Apple M2 RHI timestamp probe 已能完成 query/resolve/readback，并输出硬件 timestamp；但它仍是
   capability probe，不是生产 Native 材质帧。生产材质 raw-sample artifact、固定内容/adapter/backend
   下的 P50/P95/P99 和预算门禁仍未完成。
+
+## 18.6 2026-11-12 Native extraction/reconcile 增量
+
+本轮把 Native 材质测试从 render-world 手动双写推进到生产 extraction/reconcile 路径：
+
+- `RenderMaterials::new_with_builtin_execution()` 在生产 plugin 启动时安装 Lit/NPR/Unlit 的
+  canonical builtin execution catalog；builtin catalog 只提供已验证的 dense plan/program/package
+  身份，不生成 registered response source。
+- `reconcile_native_materials` 在 `PrepareAssets` 从主世界材质快照同步 render-world
+  `SceneRegistry` 与 `RenderMaterials`，处理 stable handle、revision update、generation replacement
+  retirement，并仅对精确匹配的 builtin plan 自动安装 execution binding；registered plan 仍要求
+  独立的 validated source/publication。
+- queue fixture 已删除 render-world material row、execution table 和 binding 的手动写入。严格
+  Apple M2/Metal Unlit HDR 门禁 **1/1 通过**，证明主世界材质可以走真实提取、同步、排队和
+  identity/composite 纵向路径。
+
+当前仍未完成：
+
+- registered/MaskBlend/channel/domain 的完整生产发布与消费、完整 texture/VT semantic 组合、GI
+  evaluator 硬件 parity、默认主帧全帧 golden parity、realtime↔path-traced 图像 parity、跨
+  backend/adapter 和 P50/P95/P99 性能证据仍未闭合。builtin Lit 的真实 Metal fixture 已在修正
+  world-position/camera-view CPU oracle 后通过，但它只证明单个 canonical Lit 纵向切片。

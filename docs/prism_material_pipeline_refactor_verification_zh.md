@@ -1194,3 +1194,25 @@ readback 能力，但其 `rhi_timestamp_probe` artifact 被材质门显式拒绝
   SPIR-V 不再伪造 Native response source。当前 material 定向测试 **177 passed / 0 failed**。
 - 真实 Apple M2/Metal RHI timestamp probe 已通过 query/resolve/readback；生产 Native material raw
   sample artifact 尚未采集，因此性能门仍未通过。
+
+## 8.6 2026-11-12 Native material extraction/reconcile 增量
+
+- 生产 Native plugin 现在启动时安装 canonical builtin execution catalog（Lit/NPR/Unlit），并在
+  `PrepareAssets` 阶段从主世界 `ExtractedNativeMaterials` 自动 reconcile 到 render-world
+  `SceneRegistry`、`RenderMaterials` 和 builtin execution binding。Native GPU fixture 已删除对
+  render-world material row / execution table / binding 的手动双写；只发布主世界 `PrismRenderScene`
+  后仍能进入 queue 和 composite。
+- `MaterialExecutionTables::builtin()` 的单测 **1 passed / 0 failed**，确认三个 builtin
+  plan/program/package dense index、zero permutation binding，以及 builtin catalog 不伪造
+  registered response source。`prism_render_app` queue-stage extraction fixture **1 passed / 0 failed**。
+- 严格 `PRISM_REQUIRE_GPU=1 WGPU_BACKEND=metal` 的
+  `native_scene_mesh_reaches_composite_hdr_on_a_gpu` 在 Apple M2/Metal 上 **1 passed / 0 failed**；
+  这证明的是主世界材质提取 → render-world reconcile → Unlit Surface/GBuffer/identity/composite
+  纵向切片，不是完整 Lit/registered/MaskBlend parity。
+- 严格 Lit 门禁的第一次运行曾因 CPU oracle 使用错误的固定视点而出现
+  GPU `0.18151855` vs CPU `0.6986872`；该测试随后改为读取真实 R32Float world-position GBuffer
+  和 extracted camera view，并在 Apple M2/Metal 上重新运行 **1 passed / 0 failed**，中心像素
+  GPU `0.18160228` 与 CPU `0.18169431` 在 `0.002` 门限内一致。该结果关闭 builtin Lit 纵向切片
+  的 parity 缺口，但不代表 registered/MaskBlend 或默认主帧全组合 parity 已完成。
+- 当前 reconcile 只可自动绑定 canonical builtin plans；registered response 仍必须经过已验证
+  source、execution-table publication 和对应的生产 link seam，不能静默借用 builtin binding。

@@ -731,6 +731,24 @@ impl WgpuQueue {
             .collect())
     }
 
+    /// Reads an `R32Float` 2D texture into tightly packed `f32` values.
+    /// Native material acceptance uses this for the three scalar world-position
+    /// attachments instead of pretending that their format is RGBA16F.
+    #[must_use]
+    pub fn read_texture_r32float(
+        &self,
+        texture: rhi::TextureId,
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<f32>, rhi::ReadbackError> {
+        let bytes =
+            self.read_texture_texels(texture, width, height, &[wgpu::TextureFormat::R32Float], 4)?;
+        Ok(bytes
+            .chunks_exact(4)
+            .map(|texel| f32::from_le_bytes(texel.try_into().expect("R32Float texel")))
+            .collect())
+    }
+
     /// Reads scene-linear `Rgba16Float` texels as row-major RGBA `f32` values.
     ///
     /// Preserves HDR values, negative values, subnormals and IEEE nonfinite
