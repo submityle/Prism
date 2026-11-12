@@ -7,15 +7,15 @@
 
 use super::{
     AccessKind, FeatureCatalog, FeatureDefinition, FeatureId, FeatureVariant, FrameLag,
-    PassDescriptorIdentity, PassKey, PassTemplate, QueueClass, RenderDomain, RenderQualityTier,
-    ResourceInput, ResourceKey, ResourceLayout, ResourceScope, ResourceTemplate, ResourceUse,
-    ServiceId, ServiceOutput, ServiceSet, ShaderBindingError, ShaderModuleBinding,
-    ShaderPackageBinding, VariantId,
+    ObjectLayoutPolicy, ObjectResourceAccess, PassDescriptorIdentity, PassKey, PassTemplate,
+    PayloadRole, QueueClass, RenderDomain, RenderQualityTier, ResourceInput, ResourceKey,
+    ResourceLayout, ResourceScope, ResourceTemplate, ResourceUse, ServiceId, ServiceOutput,
+    ServiceSet, ShaderBindingError, ShaderModuleBinding, ShaderPackageBinding, VariantId,
 };
 use crate::backend::capability::CapabilitySet;
-use crate::frame_graph::ResourceLifetime;
 use crate::shader_package::{ArtifactDigest, ModuleIdentity, PermutationSpace, ShaderPackageId};
-use prism_render_driver::BufferUsages;
+use prism_render_driver::{BufferUsages, TextureDimension, TextureFormat, TextureUsages};
+use prism_render_graph::frame_graph::ResourceLifetime;
 
 pub const SPRAY_FEEDBACK_SERVICE: ServiceId = ServiceId(10);
 pub const SPRAY_FEEDBACK_FEATURE_ID: FeatureId = FeatureId(0x2020);
@@ -70,6 +70,9 @@ pub const VOLUME_FEATURE_ID: FeatureId = FeatureId(0x1001);
 pub const PARTICLE_FEATURE_ID: FeatureId = FeatureId(0x1002);
 pub const HAIR_FEATURE_ID: FeatureId = FeatureId(0x1003);
 pub const DECAL_FEATURE_ID: FeatureId = FeatureId(0x1004);
+/// Native Surface identity reconstruction is a first-class subsystem pass;
+/// it is not a response/composition shortcut.
+pub const SURFACE_FEATURE_ID: FeatureId = FeatureId(0x1005);
 pub const LIT_FEATURE_ID: FeatureId = FeatureId(0x1100);
 pub const NPR_FEATURE_ID: FeatureId = FeatureId(0x1101);
 pub const CUSTOM_FEATURE_ID: FeatureId = FeatureId(0x1102);
@@ -81,6 +84,7 @@ pub const WATER_VARIANT_ID: VariantId = VariantId(0x5000);
 pub const LIT_VARIANT_ID: VariantId = VariantId(0x5002);
 pub const NPR_VARIANT_ID: VariantId = VariantId(0x5003);
 pub const CUSTOM_VARIANT_ID: VariantId = VariantId(0x5004);
+pub const SURFACE_VARIANT_ID: VariantId = VariantId(0x5009);
 
 fn builtin_package_name(variant: VariantId) -> Option<&'static str> {
     Some(match variant {
@@ -89,6 +93,7 @@ fn builtin_package_name(variant: VariantId) -> Option<&'static str> {
         LIT_VARIANT_ID => "builtin.render_fabric.lit",
         NPR_VARIANT_ID => "builtin.render_fabric.npr",
         CUSTOM_VARIANT_ID => "builtin.render_fabric.custom",
+        SURFACE_VARIANT_ID => "builtin.render_fabric.surface_identity",
         VariantId(0x5005) => "builtin.render_fabric.particle",
         VariantId(0x5006) => "builtin.render_fabric.hair",
         VariantId(0x5007) => "builtin.render_fabric.decal",
@@ -154,21 +159,63 @@ pub(super) fn builtin_shader_package_binding(
 }
 
 pub const WATER_SURFACE_RESOURCE: ResourceKey = ResourceKey::of(WATER_FEATURE_ID, 0);
-/// Compatibility name for the particle service's persistent foam feedback.
-pub const WATER_SPRAY_RESOURCE: ResourceKey = PARTICLE_SPRAY_RESOURCE;
 pub const WATER_FOAM_RESOURCE: ResourceKey = ResourceKey::of(WATER_FEATURE_ID, 2);
-pub const VOLUME_DENSITY_RESOURCE: ResourceKey = ResourceKey::of(VOLUME_FEATURE_ID, 0);
-pub const VOLUME_FROXEL_RESOURCE: ResourceKey = ResourceKey::of(VOLUME_FEATURE_ID, 1);
-pub const VOLUME_VELOCITY_RESOURCE: ResourceKey = ResourceKey::of(VOLUME_FEATURE_ID, 2);
+pub const VOLUME_SCATTERING_RESOURCE: ResourceKey = ResourceKey::of(VOLUME_FEATURE_ID, 0);
+pub const VOLUME_EXTINCTION_RESOURCE: ResourceKey = ResourceKey::of(VOLUME_FEATURE_ID, 1);
+pub const VOLUME_INTEGRATED_SCATTERING_RESOURCE: ResourceKey =
+    ResourceKey::of(VOLUME_FEATURE_ID, 2);
+pub const VOLUME_INTEGRATED_TRANSMITTANCE_RESOURCE: ResourceKey =
+    ResourceKey::of(VOLUME_FEATURE_ID, 3);
+pub const VOLUME_FOG_APPLIED_RESOURCE: ResourceKey = ResourceKey::of(VOLUME_FEATURE_ID, 4);
+pub const VOLUME_SCENE_DEPTH_RESOURCE: ResourceKey = ResourceKey::of(VOLUME_FEATURE_ID, 5);
+pub const VOLUME_SCENE_COLOR_RESOURCE: ResourceKey = ResourceKey::of(VOLUME_FEATURE_ID, 6);
+/// Per-domain producer payload, distinct from froxel fog textures.
+pub const VOLUME_DENSITY_RESOURCE: ResourceKey = ResourceKey::of(VOLUME_FEATURE_ID, 7);
+pub const VOLUME_FROXEL_RESOURCE: ResourceKey = ResourceKey::of(VOLUME_FEATURE_ID, 8);
+pub const VOLUME_VELOCITY_RESOURCE: ResourceKey = ResourceKey::of(VOLUME_FEATURE_ID, 9);
 pub const PARTICLE_STREAM_RESOURCE: ResourceKey = ResourceKey::of(PARTICLE_FEATURE_ID, 0);
 pub const PARTICLE_SPRAY_RESOURCE: ResourceKey = ResourceKey::of(SPRAY_FEEDBACK_FEATURE_ID, 0);
 pub const PARTICLE_ALIVE_RESOURCE: ResourceKey = ResourceKey::of(PARTICLE_FEATURE_ID, 2);
+pub const PARTICLE_SIMULATION_PARTICLES_RESOURCE: ResourceKey =
+    ResourceKey::of(PARTICLE_FEATURE_ID, 3);
+pub const PARTICLE_SIMULATION_ACTIVE_INDICES_RESOURCE: ResourceKey =
+    ResourceKey::of(PARTICLE_FEATURE_ID, 4);
+pub const PARTICLE_SIMULATION_COMPACT_EVENTS_RESOURCE: ResourceKey =
+    ResourceKey::of(PARTICLE_FEATURE_ID, 5);
+pub const PARTICLE_SIMULATION_CONTROL_RESOURCE: ResourceKey =
+    ResourceKey::of(PARTICLE_FEATURE_ID, 6);
+pub const PARTICLE_BRIDGE_EVENT_FLAGS_RESOURCE: ResourceKey =
+    ResourceKey::of(PARTICLE_FEATURE_ID, 7);
+pub const PARTICLE_RENDER_INPUT_COUNT_RESOURCE: ResourceKey =
+    ResourceKey::of(PARTICLE_FEATURE_ID, 8);
+pub const PARTICLE_BRIDGE_VALIDATION_RESOURCE: ResourceKey =
+    ResourceKey::of(PARTICLE_FEATURE_ID, 9);
+pub const PARTICLE_RENDER_ROUTE_TABLE_RESOURCE: ResourceKey =
+    ResourceKey::of(PARTICLE_FEATURE_ID, 10);
+pub const PARTICLE_BRIDGE_ROUTE_SCRATCH_RESOURCE: ResourceKey =
+    ResourceKey::of(PARTICLE_FEATURE_ID, 11);
+pub const PARTICLE_BRIDGE_ACTIVE_ROUTE_INDICES_RESOURCE: ResourceKey =
+    ResourceKey::of(PARTICLE_FEATURE_ID, 12);
 pub const HAIR_STRAND_RESOURCE: ResourceKey = ResourceKey::of(HAIR_FEATURE_ID, 0);
 pub const HAIR_VISIBILITY_RESOURCE: ResourceKey = ResourceKey::of(HAIR_FEATURE_ID, 1);
 pub const HAIR_DEEP_OPACITY_RESOURCE: ResourceKey = ResourceKey::of(HAIR_FEATURE_ID, 2);
 pub const DECAL_INSTANCE_RESOURCE: ResourceKey = ResourceKey::of(DECAL_FEATURE_ID, 0);
-pub const DECAL_INDIRECT_RESOURCE: ResourceKey = ResourceKey::of(DECAL_FEATURE_ID, 1);
-pub const DECAL_RESOLVE_RESOURCE: ResourceKey = ResourceKey::of(DECAL_FEATURE_ID, 2);
+pub const DECAL_MATERIAL_RESOURCE: ResourceKey = ResourceKey::of(DECAL_FEATURE_ID, 1);
+pub const DECAL_RECEIVER_RESOURCE: ResourceKey = ResourceKey::of(DECAL_FEATURE_ID, 2);
+pub const DECAL_CLUSTER_RANGE_RESOURCE: ResourceKey = ResourceKey::of(DECAL_FEATURE_ID, 3);
+pub const DECAL_CLUSTER_INDEX_RESOURCE: ResourceKey = ResourceKey::of(DECAL_FEATURE_ID, 4);
+pub const DECAL_RESOLVE_RESOURCE: ResourceKey = ResourceKey::of(DECAL_FEATURE_ID, 5);
+pub const DECAL_RESOLVE_PASS: PassKey = PassKey(0x5007);
+pub const SURFACE_IDENTITY_PASS: PassKey = PassKey(0x5009);
+
+pub const SURFACE_NORMAL_RESOURCE: ResourceKey = ResourceKey::of(SURFACE_FEATURE_ID, 0);
+pub const SURFACE_ID_RESOURCE: ResourceKey = ResourceKey::of(SURFACE_FEATURE_ID, 1);
+pub const SURFACE_MATERIAL_HEADERS_RESOURCE: ResourceKey = ResourceKey::of(SURFACE_FEATURE_ID, 2);
+pub const SURFACE_EXECUTION_PLANS_RESOURCE: ResourceKey = ResourceKey::of(SURFACE_FEATURE_ID, 3);
+pub const SURFACE_EXECUTION_PROGRAMS_RESOURCE: ResourceKey = ResourceKey::of(SURFACE_FEATURE_ID, 4);
+pub const SURFACE_LIGHTING_MAP_RESOURCE: ResourceKey = ResourceKey::of(SURFACE_FEATURE_ID, 5);
+pub const SURFACE_PARAMS_RESOURCE: ResourceKey = ResourceKey::of(SURFACE_FEATURE_ID, 6);
+pub const SURFACE_IDENTITY_RESOURCE: ResourceKey = ResourceKey::of(SURFACE_FEATURE_ID, 7);
 
 /// Response-composition resources are owned by the water/frame fabric and
 /// mirrored here so response variants use the same semantic identities.
@@ -208,40 +255,192 @@ const WATER_ACCESSES: &[ResourceUse] = &[
     },
     ResourceUse {
         input: ResourceInput::Automatic,
-        key: WATER_SPRAY_RESOURCE,
+        key: PARTICLE_SPRAY_RESOURCE,
         access: AccessKind::StorageRead,
         scope: ResourceScope::Whole,
         frame_lag: FrameLag::new(1),
     },
 ];
-const VOLUME_ACCESSES: &[ResourceUse] = &[
+const fn volume_access(key: ResourceKey, access: AccessKind, input: ResourceInput) -> ResourceUse {
+    ResourceUse {
+        key,
+        access,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+        input,
+    }
+}
+const VOLUME_SCATTER_ACCESSES: &[ResourceUse] = &[
+    volume_access(
+        VOLUME_SCATTERING_RESOURCE,
+        AccessKind::StorageWrite,
+        ResourceInput::Automatic,
+    ),
+    volume_access(
+        VOLUME_EXTINCTION_RESOURCE,
+        AccessKind::StorageWrite,
+        ResourceInput::Automatic,
+    ),
+];
+const VOLUME_INTEGRATE_ACCESSES: &[ResourceUse] = &[
+    volume_access(
+        VOLUME_SCATTERING_RESOURCE,
+        AccessKind::SampledRead,
+        ResourceInput::ProducedBy(VOLUME_SCATTER_PASS),
+    ),
+    volume_access(
+        VOLUME_EXTINCTION_RESOURCE,
+        AccessKind::SampledRead,
+        ResourceInput::ProducedBy(VOLUME_SCATTER_PASS),
+    ),
+    volume_access(
+        VOLUME_INTEGRATED_SCATTERING_RESOURCE,
+        AccessKind::StorageWrite,
+        ResourceInput::Automatic,
+    ),
+    volume_access(
+        VOLUME_INTEGRATED_TRANSMITTANCE_RESOURCE,
+        AccessKind::StorageWrite,
+        ResourceInput::Automatic,
+    ),
+];
+const VOLUME_APPLY_ACCESSES: &[ResourceUse] = &[
+    volume_access(
+        VOLUME_SCENE_DEPTH_RESOURCE,
+        AccessKind::SampledRead,
+        ResourceInput::Initial,
+    ),
+    volume_access(
+        VOLUME_INTEGRATED_SCATTERING_RESOURCE,
+        AccessKind::SampledRead,
+        ResourceInput::ProducedBy(VOLUME_INTEGRATE_PASS),
+    ),
+    volume_access(
+        VOLUME_INTEGRATED_TRANSMITTANCE_RESOURCE,
+        AccessKind::SampledRead,
+        ResourceInput::ProducedBy(VOLUME_INTEGRATE_PASS),
+    ),
+    volume_access(
+        VOLUME_SCENE_COLOR_RESOURCE,
+        AccessKind::SampledRead,
+        ResourceInput::Initial,
+    ),
+    volume_access(
+        VOLUME_FOG_APPLIED_RESOURCE,
+        AccessKind::StorageWrite,
+        ResourceInput::Automatic,
+    ),
+];
+const VOLUME_COPY_ACCESSES: &[ResourceUse] = &[
+    volume_access(
+        VOLUME_FOG_APPLIED_RESOURCE,
+        AccessKind::TransferRead,
+        ResourceInput::ProducedBy(VOLUME_APPLY_PASS),
+    ),
+    volume_access(
+        VOLUME_SCENE_COLOR_RESOURCE,
+        AccessKind::TransferWrite,
+        ResourceInput::Initial,
+    ),
+];
+const PARTICLE_BRIDGE_ACCESSES: &[ResourceUse] = &[
+    ResourceUse {
+        input: ResourceInput::Initial,
+        key: PARTICLE_SIMULATION_PARTICLES_RESOURCE,
+        access: AccessKind::StorageRead,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+    ResourceUse {
+        input: ResourceInput::Initial,
+        key: PARTICLE_SIMULATION_ACTIVE_INDICES_RESOURCE,
+        access: AccessKind::StorageRead,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+    ResourceUse {
+        input: ResourceInput::Initial,
+        key: PARTICLE_SIMULATION_COMPACT_EVENTS_RESOURCE,
+        access: AccessKind::StorageRead,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+    ResourceUse {
+        input: ResourceInput::Initial,
+        key: PARTICLE_SIMULATION_CONTROL_RESOURCE,
+        access: AccessKind::StorageRead,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
     ResourceUse {
         input: ResourceInput::Automatic,
-        key: VOLUME_DENSITY_RESOURCE,
+        key: PARTICLE_BRIDGE_EVENT_FLAGS_RESOURCE,
         access: AccessKind::StorageWrite,
         scope: ResourceScope::Whole,
         frame_lag: None,
     },
     ResourceUse {
         input: ResourceInput::Automatic,
-        key: VOLUME_FROXEL_RESOURCE,
+        key: PARTICLE_STREAM_RESOURCE,
         access: AccessKind::StorageWrite,
         scope: ResourceScope::Whole,
         frame_lag: None,
     },
     ResourceUse {
         input: ResourceInput::Automatic,
-        key: VOLUME_VELOCITY_RESOURCE,
+        key: PARTICLE_RENDER_INPUT_COUNT_RESOURCE,
+        access: AccessKind::StorageWrite,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+    ResourceUse {
+        input: ResourceInput::Automatic,
+        key: PARTICLE_BRIDGE_VALIDATION_RESOURCE,
+        access: AccessKind::StorageWrite,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+    ResourceUse {
+        input: ResourceInput::Automatic,
+        key: PARTICLE_RENDER_ROUTE_TABLE_RESOURCE,
+        access: AccessKind::StorageWrite,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+    ResourceUse {
+        input: ResourceInput::Automatic,
+        key: PARTICLE_BRIDGE_ROUTE_SCRATCH_RESOURCE,
+        access: AccessKind::StorageWrite,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+    ResourceUse {
+        input: ResourceInput::Automatic,
+        key: PARTICLE_BRIDGE_ACTIVE_ROUTE_INDICES_RESOURCE,
         access: AccessKind::StorageWrite,
         scope: ResourceScope::Whole,
         frame_lag: None,
     },
 ];
-const PARTICLE_ACCESSES: &[ResourceUse] = &[
+const PARTICLE_RENDER_ACCESSES: &[ResourceUse] = &[
     ResourceUse {
-        input: ResourceInput::Automatic,
+        input: ResourceInput::ProducedBy(PARTICLE_BRIDGE_PASS),
         key: PARTICLE_STREAM_RESOURCE,
-        access: AccessKind::StorageWrite,
+        access: AccessKind::StorageRead,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+    ResourceUse {
+        input: ResourceInput::ProducedBy(PARTICLE_BRIDGE_PASS),
+        key: PARTICLE_RENDER_INPUT_COUNT_RESOURCE,
+        access: AccessKind::StorageRead,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+    ResourceUse {
+        input: ResourceInput::ProducedBy(PARTICLE_BRIDGE_PASS),
+        key: PARTICLE_RENDER_ROUTE_TABLE_RESOURCE,
+        access: AccessKind::StorageRead,
         scope: ResourceScope::Whole,
         frame_lag: None,
     },
@@ -253,18 +452,34 @@ const PARTICLE_ACCESSES: &[ResourceUse] = &[
         frame_lag: None,
     },
 ];
-const HAIR_ACCESSES: &[ResourceUse] = &[
+const HAIR_VISIBILITY_ACCESSES: &[ResourceUse] = &[
     ResourceUse {
         input: ResourceInput::Automatic,
         key: HAIR_STRAND_RESOURCE,
+        access: AccessKind::StorageRead,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+    ResourceUse {
+        input: ResourceInput::Initial,
+        key: HAIR_VISIBILITY_RESOURCE,
         access: AccessKind::StorageWrite,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+];
+const HAIR_DEEP_OPACITY_ACCESSES: &[ResourceUse] = &[
+    ResourceUse {
+        input: ResourceInput::Automatic,
+        key: HAIR_STRAND_RESOURCE,
+        access: AccessKind::StorageRead,
         scope: ResourceScope::Whole,
         frame_lag: None,
     },
     ResourceUse {
         input: ResourceInput::Automatic,
         key: HAIR_VISIBILITY_RESOURCE,
-        access: AccessKind::StorageWrite,
+        access: AccessKind::StorageRead,
         scope: ResourceScope::Whole,
         frame_lag: None,
     },
@@ -280,14 +495,35 @@ const DECAL_ACCESSES: &[ResourceUse] = &[
     ResourceUse {
         input: ResourceInput::Automatic,
         key: DECAL_INSTANCE_RESOURCE,
-        access: AccessKind::StorageWrite,
+        access: AccessKind::StorageRead,
         scope: ResourceScope::Whole,
         frame_lag: None,
     },
     ResourceUse {
         input: ResourceInput::Automatic,
-        key: DECAL_INDIRECT_RESOURCE,
-        access: AccessKind::StorageWrite,
+        key: DECAL_MATERIAL_RESOURCE,
+        access: AccessKind::StorageRead,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+    ResourceUse {
+        input: ResourceInput::Automatic,
+        key: DECAL_RECEIVER_RESOURCE,
+        access: AccessKind::StorageRead,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+    ResourceUse {
+        input: ResourceInput::Automatic,
+        key: DECAL_CLUSTER_RANGE_RESOURCE,
+        access: AccessKind::StorageRead,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+    ResourceUse {
+        input: ResourceInput::Automatic,
+        key: DECAL_CLUSTER_INDEX_RESOURCE,
+        access: AccessKind::StorageRead,
         scope: ResourceScope::Whole,
         frame_lag: None,
     },
@@ -300,34 +536,145 @@ const DECAL_ACCESSES: &[ResourceUse] = &[
     },
 ];
 
+const SURFACE_IDENTITY_ACCESSES: &[ResourceUse] = &[
+    ResourceUse {
+        input: ResourceInput::Initial,
+        key: SURFACE_NORMAL_RESOURCE,
+        access: AccessKind::SampledRead,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+    ResourceUse {
+        input: ResourceInput::Initial,
+        key: SURFACE_ID_RESOURCE,
+        access: AccessKind::SampledRead,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+    ResourceUse {
+        input: ResourceInput::Initial,
+        key: SURFACE_MATERIAL_HEADERS_RESOURCE,
+        access: AccessKind::StorageRead,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+    ResourceUse {
+        input: ResourceInput::Initial,
+        key: SURFACE_EXECUTION_PLANS_RESOURCE,
+        access: AccessKind::StorageRead,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+    ResourceUse {
+        input: ResourceInput::Initial,
+        key: SURFACE_EXECUTION_PROGRAMS_RESOURCE,
+        access: AccessKind::StorageRead,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+    ResourceUse {
+        input: ResourceInput::Initial,
+        key: SURFACE_LIGHTING_MAP_RESOURCE,
+        access: AccessKind::StorageRead,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+    ResourceUse {
+        input: ResourceInput::Initial,
+        key: SURFACE_PARAMS_RESOURCE,
+        access: AccessKind::UniformRead,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+    ResourceUse {
+        input: ResourceInput::Automatic,
+        key: SURFACE_IDENTITY_RESOURCE,
+        access: AccessKind::StorageWrite,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+];
+
 const WATER_PASSES: &[PassTemplate] = &[PassTemplate {
     depends_on: &[],
     id: PassKey(0x5000),
     accesses: WATER_ACCESSES,
     queue: QueueClass::Compute,
 }];
-const VOLUME_PASSES: &[PassTemplate] = &[PassTemplate {
-    depends_on: &[],
-    id: PassKey(0x5001),
-    accesses: VOLUME_ACCESSES,
-    queue: QueueClass::Compute,
-}];
-const PARTICLE_PASSES: &[PassTemplate] = &[PassTemplate {
-    depends_on: &[],
-    id: PassKey(0x5005),
-    accesses: PARTICLE_ACCESSES,
-    queue: QueueClass::Compute,
-}];
-const HAIR_PASSES: &[PassTemplate] = &[PassTemplate {
-    depends_on: &[],
-    id: PassKey(0x5006),
-    accesses: HAIR_ACCESSES,
-    queue: QueueClass::Compute,
-}];
+pub const VOLUME_SCATTER_PASS: PassKey = PassKey(0x5201);
+/// Semantic producer pass for the renderer-input particle stream.
+pub const PARTICLE_BRIDGE_PASS: PassKey = PassKey(0x5205);
+/// Semantic consumer pass that builds the renderer's live visible-index stream.
+pub const PARTICLE_RENDER_PASS: PassKey = PassKey(0x5206);
+pub const VOLUME_INTEGRATE_PASS: PassKey = PassKey(0x5202);
+pub const VOLUME_APPLY_PASS: PassKey = PassKey(0x5203);
+pub const VOLUME_COPY_BACK_PASS: PassKey = PassKey(0x5204);
+const VOLUME_PASSES: &[PassTemplate] = &[
+    PassTemplate {
+        depends_on: &[],
+        id: VOLUME_SCATTER_PASS,
+        accesses: VOLUME_SCATTER_ACCESSES,
+        queue: QueueClass::Compute,
+    },
+    PassTemplate {
+        depends_on: &[VOLUME_SCATTER_PASS],
+        id: VOLUME_INTEGRATE_PASS,
+        accesses: VOLUME_INTEGRATE_ACCESSES,
+        queue: QueueClass::Compute,
+    },
+    PassTemplate {
+        depends_on: &[VOLUME_INTEGRATE_PASS],
+        id: VOLUME_APPLY_PASS,
+        accesses: VOLUME_APPLY_ACCESSES,
+        queue: QueueClass::Compute,
+    },
+    PassTemplate {
+        depends_on: &[VOLUME_APPLY_PASS],
+        id: VOLUME_COPY_BACK_PASS,
+        accesses: VOLUME_COPY_ACCESSES,
+        queue: QueueClass::Transfer,
+    },
+];
+const PARTICLE_PASSES: &[PassTemplate] = &[
+    PassTemplate {
+        depends_on: &[],
+        id: PARTICLE_BRIDGE_PASS,
+        accesses: PARTICLE_BRIDGE_ACCESSES,
+        queue: QueueClass::Compute,
+    },
+    PassTemplate {
+        depends_on: &[PARTICLE_BRIDGE_PASS],
+        id: PARTICLE_RENDER_PASS,
+        accesses: PARTICLE_RENDER_ACCESSES,
+        queue: QueueClass::Compute,
+    },
+];
+pub const HAIR_VISIBILITY_PASS: PassKey = PassKey(0x5006);
+pub const HAIR_DEEP_OPACITY_PASS: PassKey = PassKey(0x5008);
+const HAIR_PASSES: &[PassTemplate] = &[
+    PassTemplate {
+        depends_on: &[],
+        id: HAIR_VISIBILITY_PASS,
+        accesses: HAIR_VISIBILITY_ACCESSES,
+        queue: QueueClass::Compute,
+    },
+    PassTemplate {
+        depends_on: &[HAIR_VISIBILITY_PASS],
+        id: HAIR_DEEP_OPACITY_PASS,
+        accesses: HAIR_DEEP_OPACITY_ACCESSES,
+        queue: QueueClass::Compute,
+    },
+];
 const DECAL_PASSES: &[PassTemplate] = &[PassTemplate {
     depends_on: &[],
     id: PassKey(0x5007),
     accesses: DECAL_ACCESSES,
+    queue: QueueClass::Compute,
+}];
+const SURFACE_IDENTITY_PASSES: &[PassTemplate] = &[PassTemplate {
+    depends_on: &[],
+    id: SURFACE_IDENTITY_PASS,
+    accesses: SURFACE_IDENTITY_ACCESSES,
     queue: QueueClass::Compute,
 }];
 
@@ -417,6 +764,15 @@ const DECAL_VARIANTS: &[FeatureVariant] = &[FeatureVariant {
     required_caps: CapabilitySet::EMPTY,
     requires_services_extra: ServiceSet::EMPTY,
     passes: DECAL_PASSES,
+    shader_permutation: None,
+}];
+const SURFACE_VARIANTS: &[FeatureVariant] = &[FeatureVariant {
+    id: SURFACE_VARIANT_ID,
+    rank: 0,
+    min_quality: RenderQualityTier::Low,
+    required_caps: CapabilitySet::EMPTY,
+    requires_services_extra: ServiceSet::EMPTY,
+    passes: SURFACE_IDENTITY_PASSES,
     shader_permutation: None,
 }];
 const LIT_VARIANTS: &[FeatureVariant] = &[FeatureVariant {
@@ -543,20 +899,40 @@ const SERVICE_FEATURES: [FeatureDefinition; 17] = [
     SPRAY_FEEDBACK,
 ];
 
-const BUILTIN_RESOURCE_KEYS: [ResourceKey; 36] = [
+const BUILTIN_RESOURCE_KEYS: [ResourceKey; 64] = [
     WATER_SURFACE_RESOURCE,
     WATER_FOAM_RESOURCE,
+    VOLUME_SCATTERING_RESOURCE,
+    VOLUME_EXTINCTION_RESOURCE,
+    VOLUME_INTEGRATED_SCATTERING_RESOURCE,
+    VOLUME_INTEGRATED_TRANSMITTANCE_RESOURCE,
+    VOLUME_FOG_APPLIED_RESOURCE,
+    VOLUME_SCENE_DEPTH_RESOURCE,
+    VOLUME_SCENE_COLOR_RESOURCE,
     VOLUME_DENSITY_RESOURCE,
     VOLUME_FROXEL_RESOURCE,
     VOLUME_VELOCITY_RESOURCE,
     PARTICLE_STREAM_RESOURCE,
     PARTICLE_SPRAY_RESOURCE,
     PARTICLE_ALIVE_RESOURCE,
+    PARTICLE_SIMULATION_PARTICLES_RESOURCE,
+    PARTICLE_SIMULATION_ACTIVE_INDICES_RESOURCE,
+    PARTICLE_SIMULATION_COMPACT_EVENTS_RESOURCE,
+    PARTICLE_SIMULATION_CONTROL_RESOURCE,
+    PARTICLE_BRIDGE_EVENT_FLAGS_RESOURCE,
+    PARTICLE_RENDER_INPUT_COUNT_RESOURCE,
+    PARTICLE_BRIDGE_VALIDATION_RESOURCE,
+    PARTICLE_RENDER_ROUTE_TABLE_RESOURCE,
+    PARTICLE_BRIDGE_ROUTE_SCRATCH_RESOURCE,
+    PARTICLE_BRIDGE_ACTIVE_ROUTE_INDICES_RESOURCE,
     HAIR_STRAND_RESOURCE,
     HAIR_VISIBILITY_RESOURCE,
     HAIR_DEEP_OPACITY_RESOURCE,
     DECAL_INSTANCE_RESOURCE,
-    DECAL_INDIRECT_RESOURCE,
+    DECAL_MATERIAL_RESOURCE,
+    DECAL_RECEIVER_RESOURCE,
+    DECAL_CLUSTER_RANGE_RESOURCE,
+    DECAL_CLUSTER_INDEX_RESOURCE,
     DECAL_RESOLVE_RESOURCE,
     ResourceKey::of(FeatureId(0x2000), 0),
     ResourceKey::of(FeatureId(0x2001), 0),
@@ -580,6 +956,14 @@ const BUILTIN_RESOURCE_KEYS: [ResourceKey; 36] = [
     RESPONSE_AUXILIARY_RESOURCE,
     WATER_COVERAGE_RESOURCE,
     CUSTOM_RESPONSE_RESOURCE,
+    SURFACE_NORMAL_RESOURCE,
+    SURFACE_ID_RESOURCE,
+    SURFACE_MATERIAL_HEADERS_RESOURCE,
+    SURFACE_EXECUTION_PLANS_RESOURCE,
+    SURFACE_EXECUTION_PROGRAMS_RESOURCE,
+    SURFACE_LIGHTING_MAP_RESOURCE,
+    SURFACE_PARAMS_RESOURCE,
+    SURFACE_IDENTITY_RESOURCE,
 ];
 
 const fn resource_template(key: ResourceKey) -> ResourceTemplate {
@@ -589,6 +973,18 @@ const fn resource_template(key: ResourceKey) -> ResourceTemplate {
         layout: ResourceLayout::Buffer {
             bytes: 256,
             usage: BufferUsages::STORAGE,
+        },
+        alignment: 16,
+    }
+}
+
+const fn decal_buffer_template(key: ResourceKey, bytes: u64) -> ResourceTemplate {
+    ResourceTemplate {
+        key,
+        lifetime: ResourceLifetime::Persistent,
+        layout: ResourceLayout::Buffer {
+            bytes,
+            usage: BufferUsages::STORAGE.union(BufferUsages::COPY_SRC),
         },
         alignment: 16,
     }
@@ -611,21 +1007,101 @@ const fn response_resource_template(
     }
 }
 
+const fn volume_texture_template(
+    key: ResourceKey,
+    dimension: TextureDimension,
+    format: TextureFormat,
+    usage: TextureUsages,
+) -> ResourceTemplate {
+    ResourceTemplate {
+        key,
+        lifetime: ResourceLifetime::Persistent,
+        layout: ResourceLayout::Texture {
+            extent: [1, 1, 1],
+            dimension,
+            format,
+            mip_levels: 1,
+            samples: 1,
+            usage,
+        },
+        alignment: 1,
+    }
+}
+
 pub const BUILTIN_RESOURCE_TEMPLATES: &[ResourceTemplate] = &[
     resource_template(WATER_SURFACE_RESOURCE),
     resource_template(WATER_FOAM_RESOURCE),
+    volume_texture_template(
+        VOLUME_SCATTERING_RESOURCE,
+        TextureDimension::D3,
+        TextureFormat::Rgba16Float,
+        TextureUsages::STORAGE_BINDING.union(TextureUsages::TEXTURE_BINDING),
+    ),
+    volume_texture_template(
+        VOLUME_EXTINCTION_RESOURCE,
+        TextureDimension::D3,
+        TextureFormat::Rgba16Float,
+        TextureUsages::STORAGE_BINDING.union(TextureUsages::TEXTURE_BINDING),
+    ),
+    volume_texture_template(
+        VOLUME_INTEGRATED_SCATTERING_RESOURCE,
+        TextureDimension::D3,
+        TextureFormat::Rgba16Float,
+        TextureUsages::STORAGE_BINDING.union(TextureUsages::TEXTURE_BINDING),
+    ),
+    volume_texture_template(
+        VOLUME_INTEGRATED_TRANSMITTANCE_RESOURCE,
+        TextureDimension::D3,
+        TextureFormat::Rgba16Float,
+        TextureUsages::STORAGE_BINDING.union(TextureUsages::TEXTURE_BINDING),
+    ),
+    volume_texture_template(
+        VOLUME_FOG_APPLIED_RESOURCE,
+        TextureDimension::D2,
+        TextureFormat::Rgba16Float,
+        TextureUsages::STORAGE_BINDING.union(TextureUsages::COPY_SRC),
+    ),
+    volume_texture_template(
+        VOLUME_SCENE_DEPTH_RESOURCE,
+        TextureDimension::D2,
+        TextureFormat::R32Float,
+        TextureUsages::TEXTURE_BINDING
+            .union(TextureUsages::STORAGE_BINDING)
+            .union(TextureUsages::COPY_SRC),
+    ),
+    volume_texture_template(
+        VOLUME_SCENE_COLOR_RESOURCE,
+        TextureDimension::D2,
+        TextureFormat::Rgba16Float,
+        TextureUsages::TEXTURE_BINDING
+            .union(TextureUsages::STORAGE_BINDING)
+            .union(TextureUsages::COPY_DST),
+    ),
     resource_template(VOLUME_DENSITY_RESOURCE),
     resource_template(VOLUME_FROXEL_RESOURCE),
     resource_template(VOLUME_VELOCITY_RESOURCE),
     resource_template(PARTICLE_STREAM_RESOURCE),
     resource_template(PARTICLE_SPRAY_RESOURCE),
     resource_template(PARTICLE_ALIVE_RESOURCE),
+    resource_template(PARTICLE_SIMULATION_PARTICLES_RESOURCE),
+    resource_template(PARTICLE_SIMULATION_ACTIVE_INDICES_RESOURCE),
+    resource_template(PARTICLE_SIMULATION_COMPACT_EVENTS_RESOURCE),
+    resource_template(PARTICLE_SIMULATION_CONTROL_RESOURCE),
+    resource_template(PARTICLE_BRIDGE_EVENT_FLAGS_RESOURCE),
+    resource_template(PARTICLE_RENDER_INPUT_COUNT_RESOURCE),
+    resource_template(PARTICLE_BRIDGE_VALIDATION_RESOURCE),
+    resource_template(PARTICLE_RENDER_ROUTE_TABLE_RESOURCE),
+    resource_template(PARTICLE_BRIDGE_ROUTE_SCRATCH_RESOURCE),
+    resource_template(PARTICLE_BRIDGE_ACTIVE_ROUTE_INDICES_RESOURCE),
     resource_template(HAIR_STRAND_RESOURCE),
     resource_template(HAIR_VISIBILITY_RESOURCE),
     resource_template(HAIR_DEEP_OPACITY_RESOURCE),
-    resource_template(DECAL_INSTANCE_RESOURCE),
-    resource_template(DECAL_INDIRECT_RESOURCE),
-    resource_template(DECAL_RESOLVE_RESOURCE),
+    decal_buffer_template(DECAL_INSTANCE_RESOURCE, 96),
+    decal_buffer_template(DECAL_MATERIAL_RESOURCE, 48),
+    decal_buffer_template(DECAL_RECEIVER_RESOURCE, 64),
+    decal_buffer_template(DECAL_CLUSTER_RANGE_RESOURCE, 16),
+    decal_buffer_template(DECAL_CLUSTER_INDEX_RESOURCE, 4),
+    decal_buffer_template(DECAL_RESOLVE_RESOURCE, 48),
     resource_template(ResourceKey::of(FeatureId(0x2000), 0)),
     resource_template(ResourceKey::of(FeatureId(0x2001), 0)),
     resource_template(ResourceKey::of(FeatureId(0x2002), 0)),
@@ -653,6 +1129,95 @@ pub const BUILTIN_RESOURCE_TEMPLATES: &[ResourceTemplate] = &[
         64,
         16,
     ),
+    // These are catalog defaults only. Native frame owners override all eight
+    // layouts with the exact target dimensions and published buffer ranges
+    // through `compile_active_with_template_overrides`.
+    ResourceTemplate {
+        key: SURFACE_NORMAL_RESOURCE,
+        lifetime: ResourceLifetime::Persistent,
+        layout: ResourceLayout::Texture {
+            extent: [1, 1, 1],
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba16Float,
+            mip_levels: 1,
+            samples: 1,
+            usage: TextureUsages::TEXTURE_BINDING,
+        },
+        alignment: 1,
+    },
+    ResourceTemplate {
+        key: SURFACE_ID_RESOURCE,
+        lifetime: ResourceLifetime::Persistent,
+        layout: ResourceLayout::Texture {
+            extent: [1, 1, 1],
+            dimension: TextureDimension::D2,
+            format: TextureFormat::R32Uint,
+            mip_levels: 1,
+            samples: 1,
+            usage: TextureUsages::TEXTURE_BINDING,
+        },
+        alignment: 1,
+    },
+    resource_template(SURFACE_MATERIAL_HEADERS_RESOURCE),
+    resource_template(SURFACE_EXECUTION_PLANS_RESOURCE),
+    resource_template(SURFACE_EXECUTION_PROGRAMS_RESOURCE),
+    resource_template(SURFACE_LIGHTING_MAP_RESOURCE),
+    ResourceTemplate {
+        key: SURFACE_PARAMS_RESOURCE,
+        lifetime: ResourceLifetime::Persistent,
+        layout: ResourceLayout::Buffer {
+            bytes: 16,
+            usage: BufferUsages::UNIFORM,
+        },
+        alignment: 16,
+    },
+    resource_template(SURFACE_IDENTITY_RESOURCE),
+];
+
+// Service-owned spray storage stays shared. Domain-owned resources that have
+// independent physical storage per authored object/renderer are expanded into
+// per-object payload addresses here.
+const BUILTIN_OBJECT_ACCESSES: &[ObjectResourceAccess] = &[
+    ObjectResourceAccess {
+        pass: PassKey(0x5000),
+        ordinal: 0,
+        domain: Some(RenderDomain::Surface),
+        role: PayloadRole(0x510),
+        layout: ObjectLayoutPolicy::Sized {
+            max_bytes: u64::MAX,
+        },
+    },
+    ObjectResourceAccess {
+        pass: PassKey(0x5000),
+        ordinal: 1,
+        domain: Some(RenderDomain::Surface),
+        role: PayloadRole(0x511),
+        layout: ObjectLayoutPolicy::Sized {
+            max_bytes: u64::MAX,
+        },
+    },
+    ObjectResourceAccess {
+        pass: PassKey(0x6020),
+        ordinal: 0,
+        domain: Some(RenderDomain::Surface),
+        role: PayloadRole(0x510),
+        layout: ObjectLayoutPolicy::Sized {
+            max_bytes: u64::MAX,
+        },
+    },
+    // Particle renderer consumers own independent visible-index buffers. The
+    // bridge stream and its input-count/route metadata remain shared, while
+    // the renderer's alive-index output is addressed by stable object/history
+    // identity.
+    ObjectResourceAccess {
+        pass: PARTICLE_RENDER_PASS,
+        ordinal: 3,
+        domain: Some(RenderDomain::Particle),
+        role: PayloadRole(0x104),
+        layout: ObjectLayoutPolicy::Sized {
+            max_bytes: u64::MAX,
+        },
+    },
 ];
 
 const WATER_FEATURE: FeatureDefinition = FeatureDefinition::subsystem(
@@ -685,6 +1250,12 @@ const DECAL_FEATURE: FeatureDefinition = FeatureDefinition::subsystem(
     ServiceSet::EMPTY,
     DECAL_VARIANTS,
 );
+const SURFACE_FEATURE: FeatureDefinition = FeatureDefinition::subsystem(
+    SURFACE_FEATURE_ID,
+    RenderDomain::Surface,
+    ServiceSet::EMPTY,
+    SURFACE_VARIANTS,
+);
 const LIT_FEATURE: FeatureDefinition =
     FeatureDefinition::response(LIT_FEATURE_ID, ServiceSet::EMPTY, LIT_VARIANTS);
 const NPR_FEATURE: FeatureDefinition =
@@ -692,12 +1263,13 @@ const NPR_FEATURE: FeatureDefinition =
 const CUSTOM_FEATURE: FeatureDefinition =
     FeatureDefinition::response(CUSTOM_FEATURE_ID, ServiceSet::EMPTY, CUSTOM_VARIANTS);
 
-static BUILTIN_FEATURES: [FeatureDefinition; 25] = [
+static BUILTIN_FEATURES: [FeatureDefinition; 26] = [
     WATER_FEATURE,
     VOLUME_FEATURE,
     PARTICLE_FEATURE,
     HAIR_FEATURE,
     DECAL_FEATURE,
+    SURFACE_FEATURE,
     LIT_FEATURE,
     NPR_FEATURE,
     CUSTOM_FEATURE,
@@ -720,18 +1292,23 @@ static BUILTIN_FEATURES: [FeatureDefinition; 25] = [
     SERVICE_FEATURES[16],
 ];
 
-static BUILTIN_SUBSYSTEM_ROOTS: [FeatureId; 5] = [
+static BUILTIN_SUBSYSTEM_ROOTS: [FeatureId; 6] = [
     WATER_FEATURE_ID,
     VOLUME_FEATURE_ID,
     PARTICLE_FEATURE_ID,
     HAIR_FEATURE_ID,
     DECAL_FEATURE_ID,
+    SURFACE_FEATURE_ID,
 ];
 static BUILTIN_RESPONSE_ROOTS: [FeatureId; 3] = [LIT_FEATURE_ID, NPR_FEATURE_ID, CUSTOM_FEATURE_ID];
 
 /// Build the immutable semantic catalog used by renderer/device setup.
 pub fn builtin_catalog() -> Result<FeatureCatalog, super::CatalogError> {
-    FeatureCatalog::new(&BUILTIN_FEATURES, &BUILTIN_RESOURCE_KEYS)
+    FeatureCatalog::new_with_object_accesses(
+        &BUILTIN_FEATURES,
+        &BUILTIN_RESOURCE_KEYS,
+        BUILTIN_OBJECT_ACCESSES,
+    )
 }
 
 pub const fn builtin_resource_templates() -> &'static [ResourceTemplate] {
@@ -789,6 +1366,209 @@ mod tests {
     }
 
     #[test]
+    fn volumetrics_catalog_matches_the_production_texture_and_pass_contract() {
+        let catalog = builtin_catalog().expect("built-in catalog is valid");
+        let volume = catalog
+            .feature(VOLUME_FEATURE_ID)
+            .expect("volume subsystem is catalogued");
+        let variant = volume.variants[0];
+        assert_eq!(
+            variant
+                .passes
+                .iter()
+                .map(|pass| pass.id)
+                .collect::<Vec<_>>(),
+            [
+                VOLUME_SCATTER_PASS,
+                VOLUME_INTEGRATE_PASS,
+                VOLUME_APPLY_PASS,
+                VOLUME_COPY_BACK_PASS,
+            ]
+        );
+        assert_eq!(variant.passes[1].depends_on, &[VOLUME_SCATTER_PASS]);
+        assert_eq!(variant.passes[2].depends_on, &[VOLUME_INTEGRATE_PASS]);
+        assert_eq!(variant.passes[3].depends_on, &[VOLUME_APPLY_PASS]);
+
+        let accesses = |pass: PassKey| {
+            variant
+                .passes
+                .iter()
+                .find(|candidate| candidate.id == pass)
+                .expect("volume pass exists")
+                .accesses
+        };
+        assert!(accesses(VOLUME_INTEGRATE_PASS).iter().any(|access| {
+            access.key == VOLUME_SCATTERING_RESOURCE
+                && access.input == ResourceInput::ProducedBy(VOLUME_SCATTER_PASS)
+                && access.access == AccessKind::SampledRead
+        }));
+        assert!(accesses(VOLUME_APPLY_PASS).iter().any(|access| {
+            access.key == VOLUME_INTEGRATED_SCATTERING_RESOURCE
+                && access.input == ResourceInput::ProducedBy(VOLUME_INTEGRATE_PASS)
+        }));
+        assert!(accesses(VOLUME_COPY_BACK_PASS).iter().any(|access| {
+            access.key == VOLUME_FOG_APPLIED_RESOURCE
+                && access.access == AccessKind::TransferRead
+                && access.input == ResourceInput::ProducedBy(VOLUME_APPLY_PASS)
+        }));
+        assert!(accesses(VOLUME_COPY_BACK_PASS).iter().any(|access| {
+            access.key == VOLUME_SCENE_COLOR_RESOURCE
+                && access.access == AccessKind::TransferWrite
+                && access.input == ResourceInput::Initial
+        }));
+
+        let layout = |key| {
+            builtin_resource_templates()
+                .iter()
+                .find(|template| template.key == key)
+                .expect("volume resource template exists")
+                .layout
+        };
+        for key in [
+            VOLUME_SCATTERING_RESOURCE,
+            VOLUME_EXTINCTION_RESOURCE,
+            VOLUME_INTEGRATED_SCATTERING_RESOURCE,
+            VOLUME_INTEGRATED_TRANSMITTANCE_RESOURCE,
+        ] {
+            assert!(matches!(
+                layout(key),
+                ResourceLayout::Texture {
+                    dimension: TextureDimension::D3,
+                    format: TextureFormat::Rgba16Float,
+                    mip_levels: 1,
+                    samples: 1,
+                    usage,
+                    ..
+                } if usage.contains(TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING)
+            ));
+        }
+        assert!(matches!(
+            layout(VOLUME_SCENE_DEPTH_RESOURCE),
+            ResourceLayout::Texture {
+                dimension: TextureDimension::D2,
+                format: TextureFormat::R32Float,
+                usage,
+                ..
+            } if usage.contains(TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE_BINDING | TextureUsages::COPY_SRC)
+        ));
+        assert!(matches!(
+            layout(VOLUME_SCENE_COLOR_RESOURCE),
+            ResourceLayout::Texture {
+                dimension: TextureDimension::D2,
+                format: TextureFormat::Rgba16Float,
+                usage,
+                ..
+            } if usage.contains(TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE_BINDING | TextureUsages::COPY_DST)
+        ));
+    }
+
+    #[test]
+    fn hair_catalog_tracks_strand_input_visibility_and_deep_opacity_dependencies() {
+        let catalog = builtin_catalog().expect("built-in catalog is valid");
+        let feature = catalog
+            .feature(HAIR_FEATURE_ID)
+            .expect("hair is catalogued");
+        let variant = feature.variants[0];
+        assert_eq!(variant.passes.len(), 2);
+        let visibility = variant.passes[0];
+        let deep_opacity = variant.passes[1];
+        assert_eq!(visibility.id, HAIR_VISIBILITY_PASS);
+        assert_eq!(visibility.depends_on, &[]);
+        assert_eq!(deep_opacity.id, HAIR_DEEP_OPACITY_PASS);
+        assert_eq!(deep_opacity.depends_on, &[HAIR_VISIBILITY_PASS]);
+        assert!(visibility.accesses.iter().any(|access| {
+            access.key == HAIR_STRAND_RESOURCE && access.access == AccessKind::StorageRead
+        }));
+        assert!(visibility.accesses.iter().any(|access| {
+            access.key == HAIR_VISIBILITY_RESOURCE && access.access == AccessKind::StorageWrite
+        }));
+        assert!(deep_opacity.accesses.iter().any(|access| {
+            access.key == HAIR_VISIBILITY_RESOURCE && access.access == AccessKind::StorageRead
+        }));
+        assert!(deep_opacity.accesses.iter().any(|access| {
+            access.key == HAIR_STRAND_RESOURCE && access.access == AccessKind::StorageRead
+        }));
+        assert!(deep_opacity.accesses.iter().any(|access| {
+            access.key == HAIR_DEEP_OPACITY_RESOURCE && access.access == AccessKind::StorageWrite
+        }));
+        assert!(variant.passes.iter().all(|pass| {
+            pass.accesses.iter().all(|access| {
+                !(access.key == HAIR_STRAND_RESOURCE && access.access == AccessKind::StorageWrite)
+            })
+        }));
+    }
+
+    #[test]
+    fn particle_catalog_models_bridge_then_renderer_resource_flow() {
+        let catalog = builtin_catalog().expect("built-in catalog is valid");
+        let feature = catalog
+            .feature(PARTICLE_FEATURE_ID)
+            .expect("particle subsystem is catalogued");
+        let variant = feature.variants[0];
+        assert_eq!(variant.passes.len(), 2);
+        let bridge = variant.passes[0];
+        let renderer = variant.passes[1];
+        assert_eq!(bridge.id, PARTICLE_BRIDGE_PASS);
+        assert_eq!(bridge.depends_on, &[]);
+        assert_eq!(renderer.id, PARTICLE_RENDER_PASS);
+        assert_eq!(renderer.depends_on, &[PARTICLE_BRIDGE_PASS]);
+        assert!(bridge.accesses.iter().any(|access| {
+            access.key == PARTICLE_STREAM_RESOURCE
+                && access.input == ResourceInput::Automatic
+                && access.access == AccessKind::StorageWrite
+        }));
+        for key in [
+            PARTICLE_SIMULATION_PARTICLES_RESOURCE,
+            PARTICLE_SIMULATION_ACTIVE_INDICES_RESOURCE,
+            PARTICLE_SIMULATION_COMPACT_EVENTS_RESOURCE,
+            PARTICLE_SIMULATION_CONTROL_RESOURCE,
+        ] {
+            assert!(bridge.accesses.iter().any(|access| {
+                access.key == key
+                    && access.input == ResourceInput::Initial
+                    && access.access == AccessKind::StorageRead
+            }));
+        }
+        for key in [
+            PARTICLE_BRIDGE_EVENT_FLAGS_RESOURCE,
+            PARTICLE_RENDER_INPUT_COUNT_RESOURCE,
+            PARTICLE_BRIDGE_VALIDATION_RESOURCE,
+            PARTICLE_RENDER_ROUTE_TABLE_RESOURCE,
+            PARTICLE_BRIDGE_ROUTE_SCRATCH_RESOURCE,
+            PARTICLE_BRIDGE_ACTIVE_ROUTE_INDICES_RESOURCE,
+        ] {
+            assert!(bridge
+                .accesses
+                .iter()
+                .any(|access| { access.key == key && access.access == AccessKind::StorageWrite }));
+        }
+        assert!(renderer.accesses.iter().any(|access| {
+            access.key == PARTICLE_STREAM_RESOURCE
+                && access.input == ResourceInput::ProducedBy(PARTICLE_BRIDGE_PASS)
+                && access.access == AccessKind::StorageRead
+        }));
+        for key in [
+            PARTICLE_RENDER_INPUT_COUNT_RESOURCE,
+            PARTICLE_RENDER_ROUTE_TABLE_RESOURCE,
+        ] {
+            assert!(renderer.accesses.iter().any(|access| {
+                access.key == key
+                    && access.input == ResourceInput::ProducedBy(PARTICLE_BRIDGE_PASS)
+                    && access.access == AccessKind::StorageRead
+            }));
+        }
+        assert!(renderer.accesses.iter().any(|access| {
+            access.key == PARTICLE_ALIVE_RESOURCE
+                && access.input == ResourceInput::Automatic
+                && access.access == AccessKind::StorageWrite
+        }));
+        assert!(!bridge
+            .accesses
+            .iter()
+            .any(|access| access.key == PARTICLE_ALIVE_RESOURCE));
+    }
+
+    #[test]
     fn builtins_freeze_every_subsystem_and_response_root() {
         let catalog = builtin_catalog().expect("built-in catalog is valid");
         let roots = builtin_roots(&catalog).expect("all built-in roots are valid");
@@ -798,6 +1578,7 @@ mod tests {
             PARTICLE_FEATURE_ID,
             HAIR_FEATURE_ID,
             DECAL_FEATURE_ID,
+            SURFACE_FEATURE_ID,
             LIT_FEATURE_ID,
             NPR_FEATURE_ID,
             CUSTOM_FEATURE_ID,

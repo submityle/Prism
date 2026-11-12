@@ -242,7 +242,6 @@ impl std::error::Error for RenderFabricFrameError {}
 mod tests {
     use super::*;
     use crate::{
-        frame_graph::ResourceLifetime,
         gpu_scene::SceneHandle,
         motion::MotionSource,
         render_fabric::{
@@ -250,11 +249,13 @@ mod tests {
             ValuePayload,
         },
     };
+    use prism_render_graph::frame_graph::ResourceLifetime;
 
-    fn objects(index: u32, generation: u32) -> [RenderObjectId; 5] {
+    fn objects(index: u32, generation: u32) -> [RenderObjectId; 6] {
         let handle = DomainObjectHandle::new(index, generation);
         [
             RenderObjectId::Surface(SceneHandle::new(index, generation)),
+            RenderObjectId::Water(handle),
             RenderObjectId::Particle(handle),
             RenderObjectId::Volume(handle),
             RenderObjectId::Hair(handle),
@@ -374,9 +375,9 @@ mod tests {
     #[test]
     fn domain_refresh_preserves_other_domains_clock_and_allocation() {
         let surface = value_item(objects(2, 1)[0], 0, 0);
-        let particle = value_item(objects(2, 1)[1], 0, 0);
-        let decal = value_item(objects(2, 1)[4], 0, 0);
-        let replacement = resource_item(objects(1, 2)[1], 64, 16);
+        let particle = value_item(objects(2, 1)[2], 0, 0);
+        let decal = value_item(objects(2, 1)[5], 0, 0);
+        let replacement = resource_item(objects(1, 2)[2], 64, 16);
         let mut frame = RenderFabricFrame::default();
         frame.replace(11, [surface, particle, decal]).unwrap();
         let allocation = frame.items.as_ptr();
@@ -402,7 +403,7 @@ mod tests {
     #[test]
     fn rejected_domain_refresh_clears_all_domains_and_allows_recovery() {
         let surface = value_item(objects(2, 1)[0], 0, 0);
-        let particle = value_item(objects(2, 1)[1], 0, 0);
+        let particle = value_item(objects(2, 1)[2], 0, 0);
         let mut frame = RenderFabricFrame::default();
         for (items, error) in [
             (

@@ -5,11 +5,11 @@ use core::num::NonZeroU32;
 use super::selection::{FeatureSelection, SelectedFeature};
 
 pub use crate::backend::capability::CapabilitySet;
-pub use crate::frame_graph::{AccessKind, QueueClass};
 use crate::shader_package::{
     ArtifactDigest, ModuleIdentity, PermutationError, PermutationIndex, PermutationKey,
     PermutationSpace, PipelineStateHash, PsoCacheKey, ShaderPackageId,
 };
+pub use prism_render_graph::frame_graph::{AccessKind, QueueClass};
 
 /// Author-supplied, persistent semantic identity; never assigned by a catalog.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
