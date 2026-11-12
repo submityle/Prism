@@ -24,23 +24,21 @@ use prism_render_app::visibility::{
     sync_scene, GeometryHandle, LocalBounds, PrismCamera, PrismFrustum, PrismRenderScene,
     PrismRenderable, PrismVisibilityPlugin,
 };
-use prism_render_app::{RenderMaterials, RenderRuntimeResource, SceneRegistry, VisibilityWorkList};
+use prism_render_app::{RenderRuntimeResource, SceneRegistry};
 use prism_render_architecture::geometry::{
     GeometryLodRecord, GeometryPrimitiveKind, GeometryRecord,
 };
 use prism_render_architecture::gpu_scene::SceneHandle;
 use prism_render_driver as rhi;
 use prism_render_driver::{
-    Adapter, BufferReadbackRange, BufferUsages, CommandEncoder, CopyCommand, DeviceDescriptor,
-    Features, FrameSync, Instance, Pass, RenderCommand, RenderDevice, RenderQueue,
-    RequestAdapterOptions, TimestampQuerySetDescriptor, TimestampWrites,
+    Adapter, BufferReadbackRange, BufferUsages, CommandEncoder, ComputeCommand,
+    ComputePipelineDescriptor, CopyCommand, DeviceDescriptor, Features, FrameSync, Instance, Pass,
+    RenderCommand, RenderDevice, RenderQueue, RequestAdapterOptions, ShaderModuleDescriptor,
+    TimestampQuerySetDescriptor, TimestampWrites,
 };
 use prism_render_driver_wgpu::{AdapterEvidence, WgpuAdapter, WgpuDevice, WgpuInstance, WgpuQueue};
 use prism_render_material::{fallback_material_record, BuiltinProgram, ShadingPlan};
-use prism_render_visibility::{
-    GeometryLod, GeometryLodChain, GpuRenderWorkItem, RenderPassMask, VisibilityStageMask,
-    WorkSortKey,
-};
+use prism_render_visibility::{GeometryLod, GeometryLodChain};
 use prism_transform::GlobalTransform;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
@@ -93,14 +91,26 @@ struct MaterialPerfQueue {
     device: WgpuDevice,
     queue: WgpuQueue,
     captures: Arc<Mutex<QueueCaptureState>>,
+    timestamp_pipeline: Arc<rhi::ComputePipelineId>,
 }
 
 impl MaterialPerfQueue {
     fn new(device: WgpuDevice, queue: WgpuQueue) -> Self {
+        let module = device.create_shader_module(&ShaderModuleDescriptor::wgsl(
+            "@compute @workgroup_size(1)\nfn main() {}",
+        ));
+        let timestamp_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("prism-material-perf-timestamp-pipeline".into()),
+            layout: None,
+            module,
+            entry_point: "main".into(),
+        });
+        device.destroy_shader_module(module);
         Self {
             device,
             queue,
             captures: Arc::new(Mutex::new(QueueCaptureState::default())),
+            timestamp_pipeline: Arc::new(timestamp_pipeline),
         }
     }
 
@@ -131,6 +141,7 @@ impl MaterialPerfQueue {
     }
 
     fn timestamp_boundary(
+        &self,
         query_set: rhi::TimestampQuerySetId,
         index: u32,
         label: &'static str,
@@ -144,7 +155,10 @@ impl MaterialPerfQueue {
                 beginning_of_pass_write_index: beginning.then_some(index),
                 end_of_pass_write_index: (!beginning).then_some(index),
             },
-            Vec::new(),
+            vec![
+                ComputeCommand::SetPipeline(*self.timestamp_pipeline),
+                ComputeCommand::Dispatch { x: 1, y: 1, z: 1 },
+            ],
         );
         encoder.finish()
     }
@@ -165,6 +179,66 @@ impl MaterialPerfQueue {
             }],
         );
         encoder.finish()
+    }
+
+    fn instrumented_submission(
+        &self,
+        command_buffers: &[rhi::CommandBuffer],
+    ) -> Option<(
+        rhi::TimestampQuerySetId,
+        rhi::BufferId,
+        Vec<rhi::CommandBuffer>,
+    )> {
+        if !self.submit_instrumented(command_buffers) {
+            return None;
+        }
+
+        let query_set = self
+            .device
+            .create_timestamp_query_set(&TimestampQuerySetDescriptor::new(2));
+        let resolve_buffer = self.device.create_buffer(&rhi::BufferDescriptor {
+            label: Some("prism-material-perf-timestamp-resolve".into()),
+            size: 16,
+            usage: BufferUsages::QUERY_RESOLVE.union(BufferUsages::COPY_SRC),
+            mapped_at_creation: false,
+        });
+        let mut instrumented = Vec::with_capacity(command_buffers.len() + 3);
+        instrumented.push(Self::timestamp_boundary(
+            self,
+            query_set,
+            0,
+            "prism-material-perf-begin",
+            true,
+        ));
+        instrumented.extend_from_slice(command_buffers);
+        instrumented.push(Self::timestamp_boundary(
+            self,
+            query_set,
+            1,
+            "prism-material-perf-end",
+            false,
+        ));
+        instrumented.push(Self::resolve_timestamp(query_set, resolve_buffer));
+        Some((query_set, resolve_buffer, instrumented))
+    }
+
+    fn record_frame(&self, query_set: rhi::TimestampQuerySetId, resolve_buffer: rhi::BufferId) {
+        let uploads = std::mem::take(
+            &mut self
+                .captures
+                .lock()
+                .expect("material performance capture lock")
+                .uploads,
+        );
+        self.captures
+            .lock()
+            .expect("material performance capture lock")
+            .frames
+            .push(PendingGpuFrame {
+                query_set,
+                resolve_buffer,
+                uploads,
+            });
     }
 
     fn drain_samples(&self, material_buffers: &[rhi::BufferId]) -> Result<Vec<Sample>, String> {
@@ -258,6 +332,15 @@ impl MaterialPerfQueue {
     }
 }
 
+impl Drop for MaterialPerfQueue {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.timestamp_pipeline) == 1 {
+            self.device
+                .destroy_compute_pipeline(*self.timestamp_pipeline);
+        }
+    }
+}
+
 impl RenderQueue for MaterialPerfQueue {
     fn write_buffer(&self, buffer: rhi::BufferId, offset: u64, data: &[u8]) {
         self.captures
@@ -281,7 +364,14 @@ impl RenderQueue for MaterialPerfQueue {
     }
 
     fn submit(&self, command_buffers: &[rhi::CommandBuffer]) {
-        self.queue.submit(command_buffers);
+        if let Some((query_set, resolve_buffer, instrumented)) =
+            self.instrumented_submission(command_buffers)
+        {
+            self.queue.submit(&instrumented);
+            self.record_frame(query_set, resolve_buffer);
+        } else {
+            self.queue.submit(command_buffers);
+        }
     }
 
     fn timestamp_period_ns(&self) -> Option<f32> {
@@ -299,52 +389,14 @@ impl RenderQueue for MaterialPerfQueue {
 
 impl FrameSync for MaterialPerfQueue {
     fn submit_tracked(&self, command_buffers: &[rhi::CommandBuffer]) -> rhi::CompletionToken {
-        if !self.submit_instrumented(command_buffers) {
+        let Some((query_set, resolve_buffer, instrumented)) =
+            self.instrumented_submission(command_buffers)
+        else {
             return Box::new(self.queue.submit_tracked(command_buffers));
-        }
-
-        let query_set = self
-            .device
-            .create_timestamp_query_set(&TimestampQuerySetDescriptor::new(2));
-        let resolve_buffer = self.device.create_buffer(&rhi::BufferDescriptor {
-            label: Some("prism-material-perf-timestamp-resolve".into()),
-            size: 16,
-            usage: BufferUsages::QUERY_RESOLVE.union(BufferUsages::COPY_SRC),
-            mapped_at_creation: false,
-        });
-        let mut instrumented = Vec::with_capacity(command_buffers.len() + 3);
-        instrumented.push(Self::timestamp_boundary(
-            query_set,
-            0,
-            "prism-material-perf-begin",
-            true,
-        ));
-        instrumented.extend_from_slice(command_buffers);
-        instrumented.push(Self::timestamp_boundary(
-            query_set,
-            1,
-            "prism-material-perf-end",
-            false,
-        ));
-        instrumented.push(Self::resolve_timestamp(query_set, resolve_buffer));
+        };
 
         let token = Box::new(self.queue.submit_tracked(&instrumented));
-        let uploads = std::mem::take(
-            &mut self
-                .captures
-                .lock()
-                .expect("material performance capture lock")
-                .uploads,
-        );
-        self.captures
-            .lock()
-            .expect("material performance capture lock")
-            .frames
-            .push(PendingGpuFrame {
-                query_set,
-                resolve_buffer,
-                uploads,
-            });
+        self.record_frame(query_set, resolve_buffer);
         token
     }
 
@@ -795,7 +847,18 @@ fn broad_frustum() -> PrismFrustum {
     ]))
 }
 
+fn production_material_record(revision: u64, phase: u64) -> prism_render_material::MaterialRecord {
+    let mut record = fallback_material_record(GeometryHandle::new(2, 1), revision);
+    record.response_plan = ShadingPlan::single_builtin(BuiltinProgram::Unlit);
+    let authored = if phase % 2 == 0 { 1.0 } else { 0.999 };
+    record.surface.base_color = [authored; 4];
+    record
+}
+
 fn production_scene_fixture(app: &mut App) {
+    if app.world().get_resource::<PrismRenderScene>().is_none() {
+        app.add_plugins(PrismVisibilityPlugin);
+    }
     let mesh = Mesh::new(rhi::PrimitiveTopology::TriangleList)
         .with_attribute(
             MeshVertexAttribute::new("Vertex_Position", rhi::VertexFormat::Float32x3, 0),
@@ -822,18 +885,12 @@ fn production_scene_fixture(app: &mut App) {
     let mesh_id: AssetId<Mesh> = meshes.insert(mesh).id();
     app.world_mut().insert_resource(meshes);
 
+    // Keep this fixture on the same production seam as the native acceptance
+    // tests: the main-world scene is authoritative and PrepareAssets performs
+    // the render-world material reconcile.
     let geometry = GeometryHandle::new(1, 1);
-    let material = app
-        .sub_app_mut(RenderApp)
-        .expect("native render sub-app")
-        .world
-        .resource_mut::<RenderMaterials>()
-        .registry_mut()
-        .allocate()
-        .expect("the native material fixture allocates a stable handle");
-    let mut material_record = fallback_material_record(material, 1);
-    material_record.response_plan = ShadingPlan::single_builtin(BuiltinProgram::Unlit);
-    material_record.surface.base_color = [1.0; 4];
+    let material = GeometryHandle::new(2, 1);
+    let material_record = production_material_record(2, 0);
 
     {
         let scene = app.world_mut().resource_mut::<PrismRenderScene>();
@@ -849,7 +906,7 @@ fn production_scene_fixture(app: &mut App) {
         scene.insert_material(material_record.clone());
     }
 
-    let camera = app.world_mut().spawn((
+    app.world_mut().spawn((
         PrismCamera::new(Mat4::IDENTITY, [0, 0, FRAME_WIDTH, FRAME_HEIGHT]),
         broad_frustum(),
         GlobalTransform::IDENTITY,
@@ -897,30 +954,7 @@ fn production_scene_fixture(app: &mut App) {
     render
         .world
         .resource_mut::<SceneRegistry>()
-        .insert_material(material_record.clone());
-    render
-        .world
-        .resource_mut::<SceneRegistry>()
         .bind_geometry_mesh(geometry, mesh_id);
-    render
-        .world
-        .resource_mut::<RenderMaterials>()
-        .publish(material_record)
-        .expect("the native material publishes into the canonical registry");
-    render
-        .world
-        .resource_mut::<VisibilityWorkList>()
-        .set(vec![GpuRenderWorkItem {
-            scene: scene_handle,
-            geometry,
-            material,
-            lod_or_cluster: 0,
-            pass_mask: RenderPassMask::OPAQUE,
-            visibility_stages: VisibilityStageMask::EARLY,
-            sort_key: WorkSortKey::new(0, 0, 0, 0, 3),
-        }]);
-
-    let _ = camera;
 }
 
 fn current_commit() -> String {
@@ -1025,7 +1059,10 @@ fn write_real_production_native_material_artifact() {
         commit, expected_commit,
         "the sampler refuses to write an artifact for a different HEAD"
     );
-    let warmup = env_u64("PRISM_MATERIAL_PERF_WARMUP", 5);
+    // The setup frame already warms material publication and pipeline creation;
+    // keep one additional warmup frame so the fixed 32-target native fixture
+    // leaves room for the required 30 retained samples.
+    let warmup = env_u64("PRISM_MATERIAL_PERF_WARMUP", 1);
     let sample_count = env_u64("PRISM_MATERIAL_PERF_SAMPLES", 30);
     assert!(warmup > 0, "warmup must be positive");
     assert!(sample_count >= 30, "samples must be at least 30");
@@ -1041,8 +1078,26 @@ fn write_real_production_native_material_artifact() {
         .with_material_parameter_words(256)
         .with_material_texture_rows(16);
     app.add_plugins(PrismRenderPlugin::with_config(instance, config));
-    app.add_plugins(PrismVisibilityPlugin);
     production_scene_fixture(&mut app);
+
+    // The first frame publishes the extracted material/execution snapshot. It
+    // is a setup frame, not a timed sample; later frames must exercise the
+    // same production draw after that publication completes.
+    app.update();
+    {
+        let render = app.get_sub_app(RenderApp).expect("native render sub-app");
+        let runtime = render
+            .world
+            .resource::<RenderRuntimeResource<MaterialPerfInstance>>();
+        assert!(
+            runtime.runtime().wait_idle(),
+            "material setup frame completes"
+        );
+    }
+    app.sub_app_mut(RenderApp)
+        .expect("native render sub-app")
+        .world
+        .insert_resource(prism_render_app::prelude::RenderFrameStats::default());
 
     let render = app.get_sub_app(RenderApp).expect("native render sub-app");
     let runtime = render
@@ -1055,32 +1110,77 @@ fn write_real_production_native_material_artifact() {
         "the production sampler selected non-GPU hardware"
     );
     let queue = runtime.runtime().queue().clone();
-    let mut cpu_samples = Vec::with_capacity((warmup + sample_count) as usize);
-    for frame_index in 0..(warmup + sample_count) {
+    let target_samples = warmup + sample_count;
+    let max_attempts = target_samples.saturating_mul(4).max(target_samples + 1);
+    let mut cpu_samples = Vec::with_capacity(target_samples as usize);
+    let mut captured_samples = 0u64;
+    let mut attempts = 0u64;
+    while captured_samples < target_samples {
+        attempts += 1;
+        assert!(
+            attempts <= max_attempts,
+            "production sampler could not collect {target_samples} submitted draw frames within {max_attempts} attempts"
+        );
         let captures_before = queue.capture_count();
+        app.world_mut()
+            .resource_mut::<PrismRenderScene>()
+            .insert_material(production_material_record(3 + attempts, attempts));
+        sync_scene(app.world_mut());
+        let (draws_queued_before, draws_recorded_before, frames_failed_before) = {
+            let stats_before = app
+                .get_sub_app(RenderApp)
+                .expect("native render sub-app")
+                .world
+                .resource::<prism_render_app::prelude::RenderFrameStats>();
+            (
+                stats_before.draws_queued,
+                stats_before.draws_recorded,
+                stats_before.frames_failed,
+            )
+        };
         let cpu_started = Instant::now();
         app.update();
         let cpu_wall_ns = u64::try_from(cpu_started.elapsed().as_nanos())
             .expect("CPU wall duration must fit in u64 nanoseconds");
-        assert_eq!(
-            queue.capture_count(),
-            captures_before + 1,
-            "production frame {frame_index} did not submit exactly one Native draw workload"
-        );
+        {
+            let render = app.get_sub_app(RenderApp).expect("native render sub-app");
+            let runtime = render
+                .world
+                .resource::<RenderRuntimeResource<MaterialPerfInstance>>();
+            assert!(
+                runtime.runtime().wait_idle(),
+                "production runtime did not complete while collecting a material sample"
+            );
+        }
         let stats = app
             .get_sub_app(RenderApp)
             .expect("native render sub-app")
             .world
             .resource::<prism_render_app::prelude::RenderFrameStats>();
+        let capture_delta = queue.capture_count() - captures_before;
+        if capture_delta == 0 {
+            assert_eq!(
+                stats.frames_failed, frames_failed_before,
+                "production frame failed while waiting for a submitted draw"
+            );
+            continue;
+        }
         assert_eq!(
-            stats.draws_queued, 1,
-            "the fixed content did not queue one draw"
+            capture_delta, 1,
+            "one retained sample must contain one Native draw workload"
         );
         assert_eq!(
-            stats.draws_recorded, 1,
-            "the fixed content did not record one draw"
+            stats.draws_queued - draws_queued_before,
+            1,
+            "the retained production frame did not queue one draw"
+        );
+        assert_eq!(
+            stats.draws_recorded - draws_recorded_before,
+            1,
+            "the retained production frame did not record one draw"
         );
         cpu_samples.push(cpu_wall_ns);
+        captured_samples += 1;
     }
 
     let material_buffers = production_material_buffer_ids(&app);

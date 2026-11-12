@@ -9,7 +9,7 @@
 > 核心命题：**没有全局硬顶，不做运行时塌缩，也不做 per-pixel 预算裁剪。模型开放可扩展，每材质按声明静态特化成它确切需要的瓣集与特征——"界"是每材质编译期事实，不是全局天花板。分层在烘焙期解析成同参数化纹理空间混合（层数天然不限）；距离/性能靠纹理预过滤 + 高光抗锯齿 + 静态置换 + 采样缩放，全程无损、确定、跨平台。**
 > 规范参数化：**运行时 über 以 OpenPBR Surface（ASWF/Adobe/Autodesk 2024）为规范核心，Prism über 是 OpenPBR 的真超集**——`Prism über = OpenPBR Surface（全字段） ∪ { NPR_FACE 私有瓣 } ∪ { 开放词汇表后续瓣 }`。现有 7 瓣只是今天未补齐的实现子集；补齐缺口（thin_film 虹彩、coat/fuzz/subsurface 全字段等）是对开放词汇表的**加法扩充**，不是改架构。超集成立的三条硬约束见 §4.5（纯 OpenPBR 子集合规对拍 / 扩展位段隔离 / 向下投影）。NPR_FACE 作为 OpenPBR 之外的 Prism 私有瓣服务 NPR。
 > 四线正交：**PBR / NPR / 混合 / 自定义不是四条管线，而是同一条 OpenPBR über 上的正交响应模式**，由 `axis.rs` 的 `illumination` 轴 + `render_class` + 可选 `custom_program` 钩子选择；共享同一套参数解包、per-tile 分类与降级。
-> 最后更新：2026-11-11（Native composite 当前状态以本文末尾当前 code-truth 和核验文档 §0.0.3/§7.23/§7.25.2 为准；P2-h 原理化分层 BSDF 核心公式已完成，`reference_pt/openpbr.rs` 已有多瓣响应、路径传输、混合采样和固定多 bounce CPU golden，adapter 的受限多瓣 CPU parity 切片已通过；剩余是实时 GPU ↔ reference 图像 parity、GPU/backend、真实纹理/材质提取及生产 integrator 组合验收。Surface Identity pass 与 composite 已复用同一 physical identity/response buffer；Surface encode 与 GI evaluator 分别持有/消费 texture rows/VT 资源，GI evaluator 另有 bindless direct heap 路径和 registered-response link seam，不能写成完整材质响应。作者层新增受限 `nodedef` → `author_node` 语义闭环：`plus`/`mult`/`blend` 只作为 `add`/`multiply`/`mix` 的作者语法别名，不产生新的 runtime identity；完整 MaterialX 图、编辑器与 MaterialArtifact 接入仍未完成。）
+> 最后更新：2026-11-12（当前材质状态以本文 §18.7 和核验文档 §7.26/§8 为准；P2-h 原理化分层 BSDF 核心公式与 path-traced reference 基础已完成，`ReferencePtMaterialAdapter` 当前定向测试为 24/24；Native extraction/reconcile、builtin Unlit/Lit 的 Apple M2/Metal 纵向切片已通过，但默认主帧全组合 parity、realtime GPU ↔ reference 图像 parity、跨 backend/adapter 和真实性能 artifact 仍未完成。作者层仍是受限 MaterialX/authoring 闭环，不宣称完整编辑器或任意图完成。）
 
 ---
 
@@ -1763,9 +1763,9 @@ schema **只声明布局 + 元数据 + 契约**（在哪、多宽、谁消费、
 
 **演进优先级小结**：**17.5 自描述 schema** 已深化为 PCM 单一声明源与全链路 codegen；**17.2 原理化分层**及 **17.1 运行时动态通道**均已有实现切片，不再是待启动项。当前着色系统的主阻塞是 Native 默认 composite 的真实主帧 GPU/CPU golden parity 与完整组合验收；P2-h 剩余的 reference parity 与其他扩展按各自图像/性能门禁推进。17.6 glint、17.3 光谱 RT、17.4 随机采样仍是后续演进方向。
 
-## 18. 2026-11-11 当前 code-truth（不改写历史）
+## 18. 2026-11-12 当前 code-truth（不改写历史）
 
-本节只覆盖当前工作树的材质切片状态；历史路线图、旧验证快照和旧结论保留原样。当前 checkout 的 `HEAD` 为 `87bc25f8b65aadf3cef9dc6ade4a955d53b531fd`，并包含工作树中的未提交改动；本节按当前工作树源码记录，不把未重新运行的旧二进制结果当作当前通过证据。
+本节只覆盖当前工作树的材质切片状态；历史路线图、旧验证快照和旧结论保留原样。当前 checkout 的 `HEAD` 为 `6d3cbaeaac1e`（后续只更新跨模块重构文档），材质功能边界以 `45bc1af6ab`（`test(material): capture production frame timing`）及其工作树改动为准；本节按当前工作树源码和最新证据记录，不把未重新运行的旧二进制结果当作当前通过证据。
 
 ### 已完成的局部切片
 
@@ -1773,7 +1773,7 @@ schema **只声明布局 + 元数据 + 契约**（在哪、多宽、谁消费、
 - **Material-VT frame 资源生命周期**：生产入口已捕获 material/execution snapshot、active VT lease、publication generation，并构造同代 `MaterialFrameSnapshotBundle`；frame graph 已声明 texture rows、VT page table/config/atlas 的 import/read 依赖。
 - **原理化分层核心**：coat/base Fresnel 能量耦合及 coat darkening 已有 CPU/WESL/GPU 局部实现和门禁；这不是“待重写公式”，但不是实时主链全组合 parity。
 - **Path-traced reference 基础**：`reference_pt/openpbr.rs` 已有 base/EON、metallic/specular、transmission、coat、sheen、subsurface、thin-film/iridescence、glint、路径传输及五类 proposal 混合 `sample/pdf`；现有独立 OpenPBR/reference adapter CPU 切片已通过记录的定向测试。该项不是 clearcoat-only 占位。
-- **当前 CPU/source 复验**：composite contract **19/19**、reference adapter **22/22**、texture semantic/fold **22/22** 通过；这些是 CPU/source 门禁，不等于真实 GPU 主帧 readback 或 realtime↔reference image parity。
+- **当前 CPU/source 复验**：composite contract **19/19**、reference adapter **24/24**、texture semantic/fold **22/22** 通过；这些是 CPU/source 门禁，不等于真实 GPU 主帧 readback 或 realtime↔reference image parity。
 
 ### 部分完成
 
@@ -1789,13 +1789,13 @@ schema **只声明布局 + 元数据 + 契约**（在哪、多宽、谁消费、
 - realtime GPU 与 path-traced reference 的图像级 parity、真实场景级生产 integrator 组合、GPU/backend/cross-adapter parity；当前 Native composite 受限纵向切片已有成功硬件 readback，但受限 realtime↔reference parity fixture 仍未闭合。P2-h 的独立 reference closure、adapter 和固定多 bounce CPU golden 已实现，不再列为占位。
 - 完整 MaterialX 图/编辑器闭环，以及性能 P50/P95/P99 和多适配器证据。
 
-### 下一验收命令（已通过的 Native composite 切片除外）
+### 仍需的完整验收入口（局部 Native GPU 切片已通过）
 
 ```sh
 # CPU/source contract first; this is not GPU parity.
 cargo test -p prism_render_app --lib composite_contract_tests -- --nocapture
 
-# Native composite/GBuffer slice; only a real passing run may close local GPU evidence.
+# Native composite/GBuffer slice; its passing result is local evidence only.
 PRISM_REQUIRE_GPU=1 WGPU_BACKEND=metal cargo test -p prism_render_app --lib physical_gpu_surface_encode_gbuffer_readback_and_composite_close_the_contract -- --nocapture
 
 # GI trace -> material evaluator -> candidate slice; do not infer full-frame parity from it.
@@ -1803,10 +1803,14 @@ PRISM_REQUIRE_GPU=1 WGPU_BACKEND=metal cargo test -p prism_render_app --lib phys
 
 # Native non-empty scene reaches composite HDR; still a vertical slice, not the full frame.
 PRISM_REQUIRE_GPU=1 WGPU_BACKEND=metal cargo test -p prism_render_app --lib native_scene_mesh_reaches_composite_hdr_on_a_gpu -- --nocapture
+
+# Builtin Lit response vertical slice; still not the full material matrix.
+PRISM_REQUIRE_GPU=1 WGPU_BACKEND=metal cargo test -p prism_render_app --lib native_scene_mesh_lit_response_reaches_composite_hdr_on_a_gpu -- --nocapture
 ```
 
-上述 CPU/source、GI evaluator 和非空场景命令仍是下一步验收入口；Native composite 命令已在
-真实 Metal GPU 上通过，但它只是纵向切片，不是默认主帧全链路完成证据。
+上述命令分别覆盖 CPU/source、GI evaluator、builtin Unlit 和 builtin Lit 的局部证据；Unlit 与 Lit
+命令已在 Apple M2/Metal 上各通过 **1/1**，但仍不是默认主帧全组合 parity。完整主帧、GI 全材质
+组合、realtime↔reference 图像对拍和性能门禁仍需独立证据。
 
 ### 18.2 2026-11-11 当前工作树更正
 
@@ -1900,7 +1904,7 @@ P50/P95/P99 仍是硬门禁。
   不是默认主帧 GPU readback、实时↔path-traced 图像 parity 或跨 backend 证据；这些边界仍保留在
   未完成清单中。
 
-## 18.3 2026-11-11 composite / VT / reference 当前 code-truth
+## 18.3 2026-11-11 composite / VT / reference 增量（历史；当前权威见 §18.7）
 
 本节是对 §18 的实现归属补充；不改写历史验证记录，也不把未执行的硬件门禁写成完成。
 
@@ -1925,7 +1929,7 @@ P50/P95/P99 仍是硬门禁。
   `unimplemented!` 或静默 placeholder 分支充当实现。测试名和契约说明中的 “placeholder” 字样
   不应被解读为生产占位；仍未完成项必须按上面的 parity、覆盖范围和性能门禁表达。
 
-## 18.4 2026-11-11 材质重构当前验证增量
+## 18.4 2026-11-11 材质重构验证增量（历史；当前权威见 §18.7）
 
 - texture semantic 已改为显式路由：surface-fold、dedicated-consumer、unsupported 三类分开；未知
   semantic 不再静默丢弃，CPU/WESL 均 fail-closed。`prism_render_shading` texture semantic 定向
@@ -1944,14 +1948,14 @@ P50/P95/P99 仍是硬门禁。
 
 - `reference_pt_adapter` 现在从 canonical `GpuSurfaceParameters`、texture rows、sampled texels
   和动态通道构造独立 OpenPBR reference 输入；支持的 transmission/scatter、sheen、subsurface、
-  thin-film、emission 等字段不再在 adapter 边界丢失。当前定向 adapter 测试为 **23 passed / 0 failed**，
+  thin-film、emission 等字段不再在 adapter 边界丢失。当前定向 adapter 测试为 **24 passed / 0 failed**，
   小图 CPU parity 的 RMSE 为 `2.1022634e-6`，最大绝对误差为 `1.9729137e-5`。
 - Native registered response 现在要求已验证的 response source 才能发布 execution table；artifact-only
   SPIR-V 会在 GPU publication 前显式拒绝，避免把没有可链接实现的 registered program 与材质 rows
   混成一代。Native material 定向测试为 **177 passed / 0 failed**。
-- 真实 Apple M2 RHI timestamp probe 已能完成 query/resolve/readback，并输出硬件 timestamp；但它仍是
-  capability probe，不是生产 Native 材质帧。生产材质 raw-sample artifact、固定内容/adapter/backend
-  下的 P50/P95/P99 和预算门禁仍未完成。
+- 真实 Apple M2 RHI timestamp probe 已能完成 query/resolve/readback，并输出硬件 timestamp；同时已
+  实现生产 Native 材质帧 sampler 和 raw-artifact admission，但当前仍没有真实生产 artifact。它仍未
+  形成固定内容/adapter/backend 下可审定的 P50/P95/P99 和预算门禁，因此性能证据仍未完成。
 
 ## 18.6 2026-11-12 Native extraction/reconcile 增量
 
@@ -1966,7 +1970,8 @@ P50/P95/P99 仍是硬门禁。
   独立的 validated source/publication。
 - queue fixture 已删除 render-world material row、execution table 和 binding 的手动写入。严格
   Apple M2/Metal Unlit HDR 门禁 **1/1 通过**，证明主世界材质可以走真实提取、同步、排队和
-  identity/composite 纵向路径。
+  identity/composite 纵向路径；builtin Lit response 门禁也已 **1/1 通过**，中心像素 GPU
+  `0.18160228` 与 CPU `0.18169431` 的差值在 `0.002` 门限内。
 
 当前仍未完成：
 
@@ -1974,3 +1979,71 @@ P50/P95/P99 仍是硬门禁。
   evaluator 硬件 parity、默认主帧全帧 golden parity、realtime↔path-traced 图像 parity、跨
   backend/adapter 和 P50/P95/P99 性能证据仍未闭合。builtin Lit 的真实 Metal fixture 已在修正
   world-position/camera-view CPU oracle 后通过，但它只证明单个 canonical Lit 纵向切片。
+
+## 18.7 2026-11-12 当前审计裁决（HEAD `45bc1af6ab`）
+
+以下是当前应优先引用的状态；§18.1–§18.6 中带有旧日期、旧测试计数或旧 HEAD 的内容均保留为历史
+增量，不再作为当前总裁决。
+
+### 已完成的局部切片
+
+- Native extraction/reconcile：生产 plugin 安装 canonical builtin execution catalog，并从主世界
+  `ExtractedNativeMaterials` 同步到 render-world；Unlit 和 builtin Lit 均有真实 Apple M2/Metal
+  纵向门禁，分别 **1/1** 通过。
+- 原理化分层核心公式、OpenPBR path-traced reference 基础、受限 MaterialX/authoring 和
+  `ReferencePtMaterialAdapter` 的字段映射/拒绝边界已实现；adapter 定向测试 **24/24** 通过。
+- 生产材质性能 sampler、raw artifact parser/admission 已实现，能拒绝 summary-only、generic RHI
+  probe 和伪造的 CPU timestamp；当前定向测试 **4 passed / 0 failed，2 ignored**，但 ignored
+  生产采样/预算门仍缺真实 artifact，实现存在不等于已有性能证据。
+
+### 部分完成
+
+- Native composite、Material-VT/texture rows、GI evaluator 调度和 reference integrator 已形成
+  生产接线或独立 CPU/局部 GPU 切片；它们尚未覆盖完整材质组合、默认主帧全帧或跨后端/适配器。
+- registered response、MaskBlend、channel/domain、完整 texture semantic/VT 组合和 MaterialX
+  编辑器闭环仍只有部分契约或受限路径。
+
+### 仍未完成
+
+- 默认 Native 主帧的 extraction → Surface encode → response/composite → HDR readback 与 CPU
+  golden 全帧 parity。
+- 完整 Lit/registered/MaskBlend/channel/domain/texture/VT/dynamic 组合，以及 GI evaluator 的
+  真实硬件 dispatch/readback 和 CPU oracle parity。
+- realtime GPU ↔ path-traced reference 图像级 parity、生产级完整 integrator 组合、跨
+  backend/adapter 证据。
+- 真实生产材质性能 artifact、固定内容/适配器/后端下的 P50/P95/P99 预算门禁。
+
+因此，本节确认的是局部生产切片和证据边界，**不宣称材质重构整体完成**。
+
+## 18.8 2026-11-12 当前 checkout 修正（HEAD `0e23ecae36`）
+
+本节覆盖 §18.7 的旧 HEAD 和性能证据描述。前文历史增量保留不改写；本节才是当前
+checkout 的材质状态裁决。
+
+### 已新增的可验证证据
+
+- `6c9dd243a3` 已把 registered response 的 validated source 接入生产 link seam，
+  `0e23ecae36` 记录了该接线证据。它只证明已验证 source 才能进入 production execution
+  table，不证明 registered response 的完整材质矩阵已经消费完成。
+- `pkg/prism_render_app/tests/material_performance_evidence.rs` 的 production sampler 已
+  使用主世界材质 extraction/reconcile、真实 Native draw、真实 GPU timestamp query 和
+  runtime completion barrier；不再手工双写 render-world material row/work item。
+- 当前真实 artifact 为 Apple M2 / Metal / `64x64` / `30` samples，commit 为
+  `0e23ecae36e5d6225f07aea28e5d091e345a3fd7`，CPU P50/P95/P99 为
+  `3,984,208/4,509,167/5,108,458 ns`，GPU P50/P95/P99 为
+  `497,958/1,480,000/1,492,875 ns`，每样本 material upload 为 `196 bytes`。
+- 上述 artifact 证明生产采样和逐样本统计链已运行；由于尚无 benchmark owner 审定的六个
+  CPU/GPU 预算，P50/P95/P99 **预算 gate 仍未完成**。
+
+### 当前未完成边界
+
+- 默认 Native extraction → Surface encode → response/composite → HDR readback 的完整
+  CPU golden 全帧 parity。
+- 完整 registered/MaskBlend/channel/domain/texture/VT/dynamic 组合，以及 GI evaluator 的
+  真实硬件 dispatch/readback 和 CPU oracle parity。
+- realtime GPU ↔ path-traced reference 图像级 parity、完整生产 integrator 组合、跨
+  backend/adapter parity。
+- 完整 MaterialX vocabulary、任意图 shade-time 语义、编辑器闭环和性能预算 gate。
+
+因此，`0e23ecae36` 之后的性能 artifact 和 registered link 证据只收窄了证据缺口，
+不改变“材质重构整体未完成”的结论。
