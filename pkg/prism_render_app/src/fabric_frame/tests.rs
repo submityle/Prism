@@ -22,7 +22,7 @@ use prism_render_architecture::{
         builtin_catalog, builtin_resource_templates, builtin_roots, CompiledFeatureGraph,
         DeviceFabric, DomainPayload, FrameRenderItem, FrameResourceBinding, GraphLimits,
         ObjectResourceBinding, ObjectResourceIdentity, ObjectRuntimeImport, PayloadRole,
-        PayloadValue, PhysicalResource, QueueClass, RenderDomain, RenderFabricFrame,
+        PayloadValue, PhysicalResource, QueueClass, RenderDomain,
         RenderObjectId, ResourceKey, ResourceLayout, ResourceTemplate, RuntimeGraphResourceMapping,
         RuntimeImport, ValuePayload, PARTICLE_ALIVE_RESOURCE,
         PARTICLE_BRIDGE_ACTIVE_ROUTE_INDICES_RESOURCE, PARTICLE_BRIDGE_EVENT_FLAGS_RESOURCE,
@@ -224,7 +224,7 @@ fn host_imports_for_graph(
     Vec<ObjectRuntimeImport>,
     Vec<RuntimeGraphResourceMapping>,
 ) {
-    let mut shared = Vec::new();
+    let shared = Vec::new();
     let mut objects = Vec::new();
     let mut mappings = Vec::new();
     for (index, resource) in graph.resources().iter().enumerate() {
@@ -242,7 +242,7 @@ fn host_imports_for_graph(
             buffer: id,
             entry_state: BufferState::initial(),
         };
-        if let Some(identity) = resource.identity {
+        if resource.identity.is_some() {
             let runtime_import = RuntimeImport::Buffer {
                 resource: resource.id,
                 imported,
@@ -574,14 +574,14 @@ fn native_particle_fabric_authenticates_imports_before_recording() {
     assert_eq!(lowering.pass_count(), 2);
     assert_eq!(host.pass_count(), 2);
     assert!(monitor.is_clean());
-    host.prepare()
+    let _prepared = host
+        .prepare()
         .expect("host graph remains the sole graph owner");
     device.destroy_buffer(stream_buffer);
     device.destroy_buffer(alive_buffer);
 }
 
-fn empty_particle_compiled_graph() -> prism_render_architecture::render_fabric::CompiledFeatureGraph
-{
+fn empty_particle_compiled_graph() -> CompiledFeatureGraph {
     use prism_render_architecture::backend::capability::CapabilitySet;
     use prism_render_architecture::render_fabric::RenderQualityTier;
 
@@ -706,7 +706,8 @@ fn native_particle_phase_lowering_appends_to_the_host_graph_once() {
     assert_eq!(lowering.pass_count(), 2);
     assert_eq!(host.pass_count(), 2);
     assert!(monitor.is_clean());
-    host.prepare()
+    let _prepared = host
+        .prepare()
         .expect("host graph remains the sole graph preparation owner");
 }
 
