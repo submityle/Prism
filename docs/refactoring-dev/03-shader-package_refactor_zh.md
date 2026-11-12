@@ -6,6 +6,8 @@
 
 **已确认**：native package identity、permutation/descriptor 校验、PSO/cache key、queue/lifecycle 契约以及 Rust/WESL ABI 检查已有源码和局部测试证据；Metal 非空场景 surface encode/GBuffer、固定 Unlit composite readback 和固定单材质 Lit response/composite parity 均已通过，composite ABI 已收敛到 Metal 可用的 storage-buffer 预算。它们证明身份和局部 command path 的约束，不证明整个 shader package 已产生正确画面。
 
+2026-11-12 新增 Registered package link evidence：validated response bodies 只能通过固定 response ABI 进入 native evaluator，bindless generation table 必须与 host slot count 完全匹配；production evaluator 在 Apple M2/Metal strict compile 通过。该证据不扩张为 Registered response/composite HDR parity。
+
 **当前缺口**：Metal native 的基础直接 draw 与非空场景 package → bind group → surface-encode → GBuffer 最小路径均已通过；2026-11-12 又通过固定 Unlit package 的 identity → composite → HDR、固定单材质 Lit package 的 response/composite parity 与 completion-gated resize lifecycle，场景验收确认真实 `draws_queued=1`、`draws_recorded=1` 及 normal/albedo/HDR 输出。仍未完成的是 NPR/Registered/MaskBlend 的完整 response package 消费、统一全帧 dispatch/draw、未就绪/失败/设备丢失/resize/退休的全矩阵、跨适配器输出与 P50/P95/P99。另一个 `native_full_frame_acceptance` 只使用 `DeferredInstance`/Null backend 和无对象空相机，不能验证真实 driver binary 的完整帧。
 
 本篇的 CPU/null/cache/contract 结果以及 Bevy/SceneRhi 历史记录必须保持范围标注。完整 response package 消费、未就绪/失败/设备丢失/resize/退休、统一全帧 dispatch/draw、跨适配器输出与 P50/P95/P99 仍是未完成项。

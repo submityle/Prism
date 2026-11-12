@@ -6,6 +6,8 @@
 
 **已确认**：native response/composition 的 `ShadingPlan`、MaskBlend identity、output contract、lobe-budget ABI 和 composite pipeline 有源码/契约证据；非空场景 GBuffer 及 GBuffer → composite Metal readback 已通过。2026-11-12 严格 Metal 复验了固定单材质 `Unlit` 和 `Lit` 原生垂直切片：真实 mesh/material 经 identity、GBuffer、对应 response、composite 写入 HDR，其中 Lit 与 CPU lighting oracle 对拍；同日 lifecycle 用例确认 execution-table 冷启动和 resize completion admission fail-closed。composite group-2 绑定同代 canonical headers/parameters、texture rows、VT page/config 与 atlas/sampler，Surface encode 解析的纹理/VT 结果通过 GBuffer material planes 进入 composite，并受 Metal storage-buffer 限制约束。
 
+2026-11-12 Registered response link 也已完成固定 ABI 的 native evaluator 替换、bindless generation-table fail-closed 校验和 production shader link compile；Apple Metal strict filter 为 6/6。该项仍是 evaluator/package 级证据，不是 Registered 非空材质到最终 HDR 的图像验收。
+
 **仍未完成**：真实非空 native Unlit/Lit 材质已经能通过固定单材质 Scene GBuffer/response/HDR 验收，独立 composite contract 也能在 Metal readback；但从 NPR、Registered、MaskBlend/split、多种 material/mesh binding、PSO 到最终 HDR 输出的统一全帧尚未闭合。`native_scene_mesh_draws_the_visible_set_on_a_gpu` 验证的是实际 camera-local target 的 normal/albedo 与透明 HDR clear，composite contract 测试验证的是固定 GBuffer consumer，不证明完整材质场景已经产出最终可见画面。`native_full_frame_acceptance.rs` 使用 `NullAdapter`/`NullDevice`/`NullQueue` 的 `DeferredInstance`，相机没有 renderable object，并明确断言 queued/recorded draw 均为 0；这只是空/null lifecycle fixture。
 
 因此，CPU response golden、组合契约、Bevy/SceneRhi 历史 GPU harness 都不构成当前 native 全帧证据。native 的完整 response program 消费、TAA/history 与 composition 的统一全帧接线、多视图/多域 fan-out、真实 failure/retirement、图像 parity、第二适配器和 P50/P95/P99 仍未完成。

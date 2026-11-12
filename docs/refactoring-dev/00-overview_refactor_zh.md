@@ -17,6 +17,8 @@
 - 2026-11-12 已在 Apple M2/Metal 收口 native 生命周期与冷启动语义：execution-table 首次上传完成后，非空 mesh 首帧真实 draw/composite 成功；resize 在 target completion 未确认时保持旧 target、拒绝 graph admission，并保留 `AdmissionFailed` receipt，completion 释放后新 target 提交且旧 target 回收。`native_nonempty_lifecycle_acceptance` 严格物理 GPU 用例通过。
 - 2026-11-12 新增并通过 `native_particle_full_frame_acceptance`：真实 `App::update()` 驱动 Particle snapshot → GPU prepare → Render Fabric finalize → queue → graph → record → submit；显式触发 queue completion 后，native receipt 与 `NativeFrameExecution` 均进入 `Completed`。该测试使用 deferred Null RHI，证明生产调度和 completion 所有权，不证明 Particle shader 的 physical-GPU 像素结果。
 
+**2026-11-12 Registered evaluator 接线补记**：validated response-link source 现在由 native evaluator 以固定 ABI 替换 fail-closed evaluator body，并通过 6 项定向测试；其中 production evaluator link compile 在 `PRISM_REQUIRE_GPU=1 WGPU_BACKEND=metal` 的 Apple Metal 上通过。该证据只证明 Registered shader link、bindless generation-table 校验和设备编译，不证明 Registered 非空场景 response → composite → HDR 全帧输出。
+
 **当前明确未完成/未证实**：
 
 - NPR、Registered、MaskBlend/split response、材质变体和真实多对象场景尚未形成统一的 native response → composition → HDR 全帧验收；当前已通过的固定单材质 Unlit/Lit 测试不能外推到这些路径。
