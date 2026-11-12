@@ -1,31 +1,48 @@
-//! Strict admission for externally collected material GPU performance evidence.
+//! Strict admission for native material performance evidence.
 //!
-//! This test does not benchmark the renderer and does not convert CPU wall time
-//! into GPU time. The ignored gate validates a real-device artifact produced by
-//! a timestamp-capable harness. That keeps missing RHI timestamp readback
-//! visible instead of turning a source/compile check into performance evidence.
+//! The gate accepts only raw per-sample records. Percentiles are recomputed
+//! here, so a producer cannot provide a hand-written summary and call it GPU
+//! evidence. The producer identity is also part of the contract: the generic
+//! RHI timestamp probe is useful capability evidence, but it is not a native
+//! material frame and must not pass this gate.
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-const SCHEMA: &str = "prism-material-perf-v1";
-const REQUIRED_METRICS: [&str; 3] = [
-    "frame_cpu_wall_ns",
-    "frame_gpu_timestamp_ns",
-    "material_upload_bytes",
+const SCHEMA: &str = "prism-material-perf-v2";
+const REQUIRED_FIELDS: [&str; 10] = [
+    "schema",
+    "commit",
+    "scene",
+    "capture_scope",
+    "producer",
+    "backend",
+    "adapter",
+    "resolution",
+    "timestamp_source",
+    "timestamp_unit",
 ];
+const PRODUCTION_SCOPE: &str = "production_native_material_frame";
+const PRODUCTION_PRODUCER: &str = "prism_native_material_frame_capture_v1";
 
 #[derive(Debug, PartialEq, Eq)]
 struct Evidence {
     fields: BTreeMap<String, String>,
-    metrics: BTreeMap<String, Metric>,
+    samples: Vec<Sample>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct Metric {
-    samples: u64,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Sample {
+    index: u64,
+    cpu_wall_ns: u64,
+    gpu_timestamp_ns: u64,
+    material_upload_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Percentiles {
     p50: u64,
     p95: u64,
     p99: u64,
@@ -33,7 +50,7 @@ struct Metric {
 
 fn parse(input: &str) -> Result<Evidence, String> {
     let mut fields = BTreeMap::new();
-    let mut metrics = BTreeMap::new();
+    let mut samples = Vec::new();
 
     for (line_index, raw_line) in input.lines().enumerate() {
         let line = raw_line.trim();
@@ -42,37 +59,33 @@ fn parse(input: &str) -> Result<Evidence, String> {
         }
         let parts: Vec<_> = line.split(',').map(str::trim).collect();
         match parts.first().copied() {
-            Some("metric") => {
-                if parts.len() != 6 {
+            Some("sample") => {
+                if parts.len() != 5 {
                     return Err(format!(
-                        "line {}: metric requires name,samples,p50,p95,p99",
+                        "line {}: sample requires index,cpu_wall_ns,gpu_timestamp_ns,material_upload_bytes",
                         line_index + 1
                     ));
                 }
-                let name = parts[1];
-                if name.is_empty() || metrics.contains_key(name) {
-                    return Err(format!(
-                        "line {}: metric name is empty or duplicated",
-                        line_index + 1
-                    ));
-                }
-                let values = [parts[2], parts[3], parts[4], parts[5]]
+                let values = [parts[1], parts[2], parts[3], parts[4]]
                     .into_iter()
                     .map(|value| {
                         value.parse::<u64>().map_err(|_| {
-                            format!("line {}: invalid unsigned metric value", line_index + 1)
+                            format!("line {}: invalid unsigned sample value", line_index + 1)
                         })
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                metrics.insert(
-                    name.to_owned(),
-                    Metric {
-                        samples: values[0],
-                        p50: values[1],
-                        p95: values[2],
-                        p99: values[3],
-                    },
-                );
+                samples.push(Sample {
+                    index: values[0],
+                    cpu_wall_ns: values[1],
+                    gpu_timestamp_ns: values[2],
+                    material_upload_bytes: values[3],
+                });
+            }
+            Some("metric") => {
+                return Err(format!(
+                    "line {}: percentile summaries are not accepted; provide raw sample lines",
+                    line_index + 1
+                ));
             }
             Some(kind) if parts.len() == 2 && !kind.is_empty() && !parts[1].is_empty() => {
                 if fields
@@ -84,14 +97,14 @@ fn parse(input: &str) -> Result<Evidence, String> {
             }
             _ => {
                 return Err(format!(
-                    "line {}: expected key,value or metric,name,samples,p50,p95,p99",
+                    "line {}: expected key,value or sample,index,cpu_wall_ns,gpu_timestamp_ns,material_upload_bytes",
                     line_index + 1
                 ));
             }
         }
     }
 
-    let evidence = Evidence { fields, metrics };
+    let evidence = Evidence { fields, samples };
     validate(&evidence)?;
     Ok(evidence)
 }
@@ -105,6 +118,9 @@ fn validate(evidence: &Evidence) -> Result<(), String> {
             .ok_or_else(|| format!("missing required field {name}"))
     };
 
+    for name in REQUIRED_FIELDS {
+        field(name)?;
+    }
     if field("schema")? != SCHEMA {
         return Err(format!("schema must be {SCHEMA}"));
     }
@@ -115,13 +131,22 @@ fn validate(evidence: &Evidence) -> Result<(), String> {
     if field("scene")? != "default_native_material_frame" {
         return Err("scene must identify the default native material frame".into());
     }
+    if field("capture_scope")? != PRODUCTION_SCOPE {
+        return Err("capture_scope must identify a production native material frame".into());
+    }
+    if field("producer")? != PRODUCTION_PRODUCER {
+        return Err("producer is not the production native material frame sampler".into());
+    }
     for name in ["backend", "adapter"] {
-        if field(name)?.trim().is_empty() {
-            return Err(format!("{name} must not be empty"));
+        if field(name)?.trim().is_empty() || field(name)?.contains(',') {
+            return Err(format!("{name} must be nonempty and comma-free"));
         }
     }
     if field("timestamp_source")? != "gpu_timestamp_query" {
         return Err("timestamp_source must be gpu_timestamp_query".into());
+    }
+    if field("timestamp_unit")? != "ns" {
+        return Err("timestamp_unit must be ns".into());
     }
 
     let resolution = field("resolution")?;
@@ -151,32 +176,66 @@ fn validate(evidence: &Evidence) -> Result<(), String> {
     if warmup == 0 || sample_count < 30 {
         return Err("warmup must be positive and samples must be at least 30".into());
     }
-
-    for name in REQUIRED_METRICS {
-        let metric = evidence
-            .metrics
-            .get(name)
-            .ok_or_else(|| format!("missing required metric {name}"))?;
-        if metric.samples != sample_count {
+    if evidence.samples.len() as u64 != sample_count {
+        return Err(format!(
+            "raw sample count is {}, expected {sample_count}",
+            evidence.samples.len()
+        ));
+    }
+    for (expected, sample) in evidence.samples.iter().enumerate() {
+        if sample.index != expected as u64 {
             return Err(format!(
-                "metric {name} has {} samples, expected {sample_count}",
-                metric.samples
+                "sample indices must be contiguous from zero; expected {}, got {}",
+                expected, sample.index
             ));
         }
-        if metric.p50 == 0 || metric.p50 > metric.p95 || metric.p95 > metric.p99 {
-            return Err(format!("metric {name} must satisfy 0 < p50 <= p95 <= p99"));
+        if sample.cpu_wall_ns == 0 || sample.gpu_timestamp_ns == 0 {
+            return Err(format!(
+                "sample {} must contain positive CPU and GPU durations",
+                sample.index
+            ));
         }
     }
 
     Ok(())
 }
 
-fn percentile(metric: &Metric, percentile: &str) -> u64 {
-    match percentile {
-        "p50" => metric.p50,
-        "p95" => metric.p95,
-        "p99" => metric.p99,
-        _ => unreachable!("the gate only names supported percentiles"),
+fn percentiles(values: impl IntoIterator<Item = u64>) -> Percentiles {
+    let mut values = values.into_iter().collect::<Vec<_>>();
+    assert!(
+        !values.is_empty(),
+        "percentiles require at least one sample"
+    );
+    values.sort_unstable();
+    let nearest_rank = |percent: usize| {
+        let rank = (values.len() * percent).div_ceil(100);
+        values[rank.saturating_sub(1)]
+    };
+    Percentiles {
+        p50: nearest_rank(50),
+        p95: nearest_rank(95),
+        p99: nearest_rank(99),
+    }
+}
+
+fn metric_percentiles(evidence: &Evidence, metric: &str) -> Percentiles {
+    match metric {
+        "frame_cpu_wall_ns" => {
+            percentiles(evidence.samples.iter().map(|sample| sample.cpu_wall_ns))
+        }
+        "frame_gpu_timestamp_ns" => percentiles(
+            evidence
+                .samples
+                .iter()
+                .map(|sample| sample.gpu_timestamp_ns),
+        ),
+        "material_upload_bytes" => percentiles(
+            evidence
+                .samples
+                .iter()
+                .map(|sample| sample.material_upload_bytes),
+        ),
+        _ => unreachable!("the material gate only names known metrics"),
     }
 }
 
@@ -205,7 +264,13 @@ fn assert_budgets(evidence: &Evidence) {
             .unwrap_or_else(|_| panic!("set {env_name} to an agreed nanosecond budget"))
             .parse::<u64>()
             .unwrap_or_else(|_| panic!("{env_name} must be an unsigned nanosecond budget"));
-        let actual = percentile(&evidence.metrics[metric_name], percentile_name);
+        let percentiles = metric_percentiles(evidence, metric_name);
+        let actual = match percentile_name {
+            "p50" => percentiles.p50,
+            "p95" => percentiles.p95,
+            "p99" => percentiles.p99,
+            _ => unreachable!("the gate only names supported percentiles"),
+        };
         assert!(
             actual <= budget,
             "{metric_name} {percentile_name} is {actual} ns, above {env_name}={budget} ns"
@@ -213,27 +278,39 @@ fn assert_budgets(evidence: &Evidence) {
     }
 }
 
-fn complete_artifact() -> &'static str {
-    "schema,prism-material-perf-v1
-commit,0123456789abcdef0123456789abcdef01234567
-scene,default_native_material_frame
-backend,metal
-adapter,physical-gpu
-resolution,1280x720
-warmup,30
-samples,60
-timestamp_source,gpu_timestamp_query
-metric,frame_cpu_wall_ns,60,100000,150000,200000
-metric,frame_gpu_timestamp_ns,60,80000,120000,160000
-metric,material_upload_bytes,60,1024,2048,4096
-"
+fn complete_artifact() -> String {
+    let mut artifact = String::from(
+        "schema,prism-material-perf-v2\n\
+         commit,0123456789abcdef0123456789abcdef01234567\n\
+         scene,default_native_material_frame\n\
+         capture_scope,production_native_material_frame\n\
+         producer,prism_native_material_frame_capture_v1\n\
+         backend,metal\n\
+         adapter,physical-gpu\n\
+         resolution,1280x720\n\
+         warmup,30\n\
+         samples,60\n\
+         timestamp_source,gpu_timestamp_query\n\
+         timestamp_unit,ns\n",
+    );
+    for index in 0..60_u64 {
+        let cpu = 100_000 + index * 1_000;
+        let gpu = 80_000 + index * 500;
+        let upload = 1_024 + index * 16;
+        artifact.push_str(&format!("sample,{index},{cpu},{gpu},{upload}\n"));
+    }
+    artifact
 }
 
 #[test]
-fn complete_material_performance_artifact_has_real_percentile_fields() {
-    let evidence = parse(complete_artifact()).expect("complete artifact must be admissible");
+fn raw_material_artifact_recomputes_real_percentiles() {
+    let evidence = parse(&complete_artifact()).expect("complete artifact must be admissible");
     assert_eq!(evidence.fields["timestamp_source"], "gpu_timestamp_query");
-    assert_eq!(evidence.metrics["frame_gpu_timestamp_ns"].p95, 120_000);
+    assert_eq!(evidence.samples.len(), 60);
+    assert_eq!(
+        metric_percentiles(&evidence, "frame_gpu_timestamp_ns").p95,
+        108_000
+    );
 }
 
 #[test]
@@ -250,31 +327,53 @@ fn cpu_wall_time_cannot_be_declared_gpu_timestamp_evidence() {
 }
 
 #[test]
-fn incomplete_percentiles_and_sample_counts_are_rejected() {
-    let artifact = complete_artifact().replace(
-        "metric,frame_gpu_timestamp_ns,60,80000,120000,160000",
-        "metric,frame_gpu_timestamp_ns,29,80000,120000,160000",
-    );
-    let error = parse(&artifact).expect_err("incomplete GPU samples must fail the gate");
-    assert!(error.contains("samples"), "unexpected error: {error}");
+fn summary_only_or_incomplete_raw_samples_are_rejected() {
+    let mut summary = complete_artifact();
+    let sample_start = summary.find("sample,").expect("fixture has samples");
+    summary.truncate(sample_start);
+    summary.push_str("metric,frame_gpu_timestamp_ns,60,80000,120000,160000\n");
+    let error = parse(&summary).expect_err("summary-only evidence must fail the gate");
+    assert!(error.contains("raw sample"), "unexpected error: {error}");
+
+    let incomplete = complete_artifact().replace("sample,29,", "sample,60,");
+    let error = parse(&incomplete).expect_err("non-contiguous samples must fail the gate");
+    assert!(error.contains("contiguous"), "unexpected error: {error}");
 }
 
-/// Run with a real-GPU artifact, for example:
+#[test]
+fn generic_rhi_timestamp_probe_cannot_pass_as_material_frame_evidence() {
+    let probe = complete_artifact()
+        .replace(
+            "capture_scope,production_native_material_frame",
+            "capture_scope,rhi_timestamp_probe",
+        )
+        .replace(
+            "producer,prism_native_material_frame_capture_v1",
+            "producer,prism_native_rhi_timestamp_probe_v1",
+        );
+    let error = parse(&probe).expect_err("generic RHI work must not pass material gate");
+    assert!(error.contains("capture_scope"), "unexpected error: {error}");
+}
+
+/// Run with a real production-native-material artifact, for example:
 ///
-/// `PRISM_REQUIRE_GPU=1 PRISM_MATERIAL_PERF_EVIDENCE=/abs/path/evidence.csv
+/// `PRISM_REQUIRE_GPU=1 PRISM_MATERIAL_EXPECTED_COMMIT=$(git rev-parse HEAD)
+/// PRISM_MATERIAL_PERF_EVIDENCE=/abs/path/evidence.csv
 /// PRISM_MATERIAL_CPU_P50_MAX_NS=... PRISM_MATERIAL_CPU_P95_MAX_NS=...
 /// PRISM_MATERIAL_CPU_P99_MAX_NS=... PRISM_MATERIAL_GPU_P50_MAX_NS=...
 /// PRISM_MATERIAL_GPU_P95_MAX_NS=... PRISM_MATERIAL_GPU_P99_MAX_NS=...
 /// cargo test -p prism_render_app --test material_performance_evidence
 /// material_gpu_performance_evidence_gate -- --ignored --nocapture`
 #[test]
-#[ignore = "requires a timestamped real-GPU material performance artifact"]
+#[ignore = "requires a timestamped production native-material artifact"]
 fn material_gpu_performance_evidence_gate() {
     assert_eq!(
         std::env::var("PRISM_REQUIRE_GPU").as_deref(),
         Ok("1"),
         "the performance gate requires PRISM_REQUIRE_GPU=1"
     );
+    let expected_commit = std::env::var("PRISM_MATERIAL_EXPECTED_COMMIT")
+        .expect("set PRISM_MATERIAL_EXPECTED_COMMIT to the tested HEAD revision");
     let path = std::env::var_os("PRISM_MATERIAL_PERF_EVIDENCE")
         .expect("set PRISM_MATERIAL_PERF_EVIDENCE to a collected artifact path");
     let path = Path::new(&path);
@@ -282,12 +381,16 @@ fn material_gpu_performance_evidence_gate() {
         fs::read_to_string(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
     let evidence = parse(&input)
         .unwrap_or_else(|error| panic!("invalid material performance evidence: {error}"));
+    assert_eq!(
+        evidence.fields["commit"], expected_commit,
+        "the artifact must be captured from the requested HEAD"
+    );
     assert_budgets(&evidence);
     eprintln!(
         "accepted material performance evidence: adapter={}, backend={}, samples={}, frame_gpu_p95_ns={}",
         evidence.fields["adapter"],
         evidence.fields["backend"],
-        evidence.fields["samples"],
-        evidence.metrics["frame_gpu_timestamp_ns"].p95,
+        evidence.samples.len(),
+        metric_percentiles(&evidence, "frame_gpu_timestamp_ns").p95,
     );
 }

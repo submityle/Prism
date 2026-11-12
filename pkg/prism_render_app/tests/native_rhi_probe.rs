@@ -6,6 +6,10 @@
 //! for GPU timestamp data.
 #![forbid(unsafe_code)]
 
+use std::fmt::Write as _;
+use std::fs;
+use std::time::Instant;
+
 use prism_render_driver::{
     Adapter, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
     BindingResource, BindingType, BufferBindingType, BufferDescriptor, BufferReadbackRange,
@@ -17,6 +21,34 @@ use prism_render_driver_wgpu::{AdapterEvidence, WgpuAdapter, WgpuInstance};
 
 fn require_hardware_gpu() -> bool {
     matches!(std::env::var("PRISM_REQUIRE_GPU"), Ok(value) if value == "1")
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TimestampSample {
+    cpu_wall_ns: u64,
+    gpu_timestamp_ns: u64,
+}
+
+fn env_u64(name: &str, default: u64) -> Result<u64, String> {
+    match std::env::var(name) {
+        Ok(value) => value
+            .parse::<u64>()
+            .map_err(|_| format!("{name} must be an unsigned integer")),
+        Err(_) => Ok(default),
+    }
+}
+
+fn timestamp_ns(begin: u64, end: u64, period_ns: f32) -> Result<u64, String> {
+    if begin == 0 || end <= begin {
+        return Err(format!(
+            "invalid timestamp pair returned by RHI: begin={begin} end={end}"
+        ));
+    }
+    let elapsed = (end - begin) as f64 * f64::from(period_ns);
+    if !elapsed.is_finite() || elapsed <= 0.0 || elapsed > u64::MAX as f64 {
+        return Err(format!("invalid GPU timestamp duration in ns: {elapsed}"));
+    }
+    Ok(elapsed.round() as u64)
 }
 
 fn run_timestamp_probe(
@@ -168,11 +200,7 @@ fn run_timestamp_probe(
             .try_into()
             .expect("eight-byte timestamp chunk"),
     );
-    if begin == 0 || end <= begin {
-        return Err(format!(
-            "invalid timestamp pair returned by RHI: begin={begin} end={end}"
-        ));
-    }
+    let _ = timestamp_ns(begin, end, period_ns)?;
 
     device.destroy_buffer(resolved);
     device.destroy_timestamp_query_set(queries);
@@ -183,6 +211,71 @@ fn run_timestamp_probe(
     device.destroy_shader_module(shader);
     device.destroy_buffer(data);
     Ok((begin, end, period_ns))
+}
+
+fn collect_timestamp_samples(
+    instance: &WgpuInstance,
+    adapter: &WgpuAdapter,
+    warmup: u64,
+    sample_count: u64,
+) -> Result<(Vec<TimestampSample>, f32), String> {
+    if warmup == 0 || sample_count < 30 {
+        return Err("real timestamp evidence requires warmup > 0 and at least 30 samples".into());
+    }
+    let total = warmup
+        .checked_add(sample_count)
+        .ok_or_else(|| "warmup plus sample count overflowed".to_owned())?;
+    let mut samples = Vec::with_capacity(sample_count as usize);
+    let mut period_ns = None;
+    for index in 0..total {
+        let cpu_start = Instant::now();
+        let (begin, end, period) = run_timestamp_probe(instance, adapter)?;
+        let cpu_wall_ns = cpu_start.elapsed().as_nanos();
+        let cpu_wall_ns = u64::try_from(cpu_wall_ns)
+            .map_err(|_| "CPU wall duration does not fit in u64 nanoseconds".to_owned())?;
+        let gpu_timestamp_ns = timestamp_ns(begin, end, period)?;
+        period_ns.get_or_insert(period);
+        if index >= warmup {
+            samples.push(TimestampSample {
+                cpu_wall_ns,
+                gpu_timestamp_ns,
+            });
+        }
+    }
+    Ok((samples, period_ns.expect("at least one timestamp sample")))
+}
+
+fn csv_field(value: &str) -> String {
+    value.replace(',', "%2C").replace('\n', "%0A")
+}
+
+fn write_probe_artifact(
+    path: &std::path::Path,
+    evidence: &AdapterEvidence,
+    warmup: u64,
+    period_ns: f32,
+    samples: &[TimestampSample],
+) -> Result<(), String> {
+    let mut output = String::new();
+    writeln!(output, "schema,prism-rhi-timestamp-probe-v1").unwrap();
+    writeln!(output, "capture_scope,rhi_timestamp_probe").unwrap();
+    writeln!(output, "producer,prism_native_rhi_timestamp_probe_v1").unwrap();
+    writeln!(output, "backend,{:?}", evidence.info.backend).unwrap();
+    writeln!(output, "adapter,{}", csv_field(&evidence.info.name)).unwrap();
+    writeln!(output, "timestamp_source,gpu_timestamp_query").unwrap();
+    writeln!(output, "timestamp_unit,ns").unwrap();
+    writeln!(output, "timestamp_period_ns,{period_ns:.9}").unwrap();
+    writeln!(output, "warmup,{warmup}").unwrap();
+    writeln!(output, "samples,{}", samples.len()).unwrap();
+    for (index, sample) in samples.iter().enumerate() {
+        writeln!(
+            output,
+            "sample,{index},{},{},0",
+            sample.cpu_wall_ns, sample.gpu_timestamp_ns
+        )
+        .unwrap();
+    }
+    fs::write(path, output).map_err(|error| format!("write {}: {error}", path.display()))
 }
 
 #[test]
@@ -257,4 +350,59 @@ fn cross_adapter_timestamp_probe_is_strict_or_explicitly_skipped() {
             "SKIPPED native RHI timestamp probe: no timestamp-capable hardware completed a real RHI submission"
         );
     }
+}
+
+/// Produces a real raw timestamp artifact for auditing the RHI query path.
+///
+/// This is deliberately not a material-performance artifact. Its
+/// `rhi_timestamp_probe` scope is rejected by the material gate because this
+/// workload does not execute the production native material frame.
+#[test]
+#[ignore = "requires PRISM_REQUIRE_GPU=1 and a physical timestamp-capable GPU"]
+fn write_real_rhi_timestamp_probe_artifact() {
+    assert_eq!(
+        std::env::var("PRISM_REQUIRE_GPU").as_deref(),
+        Ok("1"),
+        "the real timestamp artifact producer requires PRISM_REQUIRE_GPU=1"
+    );
+    let path = std::env::var_os("PRISM_RHI_TIMESTAMP_EVIDENCE")
+        .expect("set PRISM_RHI_TIMESTAMP_EVIDENCE to an output path");
+    let path = std::path::Path::new(&path);
+    let warmup = env_u64("PRISM_RHI_TIMESTAMP_WARMUP", 3).unwrap();
+    let sample_count = env_u64("PRISM_RHI_TIMESTAMP_SAMPLES", 30).unwrap();
+    let instance = WgpuInstance::new();
+    let mut observed_error = None;
+    for adapter in instance
+        .enumerate_adapters()
+        .into_iter()
+        .map(WgpuAdapter::new)
+    {
+        let evidence = AdapterEvidence::from_info(adapter.info());
+        if !evidence.is_hardware()
+            || !adapter
+                .capabilities()
+                .features
+                .contains(Features::TIMESTAMP_QUERY)
+        {
+            continue;
+        }
+        match collect_timestamp_samples(&instance, &adapter, warmup, sample_count) {
+            Ok((samples, period_ns)) => {
+                assert_eq!(samples.len(), sample_count as usize);
+                write_probe_artifact(path, &evidence, warmup, period_ns, &samples)
+                    .unwrap_or_else(|error| panic!("{error}"));
+                eprintln!(
+                    "wrote REAL RHI timestamp probe: adapter={evidence}, samples={}, path={}",
+                    samples.len(),
+                    path.display()
+                );
+                return;
+            }
+            Err(error) => observed_error = Some(format!("{evidence}: {error}")),
+        }
+    }
+    panic!(
+        "PRISM_REQUIRE_GPU=1: no physical timestamp-capable adapter produced raw evidence{}",
+        observed_error.map_or_else(String::new, |error| format!("; last error: {error}"))
+    );
 }
