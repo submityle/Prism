@@ -5,7 +5,7 @@ use prism_render_architecture::gpu_scene::{
     CpuRenderScene, GeometryHandle, SceneApplyReport, SceneHandle, SceneMaterialHandle,
     SceneTransaction,
 };
-use prism_render_material::{MaterialExecutionTables, MaterialRecord};
+use prism_render_material::{DynamicChannels, MaterialExecutionTables, MaterialRecord};
 use prism_render_visibility::{
     GeometryLodChain, GpuRenderWorkItem, GpuViewRecord, ViewHandle, VisibilityDiagnostics,
 };
@@ -29,6 +29,7 @@ pub struct PrismRenderScene {
     pub(super) scene: CpuRenderScene,
     pub(super) geometry: BTreeMap<GeometryHandle, GeometryLodChain>,
     pub(super) materials: BTreeMap<SceneMaterialHandle, MaterialRecord>,
+    pub(super) material_dynamic: BTreeMap<SceneMaterialHandle, DynamicChannels>,
     pub(super) entities: BTreeMap<Entity, SceneHandle>,
     pub(super) owners: BTreeMap<SceneHandle, Entity>,
     pub(super) views: BTreeMap<Entity, PrismViewResult>,
@@ -53,6 +54,7 @@ impl Default for PrismRenderScene {
             scene: CpuRenderScene::default(),
             geometry: BTreeMap::new(),
             materials: BTreeMap::new(),
+            material_dynamic: BTreeMap::new(),
             entities: BTreeMap::new(),
             owners: BTreeMap::new(),
             views: BTreeMap::new(),
@@ -98,7 +100,11 @@ impl PrismRenderScene {
     /// Register or replace a material, consumed afresh by every cull.
     pub fn insert_material(&mut self, record: MaterialRecord) {
         if self.materials.get(&record.handle) != Some(&record) {
+            let handle = record.handle;
             self.materials.insert(record.handle, record);
+            self.material_dynamic
+                .entry(handle)
+                .or_insert(DynamicChannels::NONE);
             self.material_epoch = self.material_epoch.wrapping_add(1).max(1);
         }
     }
@@ -106,6 +112,7 @@ impl PrismRenderScene {
     pub fn remove_material(&mut self, handle: SceneMaterialHandle) -> Option<MaterialRecord> {
         let removed = self.materials.remove(&handle);
         if removed.is_some() {
+            self.material_dynamic.remove(&handle);
             self.material_epoch = self.material_epoch.wrapping_add(1).max(1);
         }
         removed
@@ -135,6 +142,34 @@ impl PrismRenderScene {
     /// Iterate the authoritative material records for render extraction.
     pub fn material_records(&self) -> impl Iterator<Item = &MaterialRecord> {
         self.materials.values()
+    }
+
+    /// Publishes runtime dynamic channels with the same material-table epoch as
+    /// the authored record. Dynamic channels do not alter the material
+    /// revision; they only dirty the header words at the render boundary.
+    pub fn set_material_dynamic_channels(
+        &mut self,
+        handle: SceneMaterialHandle,
+        channels: DynamicChannels,
+    ) -> bool {
+        if !self.materials.contains_key(&handle) {
+            return false;
+        }
+        let channels = DynamicChannels::from_words(channels.to_words());
+        let changed = self.material_dynamic.get(&handle).copied() != Some(channels);
+        if changed {
+            self.material_dynamic.insert(handle, channels);
+            self.material_epoch = self.material_epoch.wrapping_add(1).max(1);
+        }
+        changed
+    }
+
+    /// Returns the sanitized runtime dynamic channels for one live material.
+    pub fn material_dynamic_channels(&self, handle: SceneMaterialHandle) -> DynamicChannels {
+        self.material_dynamic
+            .get(&handle)
+            .copied()
+            .unwrap_or(DynamicChannels::NONE)
     }
 
     /// Publishes the verified execution table used by the native material

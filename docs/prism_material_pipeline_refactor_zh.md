@@ -2047,3 +2047,21 @@ checkout 的材质状态裁决。
 
 因此，`0e23ecae36` 之后的性能 artifact 和 registered link 证据只收窄了证据缺口，
 不改变“材质重构整体未完成”的结论。
+
+## 18.9 2026-11-12 Native 主世界材质 acceptance 增量
+
+本轮继续收紧真实生产验收边界：`native_nonempty_lifecycle_acceptance` 不再在
+render-world 手工写入 material row、execution table 或 execution binding，而是只在主世界
+`PrismRenderScene` 发布材质记录、canonical builtin execution table 和 dynamic channel，再由
+`ExtractedNativeMaterials` / `reconcile_native_materials` 进入 Native queue/composite。
+
+- 严格命令 `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_app --test
+  native_nonempty_lifecycle_acceptance -- --nocapture` 在 Apple M2/Metal 上 **1 passed / 0 failed**。
+- 该门禁同时证明 stable material handle、builtin execution publication、dynamic channel
+  (`wetness = 0.5`) 和真实 Native mesh 的 extraction → reconcile → Surface/GBuffer/identity/
+  composite 生命周期；不再把 render-world 手工双写当作主世界材质接线证据。
+- 这只关闭了 builtin Unlit 的主世界材质生命周期切片。MaskBlend 的完整主世界 plan 发布、
+  registered response、完整 dynamic/channel/domain/texture/VT 组合、默认主帧 CPU golden、
+  GI 硬件 parity、realtime↔reference 图像 parity、跨 backend/adapter 和性能预算 gate 仍未完成。
+
+因此，本增量提高了 Native 生产路径证据强度，但不改变“材质重构整体未完成”的结论。

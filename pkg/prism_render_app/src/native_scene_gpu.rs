@@ -14,11 +14,11 @@ use prism_ecs::prelude::{Res, ResMut, Resource};
 use prism_ecs::world::World;
 use prism_render_architecture::gpu_scene::{
     bounds_row, current_transform_row, instance_row, previous_transform_row, GpuSceneBounds,
-    GpuSceneInstance, GpuSceneTransform, SparseBufferPlanError, SparseBufferUploadReport,
-    SparseBufferVec, UploadBudget, UploadPlan, UploadPlanner,
+    GpuSceneInstance, GpuSceneTransform, SceneMaterialHandle, SparseBufferPlanError,
+    SparseBufferUploadReport, SparseBufferVec, UploadBudget, UploadPlan, UploadPlanner,
 };
 use prism_render_driver::{BufferId, BufferUsages, FrameSync, Instance, RenderDevice};
-use prism_render_material::{MaterialExecutionTables, MaterialRecord};
+use prism_render_material::{DynamicChannels, MaterialExecutionTables, MaterialRecord};
 use prism_render_runtime::RenderRuntime;
 
 use crate::runtime_resource::RenderRuntimeResource;
@@ -63,6 +63,8 @@ pub struct ExtractedNativeMaterials {
     pub material_epoch: u64,
     /// Complete live material set when `changed` is true.
     pub records: Vec<MaterialRecord>,
+    /// Sanitized runtime channels paired with the same material publication.
+    pub dynamic: Vec<(SceneMaterialHandle, DynamicChannels)>,
     /// Whether the records differ from the previous extraction.
     pub changed: bool,
     /// The scene-owned execution table when its publication changed. `None`
@@ -349,6 +351,19 @@ where
         records: (material_changed || execution_changed)
             .then(|| scene.material_records().cloned().collect())
             .unwrap_or_default(),
+        dynamic: (material_changed || execution_changed)
+            .then(|| {
+                scene
+                    .material_records()
+                    .map(|record| {
+                        (
+                            record.handle,
+                            scene.material_dynamic_channels(record.handle),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
         changed: material_changed || execution_changed,
         execution_tables: execution_changed
             .then(|| scene.execution_tables().cloned())
@@ -431,7 +446,9 @@ mod tests {
     };
     use prism_render_driver::Extent3d;
     use prism_render_driver_null::NullInstance;
-    use prism_render_material::{fallback_material_record, MaterialExecutionTables};
+    use prism_render_material::{
+        fallback_material_record, DynamicChannels, MaterialExecutionTables,
+    };
     use prism_render_runtime::RenderRuntime;
 
     fn runtime() -> RenderRuntime<NullInstance> {
@@ -719,6 +736,13 @@ mod tests {
         let mut scene = PrismRenderScene::default();
         let handle = SceneMaterialHandle::new(1, 1);
         scene.insert_material(fallback_material_record(handle, 1));
+        let dynamic = DynamicChannels {
+            wetness: 0.25,
+            snow: 0.5,
+            damage: 0.75,
+            dissolve: 1.0,
+        };
+        assert!(scene.set_material_dynamic_channels(handle, dynamic));
         scene.set_execution_tables(MaterialExecutionTables::builtin());
         main.insert_resource(scene);
 
@@ -729,6 +753,7 @@ mod tests {
         assert!(first.changed);
         assert!(first.execution_tables_changed);
         assert_eq!(first.records.len(), 1);
+        assert_eq!(first.dynamic, vec![(handle, dynamic)]);
         assert!(first.execution_tables.is_some());
         assert_ne!(first.material_epoch, 0);
         assert_ne!(first.execution_epoch, 0);
@@ -742,9 +767,27 @@ mod tests {
         assert!(!stable.changed);
         assert!(!stable.execution_tables_changed);
         assert!(stable.records.is_empty());
+        assert!(stable.dynamic.is_empty());
         assert!(stable.execution_tables.is_none());
         assert_eq!(stable.material_epoch, first_material_epoch);
         assert_eq!(stable.execution_epoch, first_execution_epoch);
+
+        assert!(main
+            .resource_mut::<PrismRenderScene>()
+            .set_material_dynamic_channels(
+                handle,
+                DynamicChannels {
+                    wetness: 0.75,
+                    ..dynamic
+                },
+            ));
+        extract_native_scene::<NullInstance>(&mut main, &mut secondary);
+        let dynamic_update = secondary
+            .get_resource::<ExtractedNativeMaterials>()
+            .expect("dynamic channel update extraction resource");
+        assert!(dynamic_update.changed);
+        assert_eq!(dynamic_update.records.len(), 1);
+        assert_eq!(dynamic_update.dynamic[0].1.wetness, 0.75);
     }
 
     #[test]

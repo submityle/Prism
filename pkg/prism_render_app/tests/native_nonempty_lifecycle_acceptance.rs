@@ -24,23 +24,17 @@ use prism_render_app::{
     NativeFrameExecution, NativeFramePhase, PrismRenderPlugin, RenderApp, RenderAppConfig,
     RenderFrameStats, RenderMaterials, RenderRuntimeResource, SceneRegistry, VisibilityWorkList,
 };
-use prism_render_architecture::abi::{AbiHash, AbiVersion};
 use prism_render_architecture::geometry::{
     GeometryLodRecord, GeometryPrimitiveKind, GeometryRecord,
 };
-use prism_render_architecture::gpu_scene::SceneHandle;
-use prism_render_architecture::shader_package::{
-    ArtifactDigest, ExecutionFamily, ManifestExpectation, ModuleId, PermutationSpace,
-    ShaderPackageId, ShaderPackageManifest, ShaderPackageRegistry, ShaderPackageVariantManifest,
-};
+use prism_render_architecture::gpu_scene::{SceneHandle, SceneMaterialHandle};
 use prism_render_driver as rhi;
 use prism_render_driver::{Adapter, FrameSync, Instance, PrimitiveTopology, RenderQueue};
 use prism_render_driver_wgpu::{
     require_hardware_gpu, WgpuAdapter, WgpuDevice, WgpuInstance, WgpuQueue, WgpuSurface,
 };
 use prism_render_material::{
-    fallback_material_record, BuiltinProgram, ChannelMask, CompiledEntry, MaterialExecutionBinding,
-    MaterialExecutionTables, ProgramRef, ShadingPlan,
+    fallback_material_record, BuiltinProgram, DynamicChannels, MaterialExecutionTables, ShadingPlan,
 };
 use prism_render_visibility::{
     GeometryLod, GeometryLodChain, GpuRenderWorkItem, RenderPassMask, VisibilityStageMask,
@@ -252,66 +246,7 @@ impl Instance for DelayedInstance {
 
 struct SceneFixture {
     camera: Entity,
-}
-
-fn builtin_unlit_execution_tables() -> (MaterialExecutionTables, MaterialExecutionBinding) {
-    let permutations = PermutationSpace::new([1]);
-    let manifest = ShaderPackageManifest {
-        id: ShaderPackageId::new("native-nonempty-lifecycle-unlit"),
-        source_revision: "1".into(),
-        entry_point: "main".into(),
-        abi_version: AbiVersion::from_parts(1, 0),
-        abi_hash: AbiHash::from_bytes(
-            prism_render_material::response_source::RESPONSE_FUNCTION_ABI.as_bytes(),
-        ),
-        variants: ShaderPackageVariantManifest::from_digests(
-            &permutations,
-            [ArtifactDigest([1; 32])],
-        )
-        .expect("the lifecycle fixture variant manifest is valid"),
-    };
-    let compiled = CompiledEntry::from_response_wgsl(
-        manifest.clone(),
-        vec!["var response: RegisteredResponse; return response;".into()],
-    )
-    .expect("the lifecycle fixture response source is valid");
-    let mut packages = ShaderPackageRegistry::new();
-    packages
-        .register_verified(compiled.artifact().clone())
-        .expect("the lifecycle fixture artifact registers");
-    packages
-        .validate(
-            &manifest.id,
-            &ManifestExpectation::new(manifest.abi_version, manifest.abi_hash),
-        )
-        .expect("the lifecycle fixture artifact validates");
-
-    let mut tables = MaterialExecutionTables::new();
-    let package = tables
-        .register_package(&compiled, &packages)
-        .expect("the lifecycle fixture package registers");
-    let program = tables
-        .register_program(
-            ProgramRef::Builtin(BuiltinProgram::Unlit),
-            &compiled,
-            package,
-            ModuleId(0),
-            permutations,
-        )
-        .expect("the lifecycle fixture program registers");
-    let plan = tables
-        .register_plan(
-            ShadingPlan::single_builtin(BuiltinProgram::Unlit),
-            program,
-            None,
-            ExecutionFamily::SplitResponse,
-            ChannelMask::default(),
-        )
-        .expect("the lifecycle fixture plan registers");
-    let binding = tables
-        .bind_raw(plan.get(), program.get(), package.get(), 0)
-        .expect("the lifecycle fixture binding validates");
-    (tables, binding)
+    material: SceneMaterialHandle,
 }
 
 fn broad_frustum() -> PrismFrustum {
@@ -376,6 +311,14 @@ fn scene_fixture(app: &mut App) -> SceneFixture {
         record.response_plan = ShadingPlan::single_builtin(BuiltinProgram::Unlit);
         record.surface.base_color = [1.0; 4];
         scene.insert_material(record);
+        assert!(scene.set_material_dynamic_channels(
+            material,
+            DynamicChannels {
+                wetness: 0.5,
+                ..DynamicChannels::NONE
+            },
+        ));
+        scene.set_execution_tables(MaterialExecutionTables::builtin());
     }
 
     let camera = app.world_mut().spawn((
@@ -425,30 +368,10 @@ fn scene_fixture(app: &mut App) -> SceneFixture {
                 fallback: false,
             }],
         });
-    let mut record = fallback_material_record(material, 1);
-    record.response_plan = ShadingPlan::single_builtin(BuiltinProgram::Unlit);
-    record.surface.base_color = [1.0; 4];
-    render
-        .world
-        .resource_mut::<SceneRegistry>()
-        .insert_material(record.clone());
     render
         .world
         .resource_mut::<SceneRegistry>()
         .bind_geometry_mesh(geometry, mesh_id);
-    let (tables, binding) = builtin_unlit_execution_tables();
-    let materials = render.world.resource_mut::<RenderMaterials>();
-    materials
-        .registry_mut()
-        .install_execution_tables(&tables)
-        .expect("the lifecycle fixture execution tables install");
-    materials
-        .publish(record)
-        .expect("the native material publishes into the canonical registry");
-    materials
-        .registry_mut()
-        .set_execution_binding(material, binding)
-        .expect("the lifecycle fixture execution binding installs");
     render
         .world
         .resource_mut::<VisibilityWorkList>()
@@ -462,7 +385,7 @@ fn scene_fixture(app: &mut App) -> SceneFixture {
             sort_key: WorkSortKey::new(0, 0, 0, 0, 3),
         }]);
 
-    SceneFixture { camera }
+    SceneFixture { camera, material }
 }
 
 fn target_snapshot(app: &App) -> (SurfaceViewTargetKey, prism_render_app::RenderTarget) {
@@ -557,6 +480,28 @@ fn native_nonempty_resize_preserves_old_target_until_completion_then_reclaims_it
         gate.release(&queue.inner);
     }
     app.update();
+    {
+        let render = app.get_sub_app(RenderApp).expect("native render sub-app");
+        let materials = render.world.resource::<RenderMaterials>();
+        assert_eq!(
+            materials
+                .registry()
+                .record_at(fixture.material.index)
+                .expect("main-world material extraction must publish the native row")
+                .handle,
+            fixture.material
+        );
+        assert_eq!(
+            materials
+                .registry()
+                .dynamic_channels_at(fixture.material.index),
+            DynamicChannels {
+                wetness: 0.5,
+                ..DynamicChannels::NONE
+            },
+            "dynamic channels must cross the main/render world boundary"
+        );
+    }
     {
         let render = app.sub_app_mut(RenderApp).expect("native render sub-app");
         assert!(

@@ -1286,3 +1286,16 @@ realtime ↔ path-traced image parity、跨 backend/adapter、完整 MaterialX/e
 sample admission；但 `material_gpu_performance_evidence_gate -- --ignored` 仍不能判定
 预算通过，直到提供六个审定的 CPU/GPU P50/P95/P99 上限。故性能项状态应记录为：
 **采样与 artifact 完成，预算验收未完成**。
+
+## 8.8 2026-11-12 Native 主世界材质 acceptance 复验
+
+- `native_nonempty_lifecycle_acceptance` 已移除 render-world material row、execution table 和
+  execution binding 的手工双写；fixture 只通过主世界 `PrismRenderScene` 发布材质、builtin
+  execution table 和 dynamic channel。
+- 严格命令 `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_app --test
+  native_nonempty_lifecycle_acceptance -- --nocapture` 在 Apple M2/Metal 上 **1 passed / 0 failed**。
+- 复验覆盖 stable handle extraction、builtin execution reconcile、dynamic channel header publication
+  和真实 Native mesh 的 HDR 生命周期；默认环境无物理 adapter 时只允许 skip，不能计作 GPU 通过。
+- 该证据仍限于 builtin Unlit 生命周期；MaskBlend/registered/full texture-VT/dynamic 组合、GI
+  evaluator 硬件 readback、全帧 CPU golden、realtime↔path-traced parity、跨 backend/adapter 和
+  P50/P95/P99 预算 gate 仍为未完成。

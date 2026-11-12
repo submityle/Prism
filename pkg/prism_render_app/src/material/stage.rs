@@ -7,12 +7,12 @@ use alloc::vec::Vec;
 use prism_asset::AssetId;
 use prism_ecs::prelude::{Res, ResMut, Resource};
 use prism_image::Image;
+use prism_render_architecture::gpu_scene::GpuCompletionValue;
 use prism_render_driver::{FrameSync, Instance, RenderDevice, RenderQueue};
 use prism_render_material::{
-    MaterialExecutionBinding, MaterialExecutionTables, MaterialRecord, MaterialRegistry,
-    MaterialRegistryError, MaterialSnapshot, ShadingPlan,
+    DynamicChannels, MaterialExecutionBinding, MaterialExecutionTables, MaterialRecord,
+    MaterialRegistry, MaterialRegistryError, MaterialSnapshot, ShadingPlan,
 };
-use prism_render_architecture::gpu_scene::GpuCompletionValue;
 
 /// The index of the permanent fallback material (slot zero).
 pub const FALLBACK_MATERIAL_INDEX: u32 = 0;
@@ -400,7 +400,12 @@ pub(crate) fn reconcile_native_materials<I>(
 
     if extracted.execution_tables_changed {
         let handles: Vec<_> = (1..materials.registry().capacity())
-            .filter_map(|index| materials.registry().record_at(index).map(|record| record.handle))
+            .filter_map(|index| {
+                materials
+                    .registry()
+                    .record_at(index)
+                    .map(|record| record.handle)
+            })
             .collect();
         for handle in handles {
             materials
@@ -413,9 +418,7 @@ pub(crate) fn reconcile_native_materials<I>(
             .clone()
             .or_else(|| materials.builtin_execution_tables().cloned())
             .unwrap_or_else(|| {
-                panic!(
-                    "native material execution tables changed without a verified replacement"
-                )
+                panic!("native material execution tables changed without a verified replacement")
             });
         materials
             .registry_mut()
@@ -428,6 +431,7 @@ pub(crate) fn reconcile_native_materials<I>(
         .iter()
         .map(|record| (record.handle.index, record))
         .collect();
+    let incoming_dynamic: BTreeMap<_, _> = extracted.dynamic.iter().copied().collect();
     let completed = GpuCompletionValue(runtime.runtime().completed_value());
     materials.registry_mut().reclaim_completed(completed);
 
@@ -475,12 +479,14 @@ pub(crate) fn reconcile_native_materials<I>(
             }
             Some(current) => panic!(
                 "native material revision did not advance for {:?}: current={}, incoming={}",
-                record.handle,
-                current.revision,
-                record.revision
+                record.handle, current.revision, record.revision
             ),
             None => {
-                if materials.registry().record_at(record.handle.index).is_some() {
+                if materials
+                    .registry()
+                    .record_at(record.handle.index)
+                    .is_some()
+                {
                     continue;
                 }
                 materials
@@ -500,6 +506,14 @@ pub(crate) fn reconcile_native_materials<I>(
                 .clear_execution_binding(record.handle)
                 .unwrap_or_else(|error| panic!("native execution binding clear failed: {error:?}"));
         }
+        let dynamic = incoming_dynamic
+            .get(&record.handle)
+            .copied()
+            .unwrap_or(DynamicChannels::NONE);
+        materials
+            .registry_mut()
+            .set_dynamic_channels(record.handle, dynamic)
+            .unwrap_or_else(|error| panic!("native dynamic channel publication failed: {error:?}"));
         scene_registry.insert_material(record);
     }
 }
