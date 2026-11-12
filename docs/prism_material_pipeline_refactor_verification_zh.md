@@ -1102,7 +1102,7 @@ GPU dispatch/readback 通过必须分开记录。
 | VT portable | `PRISM_REQUIRE_GPU=1 WGPU_BACKEND=metal cargo test -p prism_render_material_gpu --test material_vt_gpu_parity portable_material_vt_sampling_gpu_parity -- --nocapture` | shipping VT consumer 在真实设备 readback 后与 CPU expected rows 对拍；portable 路径是必需路径 | **局部闭合**：不证明生产 app 默认主帧消费完整 VT 生命周期 |
 | VT production publication | `PRISM_REQUIRE_GPU=1 WGPU_BACKEND=metal cargo test -p prism_render_app --test resident_vt_gpu production_app_resident_plugin_dispatches_and_publishes_shader_visible_atlas -- --nocapture` | 生产 plugin 的 feedback/upload/publication 经过队列完成，shader-visible atlas 与 row/generation 可观察 | **部分闭合**：不证明 response/composite 全链路纹理语义 |
 | response 局部 GPU parity | `PRISM_REQUIRE_GPU=1 WGPU_BACKEND=metal cargo test -p prism_render_material_gpu --test dynamic_channels_gpu_parity -- --nocapture`（同理运行 `texture_lod_gpu_parity`、`glint_gpu_parity`、`measured_brdf_gpu_parity`） | shipping WESL 局部函数真实 dispatch/readback 与 CPU golden 对拍 | **不是完整 response 门禁**：局部 lobe/采样 parity 不得升级为默认主帧 response parity |
-| 性能证据完整性与预算 | 见 §8.2 的 `material_gpu_performance_evidence_gate` 命令 | 真实 artifact 含 CPU wall 与 GPU timestamp 的 P50/P95/P99、至少 30 个样本、固定 commit/adapter/backend/content；六个显式 ns budget 均满足 | **未闭合**：当前 RHI 尚无 timestamp query 写入/resolve/readback，且没有已审定的基线预算 |
+| 性能证据完整性与预算 | 见 §8.2 的 `material_gpu_performance_evidence_gate` 命令 | 真实 production-native-material artifact 含逐样本 CPU wall 与 GPU timestamp，门内重算 P50/P95/P99，固定 commit/adapter/backend/content；六个显式 ns budget 均满足 | **未闭合**：RHI timestamp probe 已能验证 query/resolve/readback，但尚无生产 Native 材质帧采样 artifact 和已审定预算 |
 
 “通过证据”列描述的是该命令实际证明的范围；“部分闭合”不是整体材质重构完成。完整
 response、默认主帧 CPU golden、GI 全材质组合和 realtime↔path-traced image parity 仍是独立
@@ -1111,26 +1111,29 @@ response、默认主帧 CPU golden、GI 全材质组合和 realtime↔path-trace
 ### 8.2 P50/P95/P99 性能证据门
 
 新增测试文件
-`pkg/prism_render_app/tests/material_performance_evidence.rs` 只做 artifact admission：
-它不测量 renderer，也不把 CPU wall time 冒充 GPU time。artifact 是无逗号字段值的简单 CSV：
+`pkg/prism_render_app/tests/material_performance_evidence.rs` 只做 production artifact admission：
+它不测量 renderer，也不把 CPU wall time 冒充 GPU time；门内拒绝 summary-only 文件并从逐样本
+记录重算 percentiles。artifact 是无逗号字段值的简单 CSV：
 
 ```text
-schema,prism-material-perf-v1
+schema,prism-material-perf-v2
 commit,<7-64 hex chars>
 scene,default_native_material_frame
+capture_scope,production_native_material_frame
+producer,prism_native_material_frame_capture_v1
 backend,<metal|vulkan|dx12>
 adapter,<physical adapter name>
 resolution,<width>x<height>
 warmup,<positive integer>
 samples,<at least 30>
 timestamp_source,gpu_timestamp_query
-metric,frame_cpu_wall_ns,<samples>,<p50>,<p95>,<p99>
-metric,frame_gpu_timestamp_ns,<samples>,<p50>,<p95>,<p99>
-metric,material_upload_bytes,<samples>,<p50>,<p95>,<p99>
+timestamp_unit,ns
+sample,<index>,<cpu_wall_ns>,<gpu_timestamp_ns>,<material_upload_bytes>
 ```
 
-解析器强制每个 metric 的 `0 < P50 <= P95 <= P99`、样本数一致、GPU metric 非零、commit/
-adapter/backend/content 元数据完整，并拒绝 `cpu_wall_clock` 作为 `timestamp_source`。实际
+解析器强制 raw sample index 连续、CPU/GPU duration 非零、样本数一致、commit/adapter/backend/content
+元数据完整，并拒绝 percentile summary、generic RHI probe 和 `cpu_wall_clock` 作为
+`timestamp_source`。实际
 性能门还必须提供由 benchmark owner 审定的六个预算变量；代码不自行臆造预算：
 
 ```sh
@@ -1146,16 +1149,18 @@ cargo test -p prism_render_app --test material_performance_evidence \
   material_gpu_performance_evidence_gate -- --ignored --nocapture
 ```
 
-普通单元测试只验证 parser 的拒绝规则；上面的 ignored 命令才是性能证据门。当前
-`pkg/prism_render_app/tests/native_rhi_probe.rs` 已明确记录 RHI 只有 timestamp capability bit，
-没有 query-set/write/resolve/readback，因此在补齐生产时间戳通路前不得生成或宣称 GPU
-P50/P95/P99 通过。`native_performance_evidence.rs` 的 Null/CPU percentiles 只能作为 CPU
-统计 API 的辅助证据。
+普通单元测试只验证 parser 的拒绝规则；上面的 ignored 命令才是性能证据门。
+`pkg/prism_render_app/tests/native_rhi_probe.rs` 已验证真实设备上的 query-set/write/resolve/
+readback 能力，但其 `rhi_timestamp_probe` artifact 被材质门显式拒绝。补齐生产 Native 材质帧
+采样器、固定内容矩阵和预算前，不得宣称 GPU P50/P95/P99 通过。
 
 ### 8.3 当前执行结果与未闭合边界
 
-- 本轮新增 parser 单测覆盖：完整三 percentile artifact 接受、CPU wall 冒充 GPU 拒绝、样本
-  数不足拒绝；没有伪造真实 GPU artifact，也没有把 ignored gate 标为通过。
+- 本轮新增 parser 单测覆盖：逐样本 artifact 重算 percentiles、summary-only 拒绝、CPU wall 冒充
+  GPU 拒绝、generic RHI probe 拒绝和非连续/不足样本拒绝；没有伪造真实生产材质 artifact，也
+  没有把 ignored gate 标为通过。
+- 当前 RHI probe 在 Apple M2/Metal 上完成真实 timestamp readback；这只证明 RHI 能力，不改变生产
+  材质性能门未闭合的裁决。
 - 当前可确认的生产缺口仍是默认主帧全链路 GPU readback↔CPU golden、完整 response 组合、GI
   evaluator 全材质覆盖、VT 纹理语义全链路、realtime↔path-traced 图像 parity、跨 backend/
   adapter parity，以及真实 GPU timestamp 和预算基线。
@@ -1171,8 +1176,21 @@ P50/P95/P99 通过。`native_performance_evidence.rs` 的 Null/CPU percentiles �
   wrapped-diffuse 上；Low/Medium/High/Ultra 门禁以及指定 OpenPBR furnace 均通过。
 - 当前回归证据：`prism_render_material` **892 passed / 0 failed**；
   `prism_render_material_authoring --all-targets` **67 passed / 0 failed**；
-  `prism_render_app material::` **175 passed / 0 failed**；
+  `prism_render_app material::` **177 passed / 0 failed**；
   `composite_contract_tests` **19 passed / 0 failed**。
-- 严格 GPU 门禁 `PRISM_REQUIRE_GPU=1 WGPU_BACKEND=metal` 在当前环境因没有可用 adapter 失败，
-  没有发生 GPU dispatch/readback。因此默认 Native 全帧、GI evaluator 硬件 parity、实时↔path-traced
-  图像 parity、跨 backend/adapter 和 P50/P95/P99 仍只能记为未完成/未验证。
+- 严格 Metal GPU 门禁
+  `physical_gpu_surface_encode_gbuffer_readback_and_composite_close_the_contract` 已在真实物理
+  GPU 上通过（1 passed），确认 Surface encode/GBuffer/identity/composite 纵向切片完成。此前
+  identity 断言失败来自测试在 composite 原位覆盖 identity buffer 后才读取 prepass，已修正时序。
+  默认 Native 全帧、GI evaluator 硬件 parity、实时↔path-traced 图像 parity、跨 backend/adapter
+  和 P50/P95/P99 仍只能记为未完成/未验证。
+
+## 8.5 2026-11-12 执行增量
+
+- `reference_pt_adapter` 定向测试 **23 passed / 0 failed**；它现在消费 canonical GPU surface、
+  texture rows、sampled texels 和 dynamic channels，并对无法表达的 normal/measured/NPR/glint
+  context 显式 fail-closed。该结果是 CPU adapter/reference parity，不是 GPU↔reference 图像 parity。
+- Native registered response source admission 已加入 execution-table publication 前；artifact-only
+  SPIR-V 不再伪造 Native response source。当前 material 定向测试 **177 passed / 0 failed**。
+- 真实 Apple M2/Metal RHI timestamp probe 已通过 query/resolve/readback；生产 Native material raw
+  sample artifact 尚未采集，因此性能门仍未通过。
