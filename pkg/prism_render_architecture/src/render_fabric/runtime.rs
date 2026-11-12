@@ -2,13 +2,18 @@
 use super::*;
 use alloc::{boxed::Box, collections::BTreeMap, sync::Arc, vec, vec::Vec};
 use core::fmt;
-use prism_render_driver::{Extent3d, RenderDevice, RenderQueue};
+use core::num::NonZeroU64;
+use prism_render_driver::{
+    Extent3d, IndexFormat, RenderDevice, RenderQueue, DISPATCH_INDIRECT_ARGS_SIZE,
+    DRAW_INDEXED_INDIRECT_ARGS_SIZE, DRAW_INDIRECT_ARGS_SIZE,
+};
 use prism_render_graph::frame_graph::ResourceId;
 use prism_render_graph::{
     full_range, BufferDesc, BufferHandle, CompileError, ExecuteContext, ExecutionPlan,
     ImportedBuffer, ImportedTexture, LogicalResource, PassBuilder, PassFlags, PassKind,
     PreparedGraph, RecordedGraph, RenderGraph, SizeClass, TextureDesc, TextureHandle,
 };
+use std::sync::Mutex;
 
 /// Entry/exit state and default view supplied by the external resource owner.
 /// The semantic binding remains authoritative for physical ID, frame and layout.
@@ -93,6 +98,30 @@ pub enum RuntimeResourceHandle {
     Texture(TextureHandle),
 }
 
+/// A graph-local output published during RenderGraph preparation. Host passes
+/// appended after a Fabric writer can resolve the writer's SSA handle during
+/// their own setup closure, preserving one dependency chain in the host graph.
+#[derive(Clone)]
+pub struct RuntimeGraphOutput {
+    handle: Arc<Mutex<Option<RuntimeResourceHandle>>>,
+}
+
+impl RuntimeGraphOutput {
+    fn new() -> Self {
+        Self {
+            handle: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    pub fn resolve(&self) -> Option<RuntimeResourceHandle> {
+        self.handle.lock().ok().and_then(|handle| *handle)
+    }
+
+    fn publish(&self, handle: RuntimeResourceHandle) {
+        *self.handle.lock().expect("runtime output lock") = Some(handle);
+    }
+}
+
 /// Reuses a version-zero imported resource already declared by the host graph.
 ///
 /// The mapping carries only the graph-local handle. The compiled Fabric
@@ -117,19 +146,17 @@ impl RuntimeGraphResourceMapping {
         }
     }
 }
-impl RuntimeResourceHandle {
-    fn version(self) -> u32 {
-        match self {
-            Self::Buffer { handle, .. } => handle.version(),
-            Self::Texture(handle) => handle.version(),
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeResourceUse {
     pub bound: BoundResourceUse,
     pub handle: RuntimeResourceHandle,
+}
+
+#[derive(Clone, Copy)]
+struct DeclaredBuffer {
+    handle: BufferHandle,
+    offset: u64,
+    bytes: u64,
 }
 
 /// One immutable frame allocation is shared with the compiled declaration.
@@ -238,6 +265,37 @@ impl<'a, 'graph> RuntimePassContext<'a, 'graph> {
         self.access(Some(identity), ordinal)
     }
 
+    /// Resolve a shared declared buffer to its graph-local handle.
+    ///
+    /// The ordinal is resolved against the original pass template. Texture
+    /// accesses, missing ordinals, and object-scoped accesses return `None`.
+    /// The returned handle is therefore always backed by an access visible to
+    /// this pass's compiled declaration.
+    pub fn buffer_handle(&self, ordinal: usize) -> Option<BufferHandle> {
+        self.buffer_handle_at(None, ordinal)
+    }
+
+    /// Resolve an explicitly object-scoped declared buffer to its graph-local
+    /// handle. A shared access never satisfies this lookup.
+    pub fn object_buffer_handle(
+        &self,
+        identity: ObjectResourceIdentity,
+        ordinal: usize,
+    ) -> Option<BufferHandle> {
+        self.buffer_handle_at(Some(identity), ordinal)
+    }
+
+    /// Resolve a declared shared or object-scoped buffer to its graph-local
+    /// handle. `None` explicitly selects shared storage.
+    pub fn buffer_handle_at(
+        &self,
+        identity: Option<ObjectResourceIdentity>,
+        ordinal: usize,
+    ) -> Option<BufferHandle> {
+        self.declared_buffer(identity, ordinal, None)
+            .map(|buffer| buffer.handle)
+    }
+
     /// Shared-only access in the original PassTemplate order.
     pub fn buffer(&self, access: usize) -> Option<(BufferId, u64, u64)> {
         self.resolve_buffer(self.shared_access(access)?)
@@ -258,6 +316,321 @@ impl<'a, 'graph> RuntimePassContext<'a, 'graph> {
             } => Some((self.commands.buffer(handle), offset, bytes)),
             RuntimeResourceHandle::Texture(_) => None,
         }
+    }
+
+    fn declared_buffer(
+        &self,
+        identity: Option<ObjectResourceIdentity>,
+        ordinal: usize,
+        required_access: Option<AccessKind>,
+    ) -> Option<DeclaredBuffer> {
+        let access = self.access(identity, ordinal)?;
+        if required_access.is_some_and(|required| access.bound.declaration.access != required) {
+            return None;
+        }
+        if access.bound.declaration.access.buffer_use().is_none() {
+            return None;
+        }
+        match access.handle {
+            RuntimeResourceHandle::Buffer {
+                handle,
+                offset,
+                bytes,
+            } => Some(DeclaredBuffer {
+                handle,
+                offset,
+                bytes,
+            }),
+            RuntimeResourceHandle::Texture(_) => None,
+        }
+    }
+
+    fn valid_indirect_range(bytes: u64, offset: u64, count: u32, stride: u64, record: u64) -> bool {
+        offset.is_multiple_of(4)
+            && offset <= bytes
+            && (count == 0
+                || u64::from(count - 1)
+                    .checked_mul(stride)
+                    .and_then(|prefix| prefix.checked_add(record))
+                    .and_then(|length| offset.checked_add(length))
+                    .is_some_and(|end| end <= bytes))
+    }
+
+    fn can_record_graph_indirect(buffer: DeclaredBuffer) -> bool {
+        // ExecuteContext's indirect API addresses a graph resource from byte
+        // zero. A Fabric physical suballocation has an additional offset that
+        // cannot be rebased through that API, so refusing it is safer than
+        // emitting a draw against a neighboring allocation.
+        buffer.offset == 0
+    }
+
+    /// Record a shared non-indexed indirect draw from an `IndirectRead` access.
+    /// Returns `true` only when the declaration, range, pass kind, and graph
+    /// address all admit the command; invalid or undeclared resources record
+    /// nothing and return `false`.
+    pub fn draw_indirect(&mut self, ordinal: usize, offset: u64) -> bool {
+        self.draw_indirect_at(None, ordinal, offset)
+    }
+
+    /// Record an object-scoped non-indexed indirect draw from an `IndirectRead`
+    /// access. Shared storage never satisfies this lookup.
+    pub fn object_draw_indirect(
+        &mut self,
+        identity: ObjectResourceIdentity,
+        ordinal: usize,
+        offset: u64,
+    ) -> bool {
+        self.draw_indirect_at(Some(identity), ordinal, offset)
+    }
+
+    /// Record a non-indexed indirect draw from an explicitly scoped declared
+    /// `IndirectRead` access.
+    pub fn draw_indirect_at(
+        &mut self,
+        identity: Option<ObjectResourceIdentity>,
+        ordinal: usize,
+        offset: u64,
+    ) -> bool {
+        if self.commands.kind() != PassKind::Raster {
+            return false;
+        }
+        let Some(buffer) = self.declared_buffer(identity, ordinal, Some(AccessKind::IndirectRead))
+        else {
+            return false;
+        };
+        if !Self::can_record_graph_indirect(buffer)
+            || !Self::valid_indirect_range(
+                buffer.bytes,
+                offset,
+                1,
+                0,
+                u64::from(DRAW_INDIRECT_ARGS_SIZE),
+            )
+        {
+            return false;
+        }
+        self.commands.draw_indirect(buffer.handle, offset);
+        true
+    }
+
+    /// Record a shared indexed indirect draw from an `IndirectRead` access.
+    /// Returns `true` only when the declaration and command range are valid.
+    pub fn draw_indexed_indirect(&mut self, ordinal: usize, offset: u64) -> bool {
+        self.draw_indexed_indirect_at(None, ordinal, offset)
+    }
+
+    /// Record an object-scoped indexed indirect draw from an `IndirectRead`
+    /// access.
+    pub fn object_draw_indexed_indirect(
+        &mut self,
+        identity: ObjectResourceIdentity,
+        ordinal: usize,
+        offset: u64,
+    ) -> bool {
+        self.draw_indexed_indirect_at(Some(identity), ordinal, offset)
+    }
+
+    /// Record an indexed indirect draw from an explicitly scoped declared
+    /// `IndirectRead` access.
+    pub fn draw_indexed_indirect_at(
+        &mut self,
+        identity: Option<ObjectResourceIdentity>,
+        ordinal: usize,
+        offset: u64,
+    ) -> bool {
+        if self.commands.kind() != PassKind::Raster {
+            return false;
+        }
+        let Some(buffer) = self.declared_buffer(identity, ordinal, Some(AccessKind::IndirectRead))
+        else {
+            return false;
+        };
+        if !Self::can_record_graph_indirect(buffer)
+            || !Self::valid_indirect_range(
+                buffer.bytes,
+                offset,
+                1,
+                0,
+                u64::from(DRAW_INDEXED_INDIRECT_ARGS_SIZE),
+            )
+        {
+            return false;
+        }
+        self.commands.draw_indexed_indirect(buffer.handle, offset);
+        true
+    }
+
+    /// Record shared tightly packed indexed indirect draws from an
+    /// `IndirectRead` access.
+    pub fn multi_draw_indirect(
+        &mut self,
+        ordinal: usize,
+        offset: u64,
+        count: u32,
+        stride: u32,
+    ) -> bool {
+        self.multi_draw_indirect_at(None, ordinal, offset, count, stride)
+    }
+
+    /// Record object-scoped tightly packed indexed indirect draws from an
+    /// `IndirectRead` access.
+    pub fn object_multi_draw_indirect(
+        &mut self,
+        identity: ObjectResourceIdentity,
+        ordinal: usize,
+        offset: u64,
+        count: u32,
+        stride: u32,
+    ) -> bool {
+        self.multi_draw_indirect_at(Some(identity), ordinal, offset, count, stride)
+    }
+
+    /// Record tightly packed indexed indirect draws from an explicitly scoped
+    /// declared `IndirectRead` access.
+    pub fn multi_draw_indirect_at(
+        &mut self,
+        identity: Option<ObjectResourceIdentity>,
+        ordinal: usize,
+        offset: u64,
+        count: u32,
+        stride: u32,
+    ) -> bool {
+        if self.commands.kind() != PassKind::Raster || stride != DRAW_INDEXED_INDIRECT_ARGS_SIZE {
+            return false;
+        }
+        let Some(buffer) = self.declared_buffer(identity, ordinal, Some(AccessKind::IndirectRead))
+        else {
+            return false;
+        };
+        if !Self::can_record_graph_indirect(buffer)
+            || !Self::valid_indirect_range(
+                buffer.bytes,
+                offset,
+                count,
+                u64::from(stride),
+                u64::from(DRAW_INDEXED_INDIRECT_ARGS_SIZE),
+            )
+        {
+            return false;
+        }
+        self.commands
+            .multi_draw_indirect(buffer.handle, offset, count, stride);
+        true
+    }
+
+    /// Bind a shared index buffer from an `IndexRead` access. The requested
+    /// range is relative to the declared access; `None` binds its remaining
+    /// declared bytes and is converted to an exact length for suballocation
+    /// safety.
+    pub fn set_index_buffer(
+        &mut self,
+        ordinal: usize,
+        format: IndexFormat,
+        offset: u64,
+        size: Option<NonZeroU64>,
+    ) -> bool {
+        self.set_index_buffer_at(None, ordinal, format, offset, size)
+    }
+
+    /// Bind an object-scoped index buffer from an `IndexRead` access.
+    pub fn object_set_index_buffer(
+        &mut self,
+        identity: ObjectResourceIdentity,
+        ordinal: usize,
+        format: IndexFormat,
+        offset: u64,
+        size: Option<NonZeroU64>,
+    ) -> bool {
+        self.set_index_buffer_at(Some(identity), ordinal, format, offset, size)
+    }
+
+    /// Bind an index buffer from an explicitly scoped declared `IndexRead`
+    /// access, rejecting ranges outside the compiled binding.
+    pub fn set_index_buffer_at(
+        &mut self,
+        identity: Option<ObjectResourceIdentity>,
+        ordinal: usize,
+        format: IndexFormat,
+        offset: u64,
+        size: Option<NonZeroU64>,
+    ) -> bool {
+        if self.commands.kind() != PassKind::Raster || !offset.is_multiple_of(format.size()) {
+            return false;
+        }
+        let Some(buffer) = self.declared_buffer(identity, ordinal, Some(AccessKind::IndexRead))
+        else {
+            return false;
+        };
+        let Some(remaining) = buffer.bytes.checked_sub(offset) else {
+            return false;
+        };
+        let binding_size = size.map_or(remaining, NonZeroU64::get);
+        let Some(binding_size) = NonZeroU64::new(binding_size) else {
+            return false;
+        };
+        if binding_size.get() > remaining || !binding_size.get().is_multiple_of(format.size()) {
+            return false;
+        }
+        let Some(physical_offset) = buffer.offset.checked_add(offset) else {
+            return false;
+        };
+        if !physical_offset.is_multiple_of(format.size()) {
+            return false;
+        }
+        let physical_buffer = self.commands.buffer(buffer.handle);
+        self.commands.set_index_buffer(
+            physical_buffer,
+            format,
+            physical_offset,
+            Some(binding_size),
+        );
+        true
+    }
+
+    /// Record a shared indirect compute dispatch from an `IndirectRead` access.
+    pub fn dispatch_indirect(&mut self, ordinal: usize, offset: u64) -> bool {
+        self.dispatch_indirect_at(None, ordinal, offset)
+    }
+
+    /// Record an object-scoped indirect compute dispatch from an `IndirectRead`
+    /// access.
+    pub fn object_dispatch_indirect(
+        &mut self,
+        identity: ObjectResourceIdentity,
+        ordinal: usize,
+        offset: u64,
+    ) -> bool {
+        self.dispatch_indirect_at(Some(identity), ordinal, offset)
+    }
+
+    /// Record an indirect compute dispatch from an explicitly scoped declared
+    /// `IndirectRead` access.
+    pub fn dispatch_indirect_at(
+        &mut self,
+        identity: Option<ObjectResourceIdentity>,
+        ordinal: usize,
+        offset: u64,
+    ) -> bool {
+        if self.commands.kind() != PassKind::Compute {
+            return false;
+        }
+        let Some(buffer) = self.declared_buffer(identity, ordinal, Some(AccessKind::IndirectRead))
+        else {
+            return false;
+        };
+        if !Self::can_record_graph_indirect(buffer)
+            || !Self::valid_indirect_range(
+                buffer.bytes,
+                offset,
+                1,
+                0,
+                u64::from(DISPATCH_INDIRECT_ARGS_SIZE),
+            )
+        {
+            return false;
+        }
+        self.commands.dispatch_indirect(buffer.handle, offset);
+        true
     }
     pub fn texture(&self, access: usize) -> Option<TextureId> {
         self.resolve_texture(self.shared_access(access)?)
@@ -373,6 +746,7 @@ impl RuntimeFeatureGraph {
 pub struct RuntimeGraphLowering {
     declaration: CompiledFeatureGraph,
     handles: Vec<Option<RuntimeResourceHandle>>,
+    outputs: Vec<RuntimeGraphOutput>,
     pass_offset: usize,
     pass_count: usize,
 }
@@ -390,6 +764,18 @@ impl RuntimeGraphLowering {
     /// The number of active Fabric passes appended to the host graph.
     pub const fn pass_count(&self) -> usize {
         self.pass_count
+    }
+
+    /// Returns the graph-local handle published by the last lowered access for
+    /// a compiled resource. Writers return their new SSA version, allowing a
+    /// host graph consumer appended after Fabric to read the real producer
+    /// output rather than the imported version zero.
+    pub fn resource_handle(&self, resource: ResourceId) -> Option<RuntimeResourceHandle> {
+        self.handles.get(resource.0 as usize).copied().flatten()
+    }
+
+    pub fn output(&self, resource: ResourceId) -> Option<RuntimeGraphOutput> {
+        self.outputs.get(resource.0 as usize).cloned()
     }
 }
 
@@ -525,7 +911,7 @@ impl CompiledFeatureGraph {
                     else {
                         return Err(FabricRuntimeError::InvalidGraphMapping(id));
                     };
-                    let Some(imported) = graph.imported_buffer(handle) else {
+                    let Some(imported) = graph.imported_buffer_resource(handle) else {
                         return Err(FabricRuntimeError::InvalidGraphMapping(id));
                     };
                     let Some(desc) = graph.buffer_desc(handle) else {
@@ -562,7 +948,7 @@ impl CompiledFeatureGraph {
                     else {
                         return Err(FabricRuntimeError::InvalidGraphMapping(id));
                     };
-                    let Some(imported) = graph.imported_texture(handle) else {
+                    let Some(imported) = graph.imported_texture_resource(handle) else {
                         return Err(FabricRuntimeError::InvalidGraphMapping(id));
                     };
                     let Some(desc) = graph.texture_desc(handle) else {
@@ -651,6 +1037,9 @@ impl CompiledFeatureGraph {
         }
         let pass_offset = graph.pass_count();
         let mut handles = vec![None; self.resources().len()];
+        let outputs: Vec<_> = (0..self.resources().len())
+            .map(|_| RuntimeGraphOutput::new())
+            .collect();
         let mut versions = vec![BTreeMap::new(); self.resources().len()];
         for resource in self
             .resources()
@@ -704,6 +1093,7 @@ impl CompiledFeatureGraph {
             let mut setup_error = None;
             let pass_items = Arc::clone(&items);
             let pass_spec = pass.clone();
+            let pass_outputs = outputs.clone();
             let mut pass_accesses = Vec::new();
             let setup = |builder: &mut PassBuilder<'_>| {
                 // Creation adds no access and no synthetic pass. All transient
@@ -725,15 +1115,14 @@ impl CompiledFeatureGraph {
                                 resource: bound.declaration.key,
                             })?;
                         let next = lower_access(builder, input, bound.declaration.access)?;
-                        if next.version() != bound.ssa_version {
-                            return Err(FabricRuntimeError::VersionMismatch {
-                                pass: pass.key(),
-                                resource: bound.declaration.key,
-                            });
-                        }
                         if bound.declaration.access.writes() {
-                            versions[resource].insert(next.version(), next);
+                            // Fabric SSA versions are independent from the host
+                            // graph's versions when lowering onto an existing
+                            // imported handle. Keep the Fabric version as the
+                            // lookup key while carrying the graph's actual handle.
+                            versions[resource].insert(bound.ssa_version, next);
                             handles[resource] = Some(next);
+                            pass_outputs[resource].publish(next);
                         }
                         pass_accesses.push(RuntimeResourceUse {
                             bound,
@@ -778,6 +1167,7 @@ impl CompiledFeatureGraph {
         Ok(RuntimeGraphLowering {
             declaration: self,
             handles,
+            outputs,
             pass_offset,
             pass_count,
         })

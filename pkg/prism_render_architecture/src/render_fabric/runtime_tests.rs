@@ -1,7 +1,9 @@
 use super::{runtime::verify_plan, *};
+use core::num::NonZeroU64;
 use prism_render_driver::{
-    Accesses, Barrier, BufferId, BufferState, BufferUsages, Extent3d, PipelineStages,
-    SubresourceRange, TextureState, TextureViewId,
+    Accesses, Barrier, BufferId, BufferState, BufferUsages, Extent3d, IndexBufferBinding,
+    IndexFormat, Pass, PipelineStages, RenderCommand, SubresourceRange, TextureState,
+    TextureViewId,
 };
 use prism_render_graph::frame_graph::{AccessKind, QueueClass, ResourceId, ResourceLifetime};
 use prism_render_graph::{
@@ -12,6 +14,10 @@ use prism_render_graph::{
 const FEATURE: FeatureId = FeatureId(900);
 const RESOURCE: ResourceKey = ResourceKey::of(FEATURE, 0);
 const TRANSIENT_RESOURCE: ResourceKey = ResourceKey::of(FEATURE, 1);
+const INDIRECT_RESOURCE: ResourceKey = ResourceKey::of(FEATURE, 2);
+const INDEX_RESOURCE: ResourceKey = ResourceKey::of(FEATURE, 3);
+const STORAGE_RESOURCE: ResourceKey = ResourceKey::of(FEATURE, 4);
+const OBJECT_RESOURCE: ResourceKey = ResourceKey::of(FEATURE, 5);
 
 fn table<T>(values: Vec<T>) -> &'static [T] {
     Box::leak(values.into_boxed_slice())
@@ -283,6 +289,278 @@ fn fixture() -> (FeatureCatalog, ResourceTemplate) {
         alignment: 16,
     };
     (catalog, resource)
+}
+
+#[test]
+fn runtime_recorders_emit_only_declared_indirect_and_index_commands() {
+    let indirect = ResourceTemplate {
+        key: INDIRECT_RESOURCE,
+        lifetime: ResourceLifetime::Imported,
+        layout: ResourceLayout::Buffer {
+            bytes: 64,
+            usage: BufferUsages::INDIRECT,
+        },
+        alignment: 4,
+    };
+    let index = ResourceTemplate {
+        key: INDEX_RESOURCE,
+        lifetime: ResourceLifetime::Imported,
+        layout: ResourceLayout::Buffer {
+            bytes: 32,
+            usage: BufferUsages::INDEX,
+        },
+        alignment: 4,
+    };
+    let storage = ResourceTemplate {
+        key: STORAGE_RESOURCE,
+        lifetime: ResourceLifetime::Imported,
+        layout: ResourceLayout::Buffer {
+            bytes: 64,
+            usage: BufferUsages::STORAGE,
+        },
+        alignment: 4,
+    };
+    let indirect_id = BufferId::from_parts(81, 1);
+    let index_id = BufferId::from_parts(82, 1);
+    let storage_id = BufferId::from_parts(83, 1);
+    let declaration = compile_passes(
+        vec![pass(
+            1,
+            QueueClass::Graphics,
+            vec![
+                usage(INDIRECT_RESOURCE, AccessKind::IndirectRead),
+                usage(INDEX_RESOURCE, AccessKind::IndexRead),
+                usage(STORAGE_RESOURCE, AccessKind::StorageRead),
+            ],
+        )],
+        &[indirect, index, storage],
+        &[
+            binding(
+                indirect,
+                PhysicalResource::Buffer {
+                    id: indirect_id,
+                    offset: 0,
+                },
+            ),
+            binding(
+                index,
+                PhysicalResource::Buffer {
+                    id: index_id,
+                    offset: 128,
+                },
+            ),
+            binding(
+                storage,
+                PhysicalResource::Buffer {
+                    id: storage_id,
+                    offset: 0,
+                },
+            ),
+        ],
+    );
+    let imports = declaration
+        .resources()
+        .iter()
+        .map(|resource| {
+            let physical = match resource.key {
+                INDIRECT_RESOURCE => indirect_id,
+                INDEX_RESOURCE => index_id,
+                STORAGE_RESOURCE => storage_id,
+                key => panic!("unexpected resource {key:?}"),
+            };
+            RuntimeImport::Buffer {
+                resource: resource.id,
+                imported: imported_buffer(physical),
+            }
+        })
+        .collect::<Vec<_>>();
+    let runtime = declaration
+        .prepare_runtime(
+            Extent3d::new_2d(1, 1),
+            &imports,
+            vec![RuntimePassBinding::new(PassKey(1), |context| {
+                let indirect_handle = context.buffer_handle(0).unwrap();
+                assert_eq!(indirect_handle.version(), 0);
+                assert!(context.buffer_handle(1).is_some());
+                assert!(context.buffer_handle(2).is_some());
+                assert!(context.buffer_handle(3).is_none());
+
+                assert!(context.set_index_buffer(
+                    1,
+                    IndexFormat::Uint16,
+                    4,
+                    Some(NonZeroU64::new(16).unwrap()),
+                ));
+                assert!(context.draw_indirect(0, 0));
+                assert!(context.draw_indexed_indirect(0, 16));
+                assert!(!context.draw_indirect(1, 0));
+                assert!(!context.draw_indirect(2, 0));
+                assert!(!context.set_index_buffer(0, IndexFormat::Uint32, 0, None));
+                assert!(!context.draw_indirect(0, 52));
+            })],
+        )
+        .unwrap();
+    let device = recording_device();
+    let recorded = runtime.record(&device);
+    assert_eq!(recorded.commands().passes.len(), 1);
+    let Pass::Render { commands, .. } = &recorded.commands().passes[0] else {
+        panic!("the graphics Fabric pass must record render commands")
+    };
+    assert_eq!(
+        commands,
+        &[
+            RenderCommand::SetIndexBuffer(IndexBufferBinding {
+                buffer: index_id,
+                format: IndexFormat::Uint16,
+                offset: 132,
+                size: NonZeroU64::new(16),
+            }),
+            RenderCommand::DrawIndirect {
+                buffer: indirect_id,
+                offset: 0,
+            },
+            RenderCommand::DrawIndexedIndirect {
+                buffer: indirect_id,
+                offset: 16,
+            },
+        ]
+    );
+    recorded.release(&device);
+}
+
+#[test]
+fn runtime_recorders_resolve_object_buffer_handles_without_shared_fallback() {
+    let pass_template = pass(
+        1,
+        QueueClass::Graphics,
+        vec![usage(OBJECT_RESOURCE, AccessKind::IndirectRead)],
+    );
+    let object = ObjectResourceIdentity::new(
+        RenderObjectId::Hair(DomainObjectHandle::new(7, 2)),
+        11,
+        PayloadRole(0),
+    );
+    let scope = ObjectResourceAccess {
+        pass: PassKey(1),
+        ordinal: 0,
+        domain: None,
+        role: object.role(),
+        layout: ObjectLayoutPolicy::Exact,
+    };
+    let catalog = FeatureCatalog::new_with_object_accesses(
+        table(vec![FeatureDefinition::subsystem(
+            FEATURE,
+            RenderDomain::Hair,
+            ServiceSet::EMPTY,
+            table(vec![FeatureVariant {
+                id: VariantId(1),
+                rank: 0,
+                min_quality: RenderQualityTier::Low,
+                required_caps: CapabilitySet::EMPTY,
+                requires_services_extra: ServiceSet::EMPTY,
+                passes: table(vec![pass_template]),
+                shader_permutation: None,
+            }]),
+        )]),
+        table(vec![OBJECT_RESOURCE]),
+        &[scope],
+    )
+    .unwrap();
+    let roots = FrozenRoots::from_build_profile(&catalog, &[FEATURE], &[]).unwrap();
+    let selection = FeatureSelection::resolve(
+        &catalog,
+        &roots,
+        CapabilitySet::WEBGPU_BASELINE,
+        RenderQualityTier::Low,
+    )
+    .unwrap();
+    let template = ResourceTemplate {
+        key: OBJECT_RESOURCE,
+        lifetime: ResourceLifetime::Persistent,
+        layout: ResourceLayout::Buffer {
+            bytes: 64,
+            usage: BufferUsages::INDIRECT,
+        },
+        alignment: 16,
+    };
+    let item = FrameRenderItem {
+        object_id: object.object(),
+        domain: object.domain(),
+        history_key: object.history_key(),
+        motion_source: crate::motion::MotionSource::Rigid,
+        payload: DomainPayload::Resource(ResourcePayload {
+            resource: OBJECT_RESOURCE,
+            lifetime: template.lifetime,
+            size: 64,
+            alignment: template.alignment,
+            layout: template.layout,
+            role: object.role(),
+        }),
+    };
+    let physical = BufferId::from_parts(84, 1);
+    let object_binding = ObjectResourceBinding {
+        identity: object,
+        binding: FrameResourceBinding {
+            key: OBJECT_RESOURCE,
+            frame: 1,
+            version: 1,
+            physical: PhysicalResource::Buffer {
+                id: physical,
+                offset: 0,
+            },
+            layout: template.layout,
+            alignment: template.alignment,
+        },
+    };
+    let declaration = ResourceTemplates::new(&catalog, &[template])
+        .unwrap()
+        .compile_with_instances(
+            &selection,
+            1,
+            &[],
+            &[object_binding],
+            &[item],
+            GraphLimits::default(),
+        )
+        .unwrap();
+    let address = ResourceAddress::object(OBJECT_RESOURCE, 1, object);
+    let resource = declaration.resource_id_at(address).unwrap();
+    let runtime = declaration
+        .prepare_runtime_with_object_imports(
+            Extent3d::new_2d(1, 1),
+            &[],
+            &[ObjectRuntimeImport {
+                address,
+                binding: object_binding.binding,
+                imported: RuntimeImport::Buffer {
+                    resource,
+                    imported: imported_buffer(physical),
+                },
+            }],
+            vec![RuntimePassBinding::new(PassKey(1), move |context| {
+                assert!(context.buffer_handle(0).is_none());
+                assert_eq!(
+                    context.object_buffer_handle(object, 0).unwrap().version(),
+                    0
+                );
+                assert!(context.object_draw_indirect(object, 0, 0));
+                assert!(!context.draw_indirect(0, 0));
+            })],
+        )
+        .unwrap();
+    let device = recording_device();
+    let recorded = runtime.record(&device);
+    let Pass::Render { commands, .. } = &recorded.commands().passes[0] else {
+        panic!("the object graphics Fabric pass must record render commands")
+    };
+    assert_eq!(
+        commands,
+        &[RenderCommand::DrawIndirect {
+            buffer: physical,
+            offset: 0,
+        }]
+    );
+    recorded.release(&device);
 }
 
 fn compiled() -> CompiledFeatureGraph {
@@ -1527,6 +1805,112 @@ fn runtime_reuses_the_host_graph_imported_handle_without_a_second_import() {
     assert_eq!(fabric_calls.load(Ordering::SeqCst), 1);
     recorded.release(&device);
     assert_eq!(device.live_resource_count(), 0);
+}
+
+#[test]
+fn runtime_maps_fabric_ssa_versions_onto_a_host_handle_written_earlier() {
+    let physical = BufferId::from_parts(46, 6);
+    let declaration = compiled_import(
+        buffer(RESOURCE, ResourceLifetime::Imported),
+        PhysicalResource::Buffer {
+            id: physical,
+            offset: 0,
+        },
+    );
+    let imported_resource = declaration.resource_id(RESOURCE, 1).unwrap();
+    let mut host = RenderGraph::new(Extent3d::new_2d(1, 1));
+    let mut host_handle = host.import_buffer(
+        "host imported buffer",
+        BufferDesc::new(64, BufferUsages::STORAGE),
+        imported_buffer(physical),
+    );
+    host.add_compute_pass("host producer", PassFlags::NEVER_CULL, |builder| {
+        host_handle = builder.write_storage_buffer(host_handle);
+        |_| {}
+    });
+    assert_eq!(host_handle.version(), 1);
+
+    declaration
+        .append_to_graph_with_resource_mappings(
+            &mut host,
+            &[],
+            &[],
+            &[RuntimeGraphResourceMapping::Buffer {
+                resource: imported_resource,
+                handle: host_handle,
+            }],
+            vec![RuntimePassBinding::new(PassKey(1), |context| {
+                assert_eq!(context.accesses().len(), 1);
+                assert_eq!(context.accesses()[0].bound.input_ssa_version, 0);
+            })],
+        )
+        .unwrap();
+
+    assert_eq!(host.imported_resource_count(), 1);
+    assert_eq!(host.pass_count(), 2);
+    let prepared = host.prepare().unwrap();
+    assert_eq!(prepared.plan().declared_pass_count, 2);
+    assert_eq!(prepared.plan().order, vec![0, 1]);
+}
+
+#[test]
+fn runtime_maps_fabric_ssa_versions_onto_a_host_texture_written_earlier() {
+    let physical = TextureId::from_parts(47, 6);
+    let template = texture(RESOURCE, ResourceLifetime::Imported);
+    let declaration = compile_passes(
+        vec![pass(
+            1,
+            QueueClass::Compute,
+            vec![usage(RESOURCE, AccessKind::SampledRead)],
+        )],
+        &[template],
+        &[binding(template, PhysicalResource::Texture(physical))],
+    );
+    let imported_resource = declaration.resource_id(RESOURCE, 1).unwrap();
+    let mut host = RenderGraph::new(Extent3d::new_2d(8, 8));
+    let mut host_handle = host.import_texture(
+        "host imported texture",
+        TextureDesc {
+            size: SizeClass::Absolute {
+                width: 8,
+                height: 8,
+                depth_or_array_layers: 2,
+            },
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba8Unorm,
+            mip_level_count: 2,
+            sample_count: 1,
+            usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+        },
+        imported_texture(physical),
+    );
+    host.add_compute_pass("host producer", PassFlags::NEVER_CULL, |builder| {
+        host_handle = builder.write_storage_texture(host_handle);
+        |_| {}
+    });
+    assert_eq!(host_handle.version(), 1);
+
+    declaration
+        .append_to_graph_with_resource_mappings(
+            &mut host,
+            &[],
+            &[],
+            &[RuntimeGraphResourceMapping::Texture {
+                resource: imported_resource,
+                handle: host_handle,
+            }],
+            vec![RuntimePassBinding::new(PassKey(1), |context| {
+                assert_eq!(context.accesses().len(), 1);
+                assert_eq!(context.accesses()[0].bound.input_ssa_version, 0);
+            })],
+        )
+        .unwrap();
+
+    assert_eq!(host.imported_resource_count(), 1);
+    assert_eq!(host.pass_count(), 2);
+    let prepared = host.prepare().unwrap();
+    assert_eq!(prepared.plan().declared_pass_count, 2);
+    assert_eq!(prepared.plan().order, vec![0, 1]);
 }
 
 #[test]
