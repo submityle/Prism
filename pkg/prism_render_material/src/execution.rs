@@ -15,8 +15,8 @@ use prism_render_architecture::shader_package::{
 };
 
 use crate::{
-    BuiltinProgram, ChannelMask, CompiledEntry, ProgramId, ProgramRef, ResponseManifest,
-    ResponseMaskSource, ShadingPlan,
+    BlendDomain, BuiltinProgram, ChannelMask, CompiledEntry, ProgramId, ProgramRef,
+    ResponseChannel, ResponseManifest, ResponseMaskSource, ShadingPlan,
 };
 
 /// GPU response-program kind written by the execution-table upload.
@@ -400,6 +400,39 @@ impl MaterialExecutionTables {
                 blend_domain: 0,
             });
         }
+        tables
+    }
+
+    /// Builds the builtin catalog plus the canonical dynamic-channel blend
+    /// plans consumed by the Native composition path. The base catalog remains
+    /// intentionally small; scene-owned plans are still required for custom
+    /// registered responses.
+    #[must_use]
+    pub fn builtin_with_mask_blends() -> Self {
+        let mut tables = Self::builtin();
+        let lit = tables
+            .binding_for_plan(&ShadingPlan::single_builtin(BuiltinProgram::Lit))
+            .expect("canonical builtin Lit plan has a binding")
+            .response_program_index;
+        let npr = tables
+            .binding_for_plan(&ShadingPlan::single_builtin(BuiltinProgram::Npr))
+            .expect("canonical builtin NPR plan has a binding")
+            .response_program_index;
+        let source = ShadingPlan::MaskBlend {
+            left: ProgramRef::Builtin(BuiltinProgram::Lit),
+            right: ProgramRef::Builtin(BuiltinProgram::Npr),
+            mask: ResponseMaskSource::Channel("wetness".into()),
+            domain: BlendDomain::DirectOnly,
+        };
+        tables
+            .register_plan(
+                source,
+                lit,
+                Some(npr),
+                ExecutionFamily::Composition,
+                ChannelMask::one(ResponseChannel::Direct),
+            )
+            .expect("canonical builtin Lit/NPR mask blend must validate");
         tables
     }
 
@@ -1190,6 +1223,39 @@ mod tests {
             program: ProgramRef::Registered(ProgramId(7)),
         };
         assert!(tables.binding_for_plan(&registered).is_none());
+    }
+
+    #[test]
+    fn builtin_mask_blend_catalog_publishes_the_dynamic_lit_npr_plan() {
+        let tables = MaterialExecutionTables::builtin_with_mask_blends();
+        let source = ShadingPlan::MaskBlend {
+            left: ProgramRef::Builtin(BuiltinProgram::Lit),
+            right: ProgramRef::Builtin(BuiltinProgram::Npr),
+            mask: ResponseMaskSource::Channel("wetness".into()),
+            domain: BlendDomain::DirectOnly,
+        };
+        let binding = tables
+            .binding_for_plan(&source)
+            .expect("canonical dynamic Lit/NPR plan has a binding");
+        assert_eq!(binding.shading_plan_index.get(), 3);
+        assert_eq!(binding.response_program_index.get(), 0);
+        assert_eq!(
+            tables.plan_endpoints(binding.shading_plan_index).unwrap().2,
+            ExecutionFamily::Composition
+        );
+        assert_eq!(
+            tables.gpu_plan_rows()[3],
+            [
+                0,
+                1,
+                ExecutionFamily::Composition as u32,
+                1,
+                EXECUTION_MASK_DYNAMIC_CHANNEL,
+                0,
+                1,
+                0
+            ]
+        );
     }
 
     #[test]

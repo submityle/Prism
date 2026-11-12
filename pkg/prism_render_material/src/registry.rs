@@ -127,6 +127,26 @@ impl MaterialRegistry {
         self.epoch += 1;
         Ok(())
     }
+
+    /// Adopts and publishes a record whose stable handle was allocated by the
+    /// authoritative main-world material scene.
+    pub fn adopt_and_publish(
+        &mut self,
+        record: MaterialRecord,
+    ) -> Result<(), MaterialRegistryError> {
+        if let Some(current) = self.get(record.handle)
+            && record.revision <= current.revision
+        {
+            return Err(MaterialRegistryError::StaleRevision {
+                current: current.revision,
+                incoming: record.revision,
+            });
+        }
+        self.allocator
+            .adopt(record.handle)
+            .map_err(|_| MaterialRegistryError::InvalidHandle(record.handle))?;
+        self.publish(record)
+    }
     pub fn get(&self, handle: GenerationalHandle) -> Option<&MaterialRecord> {
         self.slots
             .get(handle.index as usize)?

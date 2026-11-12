@@ -35,6 +35,10 @@ impl MaterialHandleAllocator {
             })
     }
 
+    pub fn adopt(&mut self, handle: GenerationalHandle) -> Result<(), MaterialHandleError> {
+        self.inner.adopt(handle)
+    }
+
     pub fn retire(
         &mut self,
         handle: GenerationalHandle,

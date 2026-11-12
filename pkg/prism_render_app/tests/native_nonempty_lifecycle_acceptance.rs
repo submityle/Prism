@@ -21,20 +21,26 @@ use prism_render_app::visibility::{
     PrismRenderable, PrismVisibilityPlugin,
 };
 use prism_render_app::{
-    NativeFrameExecution, NativeFramePhase, PrismRenderPlugin, RenderApp, RenderAppConfig,
-    RenderFrameStats, RenderMaterials, RenderRuntimeResource, SceneRegistry, VisibilityWorkList,
+    LightingLightScene, NativeFrameExecution, NativeFramePhase, PrismRenderPlugin, RenderApp,
+    RenderAppConfig, RenderFrameStats, RenderMaterials, RenderRuntimeResource, SceneRegistry,
+    VisibilityWorkList,
 };
 use prism_render_architecture::geometry::{
     GeometryLodRecord, GeometryPrimitiveKind, GeometryRecord,
 };
 use prism_render_architecture::gpu_scene::{SceneHandle, SceneMaterialHandle};
+use prism_render_architecture::lighting::{
+    LightClass, LightClassification, LightEmission, LightGeometry, LightMobility, LightRecord,
+    LightUnit,
+};
 use prism_render_driver as rhi;
 use prism_render_driver::{Adapter, FrameSync, Instance, PrimitiveTopology, RenderQueue};
 use prism_render_driver_wgpu::{
     require_hardware_gpu, WgpuAdapter, WgpuDevice, WgpuInstance, WgpuQueue, WgpuSurface,
 };
 use prism_render_material::{
-    fallback_material_record, BuiltinProgram, DynamicChannels, MaterialExecutionTables, ShadingPlan,
+    fallback_material_record, BlendDomain, BuiltinProgram, DynamicChannels,
+    MaterialExecutionTables, ProgramRef, ResponseMaskSource, ShadingPlan,
 };
 use prism_render_visibility::{
     GeometryLod, GeometryLodChain, GpuRenderWorkItem, RenderPassMask, VisibilityStageMask,
@@ -261,6 +267,24 @@ fn broad_frustum() -> PrismFrustum {
 }
 
 fn scene_fixture(app: &mut App) -> SceneFixture {
+    scene_fixture_with_material(
+        app,
+        ShadingPlan::single_builtin(BuiltinProgram::Unlit),
+        MaterialExecutionTables::builtin(),
+        DynamicChannels {
+            wetness: 0.5,
+            ..DynamicChannels::NONE
+        },
+    )
+}
+
+fn scene_fixture_with_material(
+    app: &mut App,
+    response_plan: ShadingPlan,
+    execution_tables: MaterialExecutionTables,
+    dynamic_channels: DynamicChannels,
+) -> SceneFixture {
+    let has_mask_blend = matches!(response_plan, ShadingPlan::MaskBlend { .. });
     let mesh = Mesh::new(PrimitiveTopology::TriangleList)
         .with_attribute(
             MeshVertexAttribute::new("Vertex_Position", rhi::VertexFormat::Float32x3, 0),
@@ -308,17 +332,35 @@ fn scene_fixture(app: &mut App) -> SceneFixture {
             }],
         });
         let mut record = fallback_material_record(material, 1);
-        record.response_plan = ShadingPlan::single_builtin(BuiltinProgram::Unlit);
+        record.response_plan = response_plan;
         record.surface.base_color = [1.0; 4];
         scene.insert_material(record);
-        assert!(scene.set_material_dynamic_channels(
-            material,
-            DynamicChannels {
-                wetness: 0.5,
-                ..DynamicChannels::NONE
-            },
-        ));
-        scene.set_execution_tables(MaterialExecutionTables::builtin());
+        assert!(scene.set_material_dynamic_channels(material, dynamic_channels));
+        scene.set_execution_tables(execution_tables);
+    }
+
+    // The Lit/NPR composition slice needs a nonzero direct-light sample; keep
+    // the light in the main-world canonical lighting scene so extraction owns
+    // the same path as production content.
+    if has_mask_blend {
+        app.insert_resource(LightingLightScene::default());
+        app.world_mut()
+            .resource_mut::<LightingLightScene>()
+            .scene
+            .insert(
+                LightRecord::new(
+                    LightClassification {
+                        class: LightClass::Directional,
+                        mobility: LightMobility::Static,
+                    },
+                    LightEmission::new([1.0; 3], 1.0, LightUnit::Lux),
+                    LightGeometry::Directional {
+                        direction: [0.0, 0.0, -1.0],
+                    },
+                ),
+                1,
+            )
+            .expect("MaskBlend fixture publishes a directional light");
     }
 
     let camera = app.world_mut().spawn((
@@ -426,6 +468,31 @@ fn assert_mesh_readback(
             "native composite HDR channel {channel}: expected 1.0, got {value}"
         );
     }
+}
+
+fn center_response_readback(
+    queue: &DelayedQueue,
+    target: prism_render_app::RenderTarget,
+    width: u32,
+    height: u32,
+) -> [f32; 16] {
+    let bytes = queue
+        .inner
+        .read_buffer(
+            target.surface_identity_buffer(),
+            target.surface_identity_size_bytes(),
+        )
+        .expect("Native ResponseOutput readback must complete");
+    let center = ((height / 2) * width + width / 2) as usize;
+    let base = center * 16 * core::mem::size_of::<f32>();
+    core::array::from_fn(|index| {
+        let offset = base + index * core::mem::size_of::<f32>();
+        f32::from_le_bytes(
+            bytes[offset..offset + core::mem::size_of::<f32>()]
+                .try_into()
+                .expect("ResponseOutput word has four bytes"),
+        )
+    })
 }
 
 fn require_adapter() -> Option<(Arc<CompletionGate>, DelayedInstance)> {
@@ -638,4 +705,139 @@ fn native_nonempty_resize_preserves_old_target_until_completion_then_reclaims_it
             .is_err(),
         "the old target texture was reclaimed only after completion"
     );
+}
+
+#[test]
+fn native_main_world_mask_blend_consumes_dynamic_channel_and_matches_endpoints() {
+    let Some((gate, instance)) = require_adapter() else {
+        return;
+    };
+    let mut app = App::new();
+    app.add_plugins(PrismRenderPlugin::with_config(
+        instance,
+        RenderAppConfig::new(rhi::Extent3d::new_2d(INITIAL_WIDTH, INITIAL_HEIGHT)),
+    ));
+    app.add_plugins(PrismVisibilityPlugin);
+    let fixture = scene_fixture_with_material(
+        &mut app,
+        ShadingPlan::MaskBlend {
+            left: ProgramRef::Builtin(BuiltinProgram::Lit),
+            right: ProgramRef::Builtin(BuiltinProgram::Npr),
+            mask: ResponseMaskSource::Channel("wetness".into()),
+            domain: BlendDomain::DirectOnly,
+        },
+        MaterialExecutionTables::builtin_with_mask_blends(),
+        DynamicChannels {
+            wetness: 0.5,
+            ..DynamicChannels::NONE
+        },
+    );
+
+    {
+        let render = app.get_sub_app(RenderApp).expect("native render sub-app");
+        let queue = render
+            .world
+            .resource::<RenderRuntimeResource<DelayedInstance>>()
+            .runtime()
+            .queue();
+        gate.release(&queue.inner);
+    }
+    app.update();
+    {
+        let render = app.get_sub_app(RenderApp).expect("native render sub-app");
+        assert!(
+            render
+                .world
+                .resource::<RenderRuntimeResource<DelayedInstance>>()
+                .runtime()
+                .wait_idle(),
+            "initial material/execution publication must complete"
+        );
+    }
+    app.update();
+
+    let sample = |app: &mut App, wetness: f32| {
+        assert!(
+            app.world_mut()
+                .resource_mut::<PrismRenderScene>()
+                .set_material_dynamic_channels(
+                    fixture.material,
+                    DynamicChannels {
+                        wetness,
+                        ..DynamicChannels::NONE
+                    },
+                ),
+            "the main-world material must accept dynamic-channel updates"
+        );
+        app.update();
+        let (key, target) = target_snapshot(app);
+        let render = app.get_sub_app(RenderApp).expect("native render sub-app");
+        let queue = render
+            .world
+            .resource::<RenderRuntimeResource<DelayedInstance>>()
+            .runtime()
+            .queue();
+        let hdr = queue
+            .read_texture_rgba16f(target.texture(), key.width, key.height)
+            .expect("MaskBlend HDR readback must complete");
+        let center = ((key.height / 2) * key.width + key.width / 2) as usize;
+        (
+            hdr[center],
+            center_response_readback(queue, target, key.width, key.height),
+        )
+    };
+
+    let (left_hdr, left_response) = sample(&mut app, 0.0);
+    let (right_hdr, right_response) = sample(&mut app, 1.0);
+    let (mid_hdr, mid_response) = sample(&mut app, 0.5);
+
+    {
+        let render = app.get_sub_app(RenderApp).expect("native render sub-app");
+        let materials = render.world.resource::<RenderMaterials>();
+        let record = materials
+            .registry()
+            .record_at(fixture.material.index)
+            .expect("main-world MaskBlend record must be extracted");
+        assert!(matches!(
+            record.response_plan,
+            ShadingPlan::MaskBlend { .. }
+        ));
+        assert_eq!(
+            materials
+                .registry()
+                .dynamic_channels_at(fixture.material.index),
+            DynamicChannels {
+                wetness: 0.5,
+                ..DynamicChannels::NONE
+            }
+        );
+    }
+
+    for channel in 0..3 {
+        let expected_response = (left_response[channel] + right_response[channel]) * 0.5;
+        assert!(
+            (mid_response[channel] - expected_response).abs() <= 0.003,
+            "main-world MaskBlend response lane {channel}: GPU {} != endpoint average {expected_response}",
+            mid_response[channel]
+        );
+        let expected_hdr = (left_hdr[channel] + right_hdr[channel]) * 0.5;
+        assert!(
+            (mid_hdr[channel] - expected_hdr).abs() <= 0.003,
+            "main-world MaskBlend HDR channel {channel}: GPU {} != endpoint average {expected_hdr}",
+            mid_hdr[channel]
+        );
+    }
+    for channel in 3..16 {
+        assert!(
+            (mid_response[channel] - left_response[channel]).abs() <= 0.003,
+            "DirectOnly MaskBlend changed unrelated response lane {channel}"
+        );
+    }
+    assert!(
+        (left_response[0] - right_response[0]).abs() > 0.005
+            || (left_response[1] - right_response[1]).abs() > 0.005
+            || (left_response[2] - right_response[2]).abs() > 0.005,
+        "Lit and NPR endpoint responses must differ so the dynamic mask is observable"
+    );
+    assert_eq!(mid_response[15], 1.0);
 }

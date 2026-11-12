@@ -1299,3 +1299,15 @@ sample admission；但 `material_gpu_performance_evidence_gate -- --ignored` 仍
 - 该证据仍限于 builtin Unlit 生命周期；MaskBlend/registered/full texture-VT/dynamic 组合、GI
   evaluator 硬件 readback、全帧 CPU golden、realtime↔path-traced parity、跨 backend/adapter 和
   P50/P95/P99 预算 gate 仍为未完成。
+
+## 8.9 2026-11-12 MaskBlend 验证边界修正
+
+- execution 表新增 canonical `Lit + NPR + wetness` MaskBlend，domain 为 `DirectOnly`，并由
+  `11 passed / 0 failed` 的材质 execution 定向测试覆盖。
+- acceptance 已扩展为主世界材质发布、dynamic channel extraction/reconcile、directional light
+  extraction、HDR readback 和 16-word `ResponseOutput` endpoint/midpoint 检查。
+- 严格 `PRISM_REQUIRE_GPU=1 WGPU_BACKEND=metal` 已在真实 Metal GPU 上 **1 passed / 0 failed**；
+  endpoint、midpoint、DirectOnly lane isolation 和主世界 canonical lighting scene 消费均通过。
+
+因此，MaskBlend 当前状态为“execution contract 和一个真实 Metal 生产消费切片已完成”，不改变材质
+重构整体仍未完成的结论。

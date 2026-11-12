@@ -2065,3 +2065,20 @@ render-world 手工写入 material row、execution table 或 execution binding�
   GI 硬件 parity、realtime↔reference 图像 parity、跨 backend/adapter 和性能预算 gate 仍未完成。
 
 因此，本增量提高了 Native 生产路径证据强度，但不改变“材质重构整体未完成”的结论。
+
+## 18.10 2026-11-12 MaskBlend 消费切片增量
+
+- `MaterialExecutionTables::builtin_with_mask_blends()` 已加入 canonical `Lit + NPR + wetness`
+  dynamic-channel plan，并明确使用 `DirectOnly` domain；execution row、composition family 和
+  channel mask 由 Rust 表与 GPU identity 合约共同校验。
+- `prism_render_material` execution 定向测试当前为 **11 passed / 0 failed**，覆盖 builtin
+  dense binding、MaskBlend domain/channel、execution row 和 sentinel 拒绝边界。
+- Native acceptance fixture 已从主世界发布 MaskBlend、execution table、dynamic channel 和
+  directional light，再经 extraction/reconcile 进入 composite；不再把 Lit/NPR 端点差异误判为
+  program ID 映射问题。严格 `PRISM_REQUIRE_GPU=1 WGPU_BACKEND=metal` 门禁已在真实 Metal GPU
+  上 **1 passed / 0 failed**，覆盖 HDR readback、16-word `ResponseOutput`、endpoint/midpoint
+  插值、DirectOnly 非相关 lane 保持以及主世界 canonical lighting scene 消费。
+
+本节确认 MaskBlend 的 execution 合约和一个真实 Metal 生产消费切片已闭合；registered 完整消费、完整
+channel/domain/texture/VT 组合、默认主帧全帧 golden parity、GI 硬件 parity、realtime↔path-traced
+图像 parity、跨 backend/adapter 和性能预算 gate 仍未完成。
