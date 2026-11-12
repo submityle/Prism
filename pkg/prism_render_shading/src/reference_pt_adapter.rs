@@ -230,6 +230,8 @@ impl ReferencePtMaterialAdapter {
         surface.specular_weight = sampled.specular_weight;
         surface.specular_color = sampled.specular_color;
         surface.specular_ior = sampled.specular_ior;
+        surface.anisotropy = sampled.anisotropy;
+        surface.anisotropy_rotation = sampled.anisotropy_rotation;
         surface.ambient_occlusion = sampled.occlusion;
         surface.emissive = [
             sampled.emissive[0] * sampled.emission_luminance,
@@ -633,6 +635,8 @@ fn surface_from_gpu_parameters(
         coat_color: rgb(parameters.coat_color),
         coat_roughness_anisotropy: parameters.coat_roughness_anisotropy,
         coat_darkening: parameters.coat_darkening,
+        anisotropy: parameters.anisotropy,
+        anisotropy_rotation: parameters.anisotropy_rotation,
         coat_normal: context.coat_normal,
         coat_tangent: context.coat_tangent,
         normal_variance: context.normal_variance,
@@ -2011,6 +2015,49 @@ mod tests {
                 bad_state,
             ),
             Err(ReferencePtAdapterError::ParameterOutOfRange)
+        );
+    }
+
+    #[test]
+    fn gpu_anisotropy_is_preserved_through_direct_and_texture_fold_paths() {
+        let mut parameters = GpuSurfaceParameters::default();
+        parameters.anisotropy = 0.4;
+        assert_eq!(
+            ReferencePtMaterialAdapter::from_gpu_parameters(parameters),
+            Err(ReferencePtAdapterError::UnsupportedAnisotropy)
+        );
+
+        parameters.anisotropy = 0.0;
+        parameters.anisotropy_rotation = 0.6;
+        assert_eq!(
+            ReferencePtMaterialAdapter::from_gpu_parameters(parameters),
+            Err(ReferencePtAdapterError::UnsupportedAnisotropy)
+        );
+
+        let fold_parameters = GpuSurfaceParameters {
+            anisotropy: 0.8,
+            ..GpuSurfaceParameters::default()
+        };
+        let row = GpuMaterialTexture::non_virtual(
+            7,
+            1,
+            crate::texture_sample::SEMANTIC_ANISOTROPY,
+            0,
+        );
+        let sample = SampledTextureBinding {
+            semantic: crate::texture_sample::SEMANTIC_ANISOTROPY,
+            texel: [0.5, 1.0, 1.0, 1.0],
+            normal_map_forward_texels: None,
+        };
+        assert_eq!(
+            ReferencePtMaterialAdapter::from_gpu_parameters_with_textures_and_dynamic(
+                fold_parameters,
+                &[row],
+                &[sample],
+                DynamicChannels::NONE,
+                ReferencePtShadeContext::default(),
+            ),
+            Err(ReferencePtAdapterError::UnsupportedAnisotropy)
         );
     }
 
