@@ -7,9 +7,11 @@
 
 use alloc::{string::String, vec::Vec};
 
+use prism_render_architecture::abi::{AbiHash, AbiVersion};
 use prism_render_architecture::shader_package::{
     ArtifactDigest, ExecutionFamily, ModuleId, PackageState, PermutationError, PermutationIndex,
-    PermutationSpace, ShaderPackageManifest, ShaderPackageRegistry, VariantManifestError,
+    PermutationSpace, ShaderPackageId, ShaderPackageManifest, ShaderPackageRegistry,
+    ShaderPackageVariantManifest, VariantManifestError,
 };
 
 use crate::{
@@ -166,7 +168,9 @@ pub struct MaterialExecutionProgram {
     /// Keeping this cold-path copy beside the dense identity lets the render
     /// linker build the finite WESL dispatch table without re-opening an
     /// authoring registry or inventing a fallback implementation.
-    compiled: CompiledEntry,
+    /// Registered programs carry their validated source artifact. Builtins are
+    /// fixed in the native shader and therefore carry package identity only.
+    compiled: Option<CompiledEntry>,
 }
 
 impl MaterialExecutionProgram {
@@ -196,8 +200,8 @@ impl MaterialExecutionProgram {
     }
 
     #[must_use]
-    pub fn compiled_entry(&self) -> &CompiledEntry {
-        &self.compiled
+    pub fn compiled_entry(&self) -> Option<&CompiledEntry> {
+        self.compiled.as_ref()
     }
 }
 
@@ -324,6 +328,98 @@ impl MaterialExecutionTables {
         Self::default()
     }
 
+    /// Builds the canonical builtin execution catalog used by the Native
+    /// material path. Builtin responses are implemented by the fixed native
+    /// shader, so this catalog contains verified package identity and dense
+    /// plan/program rows but no registered response source.
+    #[must_use]
+    pub fn builtin() -> Self {
+        let mut tables = Self::new();
+        let permutations = PermutationSpace::new([1]);
+        let programs = [
+            BuiltinProgram::Lit,
+            BuiltinProgram::Npr,
+            BuiltinProgram::Unlit,
+        ];
+        let mut program_indices = Vec::with_capacity(programs.len());
+
+        for program in programs {
+            let name = match program {
+                BuiltinProgram::Lit => "builtin.render_fabric.lit",
+                BuiltinProgram::Npr => "builtin.render_fabric.npr",
+                BuiltinProgram::Unlit => "builtin.render_fabric.unlit",
+            };
+            let package = ShaderPackageId::new(name);
+            let digest = ArtifactDigest::from_bytes(name.as_bytes());
+            let variants = ShaderPackageVariantManifest::from_digests(&permutations, [digest])
+                .expect("the canonical builtin permutation manifest is valid");
+            tables.packages.push(MaterialExecutionPackage {
+                manifest: ShaderPackageManifest {
+                    id: package,
+                    source_revision: "builtin-material-v1".into(),
+                    entry_point: "main".into(),
+                    abi_version: AbiVersion::from_parts(1, 0),
+                    abi_hash: AbiHash::from_bytes(
+                        crate::response_source::RESPONSE_FUNCTION_ABI.as_bytes(),
+                    ),
+                    variants,
+                },
+                digest,
+            });
+            let package_index = PackageIndex(
+                u32::try_from(tables.packages.len() - 1)
+                    .expect("builtin package table fits in u32"),
+            );
+            let program_index = ResponseProgramIndex(
+                u32::try_from(tables.programs.len()).expect("builtin program table fits in u32"),
+            );
+            tables.programs.push(MaterialExecutionProgram {
+                program: ProgramRef::Builtin(program),
+                package: package_index,
+                module_id: ModuleId::SPINE,
+                permutations: permutations.clone(),
+                digest,
+                compiled: None,
+            });
+            program_indices.push((program, program_index));
+        }
+
+        for (program, program_index) in program_indices {
+            let family = match program {
+                BuiltinProgram::Lit => ExecutionFamily::FusedBuiltin,
+                BuiltinProgram::Npr | BuiltinProgram::Unlit => ExecutionFamily::SplitResponse,
+            };
+            tables.plans.push(MaterialExecutionPlan {
+                source: ShadingPlan::single_builtin(program),
+                execution_family: family,
+                left: program_index,
+                right: None,
+                blended_channels: ChannelMask::default(),
+                mask_kind: EXECUTION_MASK_NONE,
+                mask_index: 0,
+                blend_domain: 0,
+            });
+        }
+        tables
+    }
+
+    /// Returns the zero-permutation binding for an exact plan in this table.
+    /// The lookup is intentionally exact: a registered or masked plan cannot
+    /// silently alias a builtin single-response binding.
+    #[must_use]
+    pub fn binding_for_plan(&self, source: &ShadingPlan) -> Option<MaterialExecutionBinding> {
+        let plan = self
+            .plans
+            .iter()
+            .position(|entry| &entry.source == source)?;
+        let plan = PlanIndex(u32::try_from(plan).ok()?);
+        let entry = self.plans.get(plan.get() as usize)?;
+        let program = entry.left;
+        let package = self.programs.get(program.get() as usize)?.package;
+        self.bind(plan, program, package, PermutationIndex::ZERO)
+            .ok()
+    }
+
     /// Returns the validated source bodies required by a runtime Native
     /// linker. Builtins remain in the fixed shader and are not emitted here.
     #[must_use]
@@ -335,10 +431,10 @@ impl MaterialExecutionTables {
             .iter()
             .filter_map(|program| match program.program {
                 ProgramRef::Registered(id) => {
+                    let compiled = program.compiled.as_ref()?;
                     Some(crate::response_source::RegisteredResponseSource::new(
                         id.0,
-                        program
-                            .compiled
+                        compiled
                             .response_source()
                             .map_or_else(Vec::new, |source| source.bodies().to_vec()),
                     ))
@@ -456,7 +552,7 @@ impl MaterialExecutionTables {
             module_id,
             permutations,
             digest: compiled.digest(),
-            compiled: compiled.clone(),
+            compiled: Some(compiled.clone()),
         });
         Ok(index)
     }
@@ -1065,6 +1161,35 @@ mod tests {
                 .to_words(),
             [0, 0, 0, 1, 0]
         );
+    }
+
+    #[test]
+    fn builtin_catalog_has_dense_bindings_without_registered_sources() {
+        let tables = MaterialExecutionTables::builtin();
+        assert_eq!(tables.plans(), 3);
+        assert_eq!(tables.programs(), 3);
+        assert_eq!(tables.packages(), 3);
+        assert!(tables.registered_response_sources().is_empty());
+
+        for (index, program) in [
+            BuiltinProgram::Lit,
+            BuiltinProgram::Npr,
+            BuiltinProgram::Unlit,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let binding = tables
+                .binding_for_plan(&ShadingPlan::single_builtin(program))
+                .expect("canonical builtin plan has a binding");
+            let dense = index as u32;
+            assert_eq!(binding.to_words(), [dense, dense, dense, 0, 0]);
+        }
+
+        let registered = ShadingPlan::Single {
+            program: ProgramRef::Registered(ProgramId(7)),
+        };
+        assert!(tables.binding_for_plan(&registered).is_none());
     }
 
     #[test]

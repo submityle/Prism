@@ -84,6 +84,7 @@ fn dense(index: u64) -> PermutationIndex {
 /// Lambert-vs-Principled comparison from masking GPU/CPU parity regressions.
 fn evaluate_principled_gpu_oracle(
     position: [f32; 3],
+    view_position: [f32; 3],
     normal: [f32; 3],
     albedo: [f32; 3],
     directionals: &[LightingDirectionalInput],
@@ -201,7 +202,14 @@ fn evaluate_principled_gpu_oracle(
     };
     let frame = ShadingFrame {
         normal,
-        view: normalize([-position[0], -position[1], -position[2]], normal),
+        view: normalize(
+            [
+                view_position[0] - position[0],
+                view_position[1] - position[1],
+                view_position[2] - position[2],
+            ],
+            normal,
+        ),
         tangent: normalize(cross(reference, normal), [1.0, 0.0, 0.0]),
         bitangent: normalize(cross(normal, cross(reference, normal)), [0.0, 0.0, 1.0]),
     };
@@ -2277,10 +2285,9 @@ fn install_lighting_test_material_tables(app: &mut App) {
         .expect("the fallback material accepts the canonical execution table");
 }
 
-/// Rebinds the real scene fixture to one published builtin-Lit row before the
-/// production frame runs. The visibility scene, SceneRegistry and material ABI
-/// must carry the same handle and revision or queue admission correctly fails
-/// closed before the identity pass can shade the GBuffer pixel.
+/// Rebinds the authoritative main-world scene fixture to one builtin response
+/// before extraction. The render-world SceneRegistry, material ABI and builtin
+/// execution binding must be produced by the production reconcile stage.
 fn install_native_builtin_scene_material(app: &mut App, program_kind: BuiltinProgram) {
     let handle = GenerationalHandle::new(2, 1);
     let mut record = fallback_material_record(handle, 2);
@@ -2290,31 +2297,11 @@ fn install_native_builtin_scene_material(app: &mut App, program_kind: BuiltinPro
     app.world_mut()
         .resource_mut::<crate::visibility::PrismRenderScene>()
         .insert_material(record.clone());
-
-    let (tables, binding) = lighting_test_execution_tables(program_kind);
-    let render = app.sub_app_mut(RenderApp).expect("the render sub-app");
-    render
-        .world
-        .resource_mut::<SceneRegistry>()
-        .insert_material(record.clone());
-    let materials = render.world.resource_mut::<RenderMaterials>();
-    materials
-        .registry_mut()
-        .install_execution_tables(&tables)
-        .expect("native scene fixture tables install");
-    materials
-        .registry_mut()
-        .publish(record)
-        .expect("native scene fixture material republishes");
-    materials
-        .registry_mut()
-        .set_execution_binding(handle, binding)
-        .expect("native scene fixture binding installs");
 }
 
-/// The native execution-table upload is completion-published. Warm it once so
-/// the frame assertions below cover scene recording rather than cold-start
-/// admission failure.
+/// Run extraction/reconcile once and wait for any queued publication before the
+/// frame assertions below. The builtin table is installed by the production
+/// plugin; this helper does not write render-world state directly.
 fn warm_native_execution_tables(app: &mut App) {
     app.update();
     let render = app.sub_app_mut(RenderApp).expect("the render sub-app");
@@ -4563,6 +4550,7 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
         write_lighting_test_gbuffer_pixel(runtime.runtime().queue(), &target, 0, 0, surfaces[0], 1);
     let expected_direct = evaluate_principled_gpu_oracle(
         gbuffer_surface.position,
+        [0.0; 3],
         gbuffer_surface.normal,
         gbuffer_surface.albedo,
         &directionals,
@@ -4733,6 +4721,7 @@ fn physical_gpu_area_direct_light_matches_cpu_oracle_for_rect_disk_and_capsule()
         write_lighting_test_gbuffer_pixel(runtime.queue(), &target, 0, 0, surface, 1);
     let expected = evaluate_principled_gpu_oracle(
         gbuffer_surface.position,
+        [0.0; 3],
         gbuffer_surface.normal,
         gbuffer_surface.albedo,
         &[],
@@ -7526,8 +7515,9 @@ pub(super) fn queue_scene_handle(app: &App) -> prism_render_architecture::gpu_sc
 }
 
 /// The scene fixture the queue-stage tests draw: a real Prism camera and
-/// renderable feed native per-view culling; matching mesh/material records are
-/// registered in the render world's queue resolver.
+/// renderable feed native per-view culling; geometry/work-list inputs are
+/// registered in the render world while material rows arrive through the
+/// production extraction/reconcile path.
 pub(super) fn queue_scene_fixture(app: &mut App) -> GenerationalHandle {
     use prism_math::{Frustum, Mat4, Plane, Vec3};
     use prism_mesh::{Indices, Mesh, MeshVertexAttribute, VertexAttributeValues};
@@ -7672,34 +7662,7 @@ pub(super) fn queue_scene_fixture(app: &mut App) -> GenerationalHandle {
                 fallback: false,
             }],
         });
-        let mut material_record = prism_render_material::fallback_material_record(material, 1);
-        material_record.response_plan = prism_render_material::ShadingPlan::single_builtin(
-            prism_render_material::BuiltinProgram::Unlit,
-        );
-        material_record.surface.base_color = [1.0; 4];
-        registry.insert_material(material_record);
         registry.bind_geometry_mesh(geometry, mesh_id);
-    }
-    {
-        let materials = render.world.resource_mut::<RenderMaterials>();
-        let first = materials
-            .registry_mut()
-            .allocate()
-            .expect("the material fixture has room for the first slot");
-        assert_eq!(first.index, 1);
-        let published = materials
-            .registry_mut()
-            .allocate()
-            .expect("the material fixture has room for the scene slot");
-        assert_eq!(published, material);
-        let mut material_record = prism_render_material::fallback_material_record(material, 1);
-        material_record.response_plan = prism_render_material::ShadingPlan::single_builtin(
-            prism_render_material::BuiltinProgram::Unlit,
-        );
-        material_record.surface.base_color = [1.0; 4];
-        materials
-            .publish(material_record)
-            .expect("the scene material publishes into the canonical registry");
     }
     render
         .world
@@ -8300,6 +8263,164 @@ fn native_scene_mesh_reaches_composite_hdr_on_a_gpu() {
     let center = pixels[center_index];
     assert_eq!(center, [1.0, 1.0, 1.0, 1.0]);
 }
+
+/// The builtin Lit response must consume the same native light snapshot as the
+/// production composite and produce the CPU-oracle radiance in the HDR target.
+#[test]
+fn native_scene_mesh_lit_response_reaches_composite_hdr_on_a_gpu() {
+    use prism_render_architecture::lighting::{
+        LightClass, LightClassification, LightEmission, LightGeometry, LightMobility, LightRecord,
+        LightUnit,
+    };
+    use prism_render_driver_wgpu::WgpuInstance;
+
+    const SIZE: u32 = 8;
+    let extent = Extent3d::new_2d(SIZE, SIZE);
+    if RenderRuntime::<WgpuInstance>::wgpu(extent).is_err() {
+        assert!(
+            !require_gpu(),
+            "PRISM_REQUIRE_GPU is set but no adapter was found"
+        );
+        return;
+    }
+
+    let mut app = App::new();
+    app.add_plugins(PrismRenderPlugin::with_config(
+        WgpuInstance::new(),
+        RenderAppConfig::new(extent),
+    ));
+    queue_scene_fixture(&mut app);
+    install_native_builtin_scene_material(&mut app, BuiltinProgram::Lit);
+    app.world_mut()
+        .insert_resource(crate::LightingLightScene::default());
+    {
+        let inputs = app.world_mut().resource_mut::<LightingSceneInputs>();
+        inputs.surfaces = vec![LightingSurfaceInput {
+            position: [0.0, 0.0, 0.0],
+            normal: [0.0, 0.0, 1.0],
+            albedo: [1.0; 3],
+            ambient: [0.0; 3],
+        }];
+        inputs.surface_material_indices = vec![2];
+        inputs.gi_candidates = vec![Vec::new()];
+        inputs.mark_changed(1, ChangeFields::LIGHTING);
+    }
+    {
+        let mut lights = app.world_mut().resource_mut::<crate::LightingLightScene>();
+        lights
+            .scene
+            .insert(
+                LightRecord::new(
+                    LightClassification {
+                        class: LightClass::Directional,
+                        mobility: LightMobility::Static,
+                    },
+                    LightEmission::new([1.0; 3], 1.0, LightUnit::Lux),
+                    LightGeometry::Directional {
+                        direction: [0.0, 0.0, -1.0],
+                    },
+                ),
+                1,
+            )
+            .expect("the Lit fixture directional light inserts");
+    }
+
+    warm_native_execution_tables(&mut app);
+    app.update();
+
+    let render = app.get_sub_app(RenderApp).expect("the render sub-app");
+    let stats = render.world.resource::<RenderFrameStats>();
+    assert_eq!(stats.draws_queued, 1);
+    assert_eq!(stats.draws_recorded, 1);
+    assert!(stats.lighting_gpu_passes_recorded > 0);
+    let extracted = render.world.resource::<ExtractedLightingInputs>();
+    assert_eq!(extracted.directionals.len(), 1);
+    let runtime = render
+        .world
+        .resource::<RenderRuntimeResource<WgpuInstance>>();
+    assert!(runtime.runtime().wait_idle());
+    let target = *render
+        .world
+        .resource::<crate::surface_view_targets::SurfaceViewTargets<
+            prism_render_driver_wgpu::WgpuDevice,
+        >>()
+        .iter(runtime.runtime())
+        .next()
+        .map(|(_, target)| target)
+        .expect("the Lit camera graph owns a native target");
+    let pixels = runtime
+        .runtime()
+        .queue()
+        .read_texture_rgba16f(target.texture(), SIZE, SIZE)
+        .expect("Lit HDR readback must complete");
+    let normals = runtime
+        .runtime()
+        .queue()
+        .read_texture_rgba16f(target.normal_texture(), SIZE, SIZE)
+        .expect("Lit normal readback must complete");
+    let position_x = runtime
+        .runtime()
+        .queue()
+        .read_texture_r32float(target.position_x_texture(), SIZE, SIZE)
+        .expect("Lit position-x readback must complete");
+    let position_y = runtime
+        .runtime()
+        .queue()
+        .read_texture_r32float(target.position_y_texture(), SIZE, SIZE)
+        .expect("Lit position-y readback must complete");
+    let position_z = runtime
+        .runtime()
+        .queue()
+        .read_texture_r32float(target.position_z_texture(), SIZE, SIZE)
+        .expect("Lit position-z readback must complete");
+    let material_a = runtime
+        .runtime()
+        .queue()
+        .read_texture_rgba16f(target.surface_material_a_texture(), SIZE, SIZE)
+        .expect("Lit material-A readback must complete");
+    let center_index = ((SIZE / 2) * SIZE + SIZE / 2) as usize;
+    let center = pixels[center_index];
+    let world_position = [
+        position_x[center_index],
+        position_y[center_index],
+        position_z[center_index],
+    ];
+    let view_position = render
+        .world
+        .resource::<crate::surface_views::ExtractedSurfaceViews>()
+        .iter()
+        .next()
+        .expect("the Lit camera surface view exists")
+        .view_position;
+    let expected = evaluate_principled_gpu_oracle(
+        world_position,
+        view_position,
+        [
+            normals[center_index][0],
+            normals[center_index][1],
+            normals[center_index][2],
+        ],
+        [
+            material_a[center_index][0],
+            material_a[center_index][1],
+            material_a[center_index][2],
+        ],
+        &extracted.directionals,
+        &extracted.punctuals,
+        &extracted.areas,
+    );
+    assert!(expected.iter().any(|value| *value > 0.0));
+    for channel in 0..3 {
+        assert!(
+            (center[channel] - expected[channel]).abs() <= 0.002,
+            "Lit HDR channel {channel}: GPU {} != CPU {}",
+            center[channel],
+            expected[channel]
+        );
+    }
+    assert_eq!(center[3], 1.0);
+}
+
 fn mark_prepare_assets(mut log: ResMut<OrderLog>) {
     log.0.push("prepare-assets");
 }
