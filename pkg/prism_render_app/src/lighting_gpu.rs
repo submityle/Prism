@@ -6722,9 +6722,9 @@ where
         area: cache.areas.plan_upload(),
     });
     Ok((
-        cache.directionals.capacity() as usize,
-        cache.punctuals.capacity() as usize,
-        cache.areas.capacity() as usize,
+        cache.directionals.live_len(),
+        cache.punctuals.live_len(),
+        cache.areas.live_len(),
         token,
     ))
 }
@@ -7984,6 +7984,60 @@ mod light_table_tests {
             lighting_submission_domain(1).submission(1).unwrap(),
         ));
         assert!(cache.pending.is_none());
+    }
+
+    #[test]
+    fn light_upload_transaction_returns_live_counts_not_allocated_capacity() {
+        let mut cache = LightUploadCache::default();
+        let domain = lighting_submission_domain(1);
+        let first = canonical(1, 1);
+        let second = canonical(2, 1);
+
+        let (_, _, _, first_token) = prepare_light_upload_transaction(
+            &mut cache,
+            domain,
+            domain.completion(0),
+            true,
+            domain.submission(1).unwrap(),
+            &[first, second],
+            &[directional(1.0), directional(2.0)],
+            &[],
+            &[],
+            &[],
+            &[],
+            || panic!("initial light upload must not wait for idle"),
+        )
+        .unwrap();
+        assert!(acknowledge_pending_light_uploads(
+            &mut cache,
+            first_token,
+            domain.submission(1).unwrap(),
+        ));
+
+        let (directional_count, punctual_count, area_count, second_token) =
+            prepare_light_upload_transaction(
+                &mut cache,
+                domain,
+                domain.completion(1),
+                false,
+                domain.submission(2).unwrap(),
+                &[first],
+                &[directional(3.0)],
+                &[],
+                &[],
+                &[],
+                &[],
+                || panic!("stable light-table update must not compact"),
+            )
+            .unwrap();
+        assert_eq!((directional_count, punctual_count, area_count), (1, 0, 0));
+        assert_eq!(cache.directionals.capacity(), 2);
+        assert_eq!(cache.directionals.live_len(), 1);
+        assert!(acknowledge_pending_light_uploads(
+            &mut cache,
+            second_token,
+            domain.submission(2).unwrap(),
+        ));
     }
 
     #[test]
