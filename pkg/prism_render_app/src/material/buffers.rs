@@ -25,7 +25,8 @@ use prism_render_driver::{
 use prism_render_material::EXECUTION_PLAN_ROW_WORDS;
 use prism_render_material::{
     fallback_material_record, inactive_material_header, DynamicChannels, GpuMaterialHeader,
-    GpuMaterialTexture, MaterialExecutionBinding, MaterialRecord, MaterialRegistry,
+    GpuMaterialTexture, MaterialExecutionBinding, MaterialExecutionTables, MaterialRecord,
+    MaterialRegistry,
 };
 
 use super::virtual_texture::MaterialVtLeaseSnapshot;
@@ -141,6 +142,16 @@ pub struct NativeExecutionTableBuffers {
 pub enum ExecutionTableSyncError {
     /// The registry has not installed verified execution tables.
     TablesUnavailable,
+    /// A registered program has no validated response-function source that the
+    /// Native linker can consume. An artifact-only SPIR-V registration is not
+    /// a Native response implementation.
+    RegisteredResponseSourceUnavailable,
+}
+
+fn native_execution_tables_are_linkable(tables: &MaterialExecutionTables) -> bool {
+    tables.registered_response_sources().iter().all(|source| {
+        !source.bodies().is_empty() && source.bodies().iter().all(|body| !body.trim().is_empty())
+    })
 }
 
 impl NativeExecutionTableBuffers {
@@ -248,6 +259,9 @@ impl NativeExecutionTableBuffers {
             .is_some_and(|snapshot| snapshot.ready.load(Ordering::Acquire))
         {
             self.active = self.pending.take();
+        }
+        if !native_execution_tables_are_linkable(tables) {
+            return Err(ExecutionTableSyncError::RegisteredResponseSourceUnavailable);
         }
         if self.requested_version == version
             && (self
@@ -786,6 +800,16 @@ impl MaterialParameterBuffers {
     #[must_use]
     pub(crate) const fn execution_table_version(&self) -> u32 {
         self.execution_table_version
+    }
+
+    /// Advances only the publication stamp when the immutable execution-table
+    /// snapshot changes without any material row changing. The byte allocation
+    /// remains valid; the stamp keeps the material/execution frame bundle
+    /// coherent instead of waiting for an unrelated dirty material.
+    pub(crate) fn set_execution_table_version(&mut self, version: Option<u32>) {
+        if let Some(version) = version {
+            self.execution_table_version = version;
+        }
     }
 
     /// The header buffer (one [`GpuMaterialHeader`] per material slot).
@@ -1356,8 +1380,166 @@ impl MaterialParameterBuffers {
 #[cfg(test)]
 mod ownership_tests {
     use super::*;
+    use prism_render_architecture::{
+        abi::{AbiHash, AbiVersion},
+        shader_package::{
+            ArtifactDigest, ManifestExpectation, ModuleId, PermutationSpace, ShaderPackageId,
+            ShaderPackageManifest, ShaderPackageRegistry, ShaderPackageVariantManifest,
+        },
+    };
     use prism_render_driver::{DeviceDescriptor, Instance, RequestAdapterOptions};
     use prism_render_driver_null::NullInstance;
+    use prism_render_material::{
+        ChannelMask, CompiledEntry, ExecutionFamily, ProgramId, ProgramRef, ShadingPlan,
+    };
+
+    fn response_manifest(id: &str) -> ShaderPackageManifest {
+        let permutations = PermutationSpace::new([1]);
+        ShaderPackageManifest {
+            id: ShaderPackageId::new(id),
+            source_revision: "1".into(),
+            entry_point: "main".into(),
+            abi_version: AbiVersion::from_parts(1, 0),
+            abi_hash: AbiHash::from_bytes(b"native-response-source-test"),
+            variants: ShaderPackageVariantManifest::from_digests(
+                &permutations,
+                [ArtifactDigest([1; 32])],
+            )
+            .expect("one response variant has one digest"),
+        }
+    }
+
+    fn artifact_only_spirv() -> Vec<u32> {
+        vec![
+            0x0723_0203,
+            0x0001_0000,
+            0,
+            5,
+            0,
+            (2 << 16) | 17,
+            1,
+            (3 << 16) | 14,
+            0,
+            1,
+            (5 << 16) | 15,
+            5,
+            3,
+            0x6e69_616d,
+            0,
+            (6 << 16) | 16,
+            3,
+            17,
+            1,
+            1,
+            1,
+            (2 << 16) | 19,
+            1,
+            (3 << 16) | 33,
+            2,
+            1,
+            (5 << 16) | 54,
+            1,
+            3,
+            0,
+            2,
+            (2 << 16) | 248,
+            4,
+            (1 << 16) | 253,
+            (1 << 16) | 56,
+        ]
+    }
+
+    fn table_with_registered_entry(compiled: CompiledEntry) -> MaterialExecutionTables {
+        let mut packages = ShaderPackageRegistry::new();
+        packages
+            .register_verified(compiled.artifact().clone())
+            .expect("compiled artifact is a verified package");
+        let manifest = compiled.package_manifest();
+        packages
+            .validate(
+                &manifest.id,
+                &ManifestExpectation::new(manifest.abi_version, manifest.abi_hash),
+            )
+            .expect("verified package satisfies the response ABI");
+        let mut tables = MaterialExecutionTables::new();
+        let package = tables
+            .register_package(&compiled, &packages)
+            .expect("verified package enters the execution table");
+        let program = tables
+            .register_program(
+                ProgramRef::Registered(ProgramId(7)),
+                &compiled,
+                package,
+                ModuleId(0),
+                PermutationSpace::new([1]),
+            )
+            .expect("registered program enters the dense table");
+        tables
+            .register_plan(
+                ShadingPlan::Single {
+                    program: ProgramRef::Registered(ProgramId(7)),
+                },
+                program,
+                None,
+                ExecutionFamily::SplitResponse,
+                ChannelMask::default(),
+            )
+            .expect("registered response has a split plan");
+        tables
+    }
+
+    #[test]
+    fn native_linkability_requires_a_registered_response_source() {
+        let artifact_only = CompiledEntry::from_spirv(
+            response_manifest("native-artifact-only"),
+            artifact_only_spirv(),
+        )
+        .expect("fixture SPIR-V is a valid package artifact");
+        let source_backed = CompiledEntry::from_response_wgsl(
+            response_manifest("native-source-backed"),
+            vec!["return RegisteredResponse(vec3(1.0), vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0), 1.0);".into()],
+        )
+        .expect("fixture response body is valid");
+
+        assert!(!native_execution_tables_are_linkable(
+            &table_with_registered_entry(artifact_only,)
+        ));
+        assert!(native_execution_tables_are_linkable(
+            &table_with_registered_entry(source_backed,)
+        ));
+    }
+
+    #[test]
+    fn artifact_only_registered_response_is_rejected_before_gpu_publication() {
+        let instance = NullInstance::new();
+        let adapter = instance
+            .request_adapter(&RequestAdapterOptions::default())
+            .expect("null adapter exists");
+        let (device, queue) = instance
+            .create_device(&adapter, &DeviceDescriptor::default())
+            .expect("null device is available");
+        let device = Arc::new(device);
+        let mut registry = MaterialRegistry::new(1);
+        registry.take_dirty();
+        let tables = table_with_registered_entry(
+            CompiledEntry::from_spirv(
+                response_manifest("native-sync-artifact-only"),
+                artifact_only_spirv(),
+            )
+            .expect("fixture SPIR-V is a valid package artifact"),
+        );
+        registry
+            .install_execution_tables(&tables)
+            .expect("table identity is otherwise valid");
+
+        let mut mirror = NativeExecutionTableBuffers::new();
+        assert_eq!(
+            mirror.sync_registry(Arc::clone(&device), &queue, &registry),
+            Err(ExecutionTableSyncError::RegisteredResponseSourceUnavailable)
+        );
+        assert!(mirror.snapshot().is_none());
+        assert_eq!(device.live_resource_count(), 0);
+    }
 
     #[test]
     fn allocation_snapshot_pins_old_buffers_across_growth() {

@@ -1473,13 +1473,27 @@ fn composite_evaluate_native_registered(
     var result = CompositeProgramEvaluation(false, composite_response_zero());
     if (identity.material_index >= arrayLength(&composite_material_headers)) { return result; }
     let header = composite_material_headers[identity.material_index];
+    // Registered responses receive the same indirect transport that builtin
+    // responses consume.  Keeping this derivation here avoids a second
+    // response-specific GI path and makes the context reflect the admitted
+    // material/lighting identity rather than the old zero-filled probe.
+    var indirect_diffuse = vec3<f32>(0.0);
+    if ((params.flags.x == 2u || params.flags.x == 3u) &&
+        identity.lighting_surface_index != 0xffffffffu &&
+        identity.lighting_surface_index < params.counts.x &&
+        identity.lighting_surface_index < arrayLength(&gi)) {
+        let occlusion = clamp(surface.ambient_occlusion, 0.0, 1.0);
+        let diffuse_weight = 1.0 - clamp(surface.metallic, 0.0, 1.0);
+        indirect_diffuse = gi[identity.lighting_surface_index].xyz
+            * (occlusion * diffuse_weight);
+    }
     let registered_surface = composite_registered_surface(surface);
     let registered_frame = RegisteredFrame(frame.normal, frame.view, frame.tangent, frame.bitangent);
     let registered_geometry = RegisteredGeometry(
         world_position, frame.normal, frame.tangent, frame.bitangent, uv, 0u,
     );
     let environment = RegisteredEnvironment(
-        vec3<f32>(0.0), min(params.counts.y, 1024u),
+        indirect_diffuse, min(params.counts.y, 1024u),
         array<vec4<f32>, 9>(
             vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0),
             vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0),
@@ -1499,7 +1513,8 @@ fn composite_evaluate_native_registered(
         environment, registered_frame, world_position,
         min(params.counts.y, 1024u), min(params.counts.z, 1024u),
         min(params.flags.y, 1024u), 0u, 0u,
-        vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(1.0),
+        indirect_diffuse, indirect_diffuse, vec3<f32>(0.0),
+        vec3<f32>(surface.specular_weight),
     );
     let view = RegisteredView(
         camera_view.position.xyz, vec2<u32>(0u), vec2<u32>(0u),
@@ -2995,6 +3010,9 @@ mod gbuffer_gpu_contract_tests {
         pass: LightingGpuPass,
         headers: BufferId,
         parameters: BufferId,
+        texture_rows: BufferId,
+        execution_plans: BufferId,
+        execution_programs: BufferId,
     }
 
     fn fixture() -> Option<Fixture> {
@@ -3241,6 +3259,9 @@ mod gbuffer_gpu_contract_tests {
             pass,
             headers,
             parameters,
+            texture_rows,
+            execution_plans,
+            execution_programs,
         })
     }
 
@@ -3257,20 +3278,11 @@ mod gbuffer_gpu_contract_tests {
         header.execution_plan_index = 0;
         header.execution_program_index = 0;
         header.execution_package_index = 0;
-        let headers = device.create_buffer(&BufferDescriptor::new(
-            (4 * core::mem::size_of::<GpuMaterialHeader>()) as u64,
-            BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        ));
+        let headers = f.headers;
         queue.write_buffer(headers, 0, cast_slice(&[header; 4]));
-        let parameters = device.create_buffer(&BufferDescriptor::new(
-            (heap.len() * core::mem::size_of::<u32>()) as u64,
-            BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        ));
+        let parameters = f.parameters;
         queue.write_buffer(parameters, 0, cast_slice(&heap));
-        let execution_plans = device.create_buffer(&BufferDescriptor::new(
-            MATERIAL_PLAN_ROW_BYTES,
-            BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        ));
+        let execution_plans = f.execution_plans;
         queue.write_buffer(
             execution_plans,
             0,
@@ -3278,10 +3290,7 @@ mod gbuffer_gpu_contract_tests {
             // composition family is reserved for a two-arm blend.
             cast_slice(&[0u32, u32::MAX, 1, 0, 0, 0, 0, 0]),
         );
-        let execution_programs = device.create_buffer(&BufferDescriptor::new(
-            MATERIAL_PROGRAM_ROW_BYTES * 2,
-            BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        ));
+        let execution_programs = f.execution_programs;
         queue.write_buffer(
             execution_programs,
             0,
@@ -3323,9 +3332,17 @@ return RegisteredResponse(
             parameters: Some(parameters),
             parameters_size_bytes: (heap.len() * core::mem::size_of::<u32>()) as u64,
             execution_plans: Some(execution_plans),
-            execution_plans_size_bytes: MATERIAL_PLAN_ROW_BYTES,
+            execution_plans_size_bytes: MATERIAL_PLAN_ROW_BYTES * 3,
             execution_programs: Some(execution_programs),
-            execution_programs_size_bytes: MATERIAL_PROGRAM_ROW_BYTES * 2,
+            execution_programs_size_bytes: MATERIAL_PROGRAM_ROW_BYTES * 3,
+            texture_rows: Some(f.texture_rows),
+            texture_rows_size_bytes: MATERIAL_TEXTURE_ROW_BYTES,
+            material_version: 1,
+            execution_version: 1,
+            material_epoch: 1,
+            vt_publication_generation: 1,
+            texture_binding_version: 1,
+            texture_image_version: 1,
             ..Default::default()
         };
         let mut pass = f
@@ -4791,9 +4808,24 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                 &0xff008080_u32.to_le_bytes(),
             );
         }
-        let mut composite = CommandEncoder::new();
-        composite.push_compute_pass(None, composite_commands(f.pass));
-        queue.submit(&[composite.finish()]);
+        let mut identity = CommandEncoder::new();
+        identity.push_compute_pass(
+            None,
+            vec![
+                ComputeCommand::SetPipeline(f.pass.surface_identity_pipeline),
+                ComputeCommand::SetBindGroup {
+                    index: 0,
+                    bind_group: f.pass.surface_identity_bind_group.unwrap(),
+                    dynamic_offsets: vec![],
+                },
+                ComputeCommand::Dispatch {
+                    x: WIDTH.div_ceil(COMPOSITE_WORKGROUP_X),
+                    y: HEIGHT.div_ceil(COMPOSITE_WORKGROUP_Y),
+                    z: 1,
+                },
+            ],
+        );
+        queue.submit(&[identity.finish()]);
         assert!(queue.wait_idle());
         let boundary_identity = queue
             .read_buffer(target.surface_identity_buffer(), 4 * 64)
@@ -4807,6 +4839,38 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             vec![u32::MAX, 0, 1, 2],
             "identity prepass must preserve valid zero-based rows and reject clear"
         );
+
+        // Composite intentionally aliases the identity buffer and overwrites
+        // it with the canonical response. Read the prepass before that handoff.
+        let mut composite = CommandEncoder::new();
+        composite.push_compute_pass(
+            None,
+            vec![
+                ComputeCommand::SetPipeline(f.pass.composite_pipeline),
+                ComputeCommand::SetBindGroup {
+                    index: 0,
+                    bind_group: f.pass.composite_bind_group,
+                    dynamic_offsets: vec![],
+                },
+                ComputeCommand::SetBindGroup {
+                    index: 1,
+                    bind_group: f.pass.composite_target_bind_group.unwrap(),
+                    dynamic_offsets: vec![],
+                },
+                ComputeCommand::SetBindGroup {
+                    index: 2,
+                    bind_group: f.pass.composite_material_bind_group.unwrap(),
+                    dynamic_offsets: vec![],
+                },
+                ComputeCommand::Dispatch {
+                    x: WIDTH.div_ceil(COMPOSITE_WORKGROUP_X),
+                    y: HEIGHT.div_ceil(COMPOSITE_WORKGROUP_Y),
+                    z: 1,
+                },
+            ],
+        );
+        queue.submit(&[composite.finish()]);
+        assert!(queue.wait_idle());
         let hdr = queue
             .read_texture_rgba16f(target.texture(), WIDTH, HEIGHT)
             .expect("lighting composite HDR readback must complete");
@@ -6305,7 +6369,13 @@ where
                 .device
                 .as_ref()
                 .is_some_and(|owner| Arc::ptr_eq(owner, &device_owner));
+        let material_owner_matches = match (&cache.material_owner, &direct_owner) {
+            (Some(cached), Some(current)) => Arc::ptr_eq(cached, current),
+            (None, None) => true,
+            _ => false,
+        };
         let group = if owner_matches
+            && material_owner_matches
             && cache.material_buffers == Some(buffers)
             && cache.material_resources == Some(composite_material_resources)
         {

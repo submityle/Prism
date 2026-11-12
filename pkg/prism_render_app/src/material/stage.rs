@@ -224,14 +224,10 @@ impl RenderMaterials {
             let Some(record) = self.registry.record_at(index) else {
                 continue;
             };
-            let rows: BTreeSet<_> = record
-                .textures
-                .iter()
-                .map(|row| (row.index, row.generation))
-                .collect();
             for lease in held {
-                if rows.contains(&(lease.slot.index, lease.slot.generation))
-                    && self.textures.slot_of(lease.image) == Some(lease.slot)
+                if record.textures.iter().any(|row| {
+                    row.index == lease.slot.index && row.generation == lease.slot.generation
+                }) && self.textures.slot_of(lease.image) == Some(lease.slot)
                 {
                     images.insert(lease.image, lease.slot);
                 }
@@ -274,6 +270,7 @@ impl RenderMaterials {
             }
         }
         let mut retained = Vec::new();
+        let mut residency_changed = false;
         for lease in held {
             if self.textures.slot_of(lease.image) != Some(lease.slot) {
                 continue;
@@ -283,8 +280,15 @@ impl RenderMaterials {
                 *remaining -= 1;
                 retained.push(lease);
             } else {
-                self.textures.release(lease.image);
+                residency_changed |= self.textures.release(lease.image);
             }
+        }
+        if residency_changed {
+            // Reconciliation is also the normal retirement path. A released
+            // slot changes both the sampled view and its generation table, so
+            // binding consumers must rebuild even when no explicit resolve or
+            // release_textures call happened.
+            self.texture_binding_version = self.texture_binding_version.wrapping_add(1);
         }
         if !retained.is_empty() {
             self.held.insert(index, retained);
@@ -423,11 +427,21 @@ pub(crate) fn sync_material_buffers<I>(
             stats.execution_tables_ready = false;
             stats.execution_tables_error = None;
         }
-        Err(error) => {
+        Err(ExecutionTableSyncError::RegisteredResponseSourceUnavailable) => {
             stats.execution_tables_ready = false;
-            stats.execution_tables_error = Some(error);
+            stats.execution_tables_error =
+                Some(ExecutionTableSyncError::RegisteredResponseSourceUnavailable);
+            // Do not upload headers for a new table generation when its
+            // registered response cannot be linked. That would pair material
+            // rows with the previous execution snapshot and admit a mixed ABI.
+            buffers.set_execution_table_version(execution_buffers.execution_table_version());
+            return;
         }
     }
+    // Execution tables have their own completion-published generation. They
+    // may advance while all material bytes stay quiet, so keep the logical
+    // material snapshot stamp paired with the latest completed table here.
+    buffers.set_execution_table_version(execution_buffers.execution_table_version());
     if let Some(report) = sync_dirty_material_buffers(
         &mut buffers,
         &mut materials,
