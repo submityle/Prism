@@ -10,7 +10,7 @@
 
 **当前硬失败与空 fixture**：Metal native 的基础直接 draw 与非空场景 GBuffer 最小验收均已通过；`tests::native_scene_mesh_draws_the_visible_set_on_a_gpu` 确认 queued/recorded 各为 1，并从实际 camera-local graph target 读到正确 normal/albedo。该结果只关闭 Native Surface 的最小视觉切片，不等于 Render Fabric 全场景输出。`pkg/prism_render_app/tests/native_full_frame_acceptance.rs` 使用 `DeferredInstance`、Null backend 和无 renderable object 的相机；它验证的是空/null 提交、未完成 submission、失败和恢复，不是全帧视觉验收。
 
-**仍未完成**：native 的 response/composition 到最终 HDR 的完整链路；统一全场景 recorder、真实 31-pass 等价入口、Surface/Particle/Water/Volume/Hair/Decal 等域的同帧资源导入与多视图 fan-out；设备丢失/resize/资源退休；第二 physical adapter；全帧图像 parity、资源峰值/队列等待/吞吐及 P50/P95/P99。后文的局部契约和历史切片必须保持“局部/历史/排除”标签，不得表述为整个 Render Fabric 或重构系统已完成。
+**仍未完成**：native 的 response/composition 到最终 HDR 的完整链路；统一全场景 recorder、真实 31-pass 等价入口、Surface/Particle/Water/Volume/Hair/Decal 等域的同帧资源导入与多视图 fan-out；设备丢失/resize/资源退休；第二 physical adapter；全帧图像 parity、资源峰值/队列等待/吞吐及 P50/P95/P99。2026-11-12 的 native target admission 修复只保证 completion 未确认时不替换旧资源、不提交半成品 graph，不能扩大为 Render Fabric 全场景完成。后文的局部契约和历史切片必须保持“局部/历史/排除”标签，不得表述为整个 Render Fabric 或重构系统已完成。
 
 > 状态：Render Fabric 目标规范与实现证据审计（允许破坏性重构，不保留旧 API）；2026-11-09：Bevy RenderApp/SceneFabric/SceneRhi 接线已归档为历史/排除项，不再作为目标实现或验收前提；当前只以 Prism 原生 prism_render_app、Prism RHI 与 prism_render_graph/RenderGraph 判断，原生全场景统一 recorder 与完整验收仍未闭合
 > 上层导航：[`00-overview_refactor_zh.md`](00-overview_refactor_zh.md)

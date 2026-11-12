@@ -14,6 +14,7 @@
 - 非空场景 Surface GBuffer 以及 GBuffer → composite readback 已在同一 Prism RHI/Metal 路径通过；composite group-2 已收敛为 header/parameter 两个 storage buffers，满足 Apple Metal 的 8-buffer compute 限制。
 - native RenderApp 的 prepare/graph record/submit/completion 及失败关闭语义有实现和生命周期测试；非空 Surface GBuffer 最小视觉验收也已在 Metal 通过，但这仍不是完整帧验收。
 - 原生 Unlit 垂直切片已通过 Metal：真实场景 mesh/material 经 identity、GBuffer、composite 到 HDR readback，`native_scene_mesh_reaches_composite_hdr_on_a_gpu` 的中心像素为 `[1,1,1,1]`。这只证明单一内建响应和固定 fixture 的端到端切片。
+- 2026-11-12 已收口一项 native 生命周期缺陷：冷启动不再因延迟 completion 被错误拒绝；resize 在 target completion 未确认时保持旧 target、拒绝 graph admission，并保留 `AdmissionFailed` receipt，CPU 状态机回归已通过。该次运行未新增 physical-GPU 结果。
 
 **当前明确未完成/未证实**：
 
