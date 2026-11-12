@@ -112,7 +112,7 @@ impl RenderMaterials {
     #[must_use]
     pub fn new_with_builtin_execution(capacity: u32) -> Self {
         let mut registry = MaterialRegistry::new(capacity);
-        let builtin_execution = MaterialExecutionTables::builtin();
+        let builtin_execution = MaterialExecutionTables::builtin_with_mask_blends();
         registry
             .install_execution_tables(&builtin_execution)
             .expect("canonical builtin execution catalog must validate");

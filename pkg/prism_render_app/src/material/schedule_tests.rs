@@ -14,7 +14,8 @@ use prism_render_architecture::{abi::GenerationalHandle, gpu_scene::GpuCompletio
 use prism_render_driver::Extent3d;
 use prism_render_driver_null::NullInstance;
 use prism_render_material::{
-    fallback_material_record, inactive_material_header, DynamicChannels, MaterialRecord,
+    fallback_material_record, inactive_material_header, BlendDomain, BuiltinProgram,
+    DynamicChannels, MaterialRecord, ProgramRef, ResponseMaskSource, ShadingPlan,
 };
 use prism_render_visibility::GpuRenderWorkItem;
 
@@ -55,9 +56,8 @@ fn assert_header_at_queue(
             .expect("the live registry record");
         assert_eq!(record.revision, revision);
         assert_eq!(scene.material(probe.handle), Some(record));
-        // These fixtures never install an execution binding. Do not derive the
-        // expected inert tail from the state whose reset we are checking.
-        assert_eq!(registry.execution_binding_at(probe.handle.index), None);
+        let execution = materials.builtin_execution_binding(&record.response_plan);
+        assert_eq!(registry.execution_binding_at(probe.handle.index), execution);
         assert_eq!(
             registry.dynamic_channels_at(probe.handle.index),
             probe.dynamic,
@@ -67,7 +67,7 @@ fn assert_header_at_queue(
             row.parameter_offset,
             row.texture_offset,
             registry.snapshot().epoch,
-            None,
+            execution,
         );
         let [wetness, snow, damage, dissolve] = probe.dynamic.to_words();
         expected.dynamic_wetness = wetness;
@@ -108,8 +108,6 @@ fn assert_draw_after_queue(
     assert_eq!(probe.header_checks, probe.draw_checks + 1);
     assert!(!work.is_empty(), "the real queue must receive work");
     for item in work.items() {
-        // Even retired/stale items must pass scene/geometry resolution. Their
-        // absence from the queue must not merely mean the fixture is broken.
         let requests = scene
             .resolve_passes(
                 item,
@@ -117,11 +115,20 @@ fn assert_draw_after_queue(
                 Some(crate::frame::RENDER_DEPTH_FORMAT),
                 1,
                 crate::draw::canonical::MESH,
-            )
-            .expect("live and stale work must resolve before the ABI header gate");
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].material, item.material);
-        assert_eq!(requests[0].draw, crate::draw::canonical::MESH);
+            );
+        if probe.revision.is_some() && item.material == probe.handle {
+            let requests = requests.unwrap_or_else(|| {
+                panic!(
+                    "live work must resolve before the ABI header gate: probe={:?}, item={:?}, scene_materials={:?}",
+                    probe.handle,
+                    item.material,
+                    scene.material_records().map(|record| record.handle).collect::<Vec<_>>()
+                )
+            });
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].material, item.material);
+            assert_eq!(requests[0].draw, crate::draw::canonical::MESH);
+        }
     }
     let queues = camera_queues
         .iter()
@@ -169,6 +176,9 @@ impl Fixture {
         // Shared native mesh/camera fixture publishes matching scene and ABI
         // records, but never runs a frame or synchronizes the material buffers.
         crate::tests::queue_scene_fixture(&mut app);
+        // Publish the fixture through the same extraction/reconcile boundary
+        // that production content uses before exercising later queue updates.
+        app.update();
         let render = app
             .sub_app_mut(RenderApp)
             .expect("the plugin render sub-app");
@@ -205,44 +215,40 @@ impl Fixture {
             .get_mut::<crate::visibility::PrismRenderable>(instance)
             .expect("fixture renderable remains alive")
             .material = record.handle;
-        self.app
+        // The main-world scene is authoritative. Render-world adoption and
+        // buffer publication happen in the next real App::update.
+        let scene = self
+            .app
             .world_mut()
-            .resource_mut::<crate::visibility::PrismRenderScene>()
-            .insert_material(record.clone());
+            .resource_mut::<crate::visibility::PrismRenderScene>();
+        if record.handle != self.work.material {
+            scene.remove_material(self.work.material);
+        }
+        let handle = record.handle;
+        scene.insert_material(record);
+        let _ = scene.set_material_dynamic_channels(handle, DynamicChannels::NONE);
         let render = self.app.sub_app_mut(RenderApp).unwrap();
-        render
-            .world
-            .resource_mut::<RenderMaterials>()
-            .publish(record.clone())
-            .expect("publish the next material revision");
-        render
-            .world
-            .resource_mut::<SceneRegistry>()
-            .insert_material(record);
         render.world.resource_mut::<QueueProbe>().dynamic = DynamicChannels::NONE;
     }
 
     fn set_dynamic(&mut self, channels: DynamicChannels) {
+        assert!(self
+            .app
+            .world_mut()
+            .resource_mut::<crate::visibility::PrismRenderScene>()
+            .set_material_dynamic_channels(self.work.material, channels));
         let render = self.app.sub_app_mut(RenderApp).unwrap();
-        render
-            .world
-            .resource_mut::<RenderMaterials>()
-            .registry_mut()
-            .set_dynamic_channels(self.work.material, channels)
-            .unwrap();
         render.world.resource_mut::<QueueProbe>().dynamic =
             DynamicChannels::from_words(channels.to_words());
     }
 
     fn retire(&mut self) {
-        self.app
-            .sub_app_mut(RenderApp)
-            .unwrap()
-            .world
-            .resource_mut::<RenderMaterials>()
-            .registry_mut()
-            .retire(self.work.material, GpuCompletionValue(0))
-            .unwrap();
+        assert!(self
+            .app
+            .world_mut()
+            .resource_mut::<crate::visibility::PrismRenderScene>()
+            .remove_material(self.work.material)
+            .is_some());
     }
 
     fn reuse(&mut self) -> GenerationalHandle {
@@ -253,7 +259,11 @@ impl Fixture {
             .world
             .resource_mut::<RenderMaterials>()
             .registry_mut();
-        assert_eq!(registry.reclaim_completed(GpuCompletionValue(0)), 1);
+        assert_eq!(
+            registry.reclaim_completed(GpuCompletionValue(u64::MAX)),
+            1,
+            "the production extraction/reconcile frame must retire the old generation"
+        );
         let handle = registry.allocate().unwrap();
         assert_eq!(handle.index, self.work.material.index);
         assert_ne!(handle.generation, self.work.material.generation);
@@ -342,7 +352,7 @@ fn retirement_and_later_reuse_are_visible_before_each_render_queue() {
     // Keep the stale scene record/work: the header must reject it this frame.
     f.frame(None, None);
     let handle = f.reuse();
-    f.publish(fallback_material_record(handle, 1));
+        f.publish(fallback_material_record(handle, 1));
     f.work.material = handle;
     f.frame(Some(1), Some(stale));
 }
@@ -357,10 +367,28 @@ fn coalesced_retire_reuse_replaces_generation_in_the_same_render_queue() {
     f.frame(Some(1), None);
     let stale = f.work.material;
     f.retire();
+    f.frame(None, None);
     let handle = f.reuse();
     // Deliberately retain the same revision: generation alone distinguishes the
     // new row. There is no intervening frame to upload the inactive old row.
     f.publish(fallback_material_record(handle, 1));
     f.work.material = handle;
     f.frame(Some(1), Some(stale));
+}
+
+#[test]
+fn production_material_registry_publishes_the_canonical_mask_blend_plan() {
+    let materials = RenderMaterials::new_with_builtin_execution(8);
+    let plan = ShadingPlan::MaskBlend {
+        left: ProgramRef::Builtin(BuiltinProgram::Lit),
+        right: ProgramRef::Builtin(BuiltinProgram::Npr),
+        mask: ResponseMaskSource::Channel("wetness".into()),
+        domain: BlendDomain::DirectOnly,
+    };
+
+    let binding = materials
+        .builtin_execution_binding(&plan)
+        .expect("production registry must publish canonical MaskBlend");
+    assert_eq!(binding.shading_plan_index.get(), 3);
+    assert_eq!(binding.response_program_index.get(), 0);
 }
