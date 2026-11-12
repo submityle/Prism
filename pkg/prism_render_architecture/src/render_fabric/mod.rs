@@ -25,9 +25,9 @@ mod types;
 
 pub use accesses::VariantResourceUse;
 pub use builtins::{
-    builtin_catalog, builtin_resource_templates, builtin_roots, builtin_service_ids,
-    volume_required_services, water_required_services, BUILTIN_RESOURCE_TEMPLATES,
-    CUSTOM_FEATURE_ID, CUSTOM_VARIANT_ID, DECAL_CLUSTER_INDEX_RESOURCE,
+    builtin_catalog, builtin_object_resource_accesses, builtin_resource_templates, builtin_roots,
+    builtin_service_ids, volume_required_services, water_required_services,
+    BUILTIN_RESOURCE_TEMPLATES, CUSTOM_FEATURE_ID, CUSTOM_VARIANT_ID, DECAL_CLUSTER_INDEX_RESOURCE,
     DECAL_CLUSTER_RANGE_RESOURCE, DECAL_FEATURE_ID, DECAL_INSTANCE_RESOURCE,
     DECAL_MATERIAL_RESOURCE, DECAL_RECEIVER_RESOURCE, DECAL_RESOLVE_PASS, DECAL_RESOLVE_RESOURCE,
     HAIR_DEEP_OPACITY_RESOURCE, HAIR_FEATURE_ID, HAIR_STRAND_RESOURCE, HAIR_VISIBILITY_RESOURCE,

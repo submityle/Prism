@@ -1315,6 +1315,13 @@ pub const fn builtin_resource_templates() -> &'static [ResourceTemplate] {
     BUILTIN_RESOURCE_TEMPLATES
 }
 
+/// Object-scoped access declarations used by native lowering of built-ins.
+/// Keeping this table beside the catalog prevents a caller from accidentally
+/// compiling the built-in catalog with a different object-expansion policy.
+pub const fn builtin_object_resource_accesses() -> &'static [ObjectResourceAccess] {
+    BUILTIN_OBJECT_ACCESSES
+}
+
 /// Freeze the subsystem and response roots for the device lifetime.
 pub fn builtin_roots(catalog: &FeatureCatalog) -> Result<super::FrozenRoots, super::RootError> {
     super::FrozenRoots::from_build_profile(
